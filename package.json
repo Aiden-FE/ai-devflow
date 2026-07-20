@@ -1,0 +1,11 @@
+{
+  "name": "ai-devflow",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "test": "pnpm --recursive --if-present run test",
+    "lint": "pnpm --recursive --if-present run lint"
+  }
+}
