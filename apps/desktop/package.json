@@ -1,6 +1,8 @@
 {
   "name": "@ai-devflow/desktop",
   "version": "0.0.2",
+  "description": "本地优先的 AI 开发工作台：泳道看板 + 本地 Agent 桥接器在隔离 Git worktree 中真实执行任务。",
+  "author": "Aiden-FE",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -24,6 +26,7 @@
     "productName": "ai-devflow",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "asar": true,
+    "npmRebuild": false,
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -52,7 +55,7 @@
           ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.icns"
     },
     "win": {
       "target": [
