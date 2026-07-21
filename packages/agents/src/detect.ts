@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AgentDetection, AgentType } from '@ai-devflow/core';
+import { envWithAgentPath, resolveCommand } from './resolve-path.js';
 
 const execFileP = promisify(execFile);
 
@@ -13,7 +14,8 @@ export async function detectByCommand(
   try {
     const { stdout, stderr } = await execFileP(command, versionArgs, {
       timeout: 10_000,
-      env: process.env,
+      // GUI 启动的应用 PATH 缺失用户 shell 目录，这里增强后再检测。
+      env: envWithAgentPath(),
     });
     const out = (stdout || stderr).trim();
     const firstLine = out.split('\n')[0] ?? '';
@@ -21,7 +23,7 @@ export async function detectByCommand(
       agentType,
       available: true,
       version: firstLine || out || undefined,
-      path: command,
+      path: resolveCommand(command),
     };
   } catch (err) {
     const e = err as NodeJS.ErrnoException;

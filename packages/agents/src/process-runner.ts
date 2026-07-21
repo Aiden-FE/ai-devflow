@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { envWithAgentPath } from './resolve-path.js';
 
 export interface RawLine {
   stream: 'stdout' | 'stderr';
@@ -25,7 +26,8 @@ export function spawnAgentProcess(opts: {
 }): SpawnedProcess {
   const child: ChildProcess = spawn(opts.command, opts.args, {
     cwd: opts.cwd,
-    env: { ...process.env, ...opts.env },
+    // GUI 启动的应用 PATH 缺失用户 shell 目录（~/.local/bin、nvm 等），增强后再 spawn。
+    env: envWithAgentPath({ ...process.env, ...opts.env }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -117,7 +119,5 @@ async function* lineStream(stream: NodeJS.ReadableStream | null): AsyncIterable<
   if (buffer.length > 0) yield buffer;
 }
 
-/** 在 PATH 中解析可执行文件（同步 best-effort）。 */
-export function resolveCommand(command: string): string {
-  return command;
-}
+/** 在增强 PATH 中解析可执行文件绝对路径（委托 resolve-path，修复 GUI 应用 PATH 缺失）。 */
+export { resolveCommand } from './resolve-path.js';

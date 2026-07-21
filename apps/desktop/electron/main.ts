@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import { createServices } from './services.js';
 import { registerIpc } from './ipc.js';
 import { ElectronNotifier, parseDeepLink } from './notifier.js';
+import { resolveAgentPath } from '@ai-devflow/agents';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent } from './api.js';
 import type { ThemeMode } from '@ai-devflow/core';
@@ -109,6 +110,9 @@ app.whenReady().then(async () => {
   if (process.env.AI_DEVFLOW_USER_DATA) {
     app.setPath('userData', process.env.AI_DEVFLOW_USER_DATA);
   }
+  // GUI 启动不继承用户 shell PATH：增强 PATH（~/.local/bin、Homebrew、nvm 等），
+  // 使 Agent 桥接器能检测到终端里存在的 claude/codex/pi。全局生效并预热缓存。
+  process.env.PATH = resolveAgentPath();
   installCsp();
   registerDeepLinkProtocol();
 
