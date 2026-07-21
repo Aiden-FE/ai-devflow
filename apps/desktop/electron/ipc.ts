@@ -123,6 +123,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
         // 创建初始提交，否则 worktree 创建会因仓库无可用提交而失败。
         writeFileSync(join(projectDir, 'README.md'), `# ${input.name.trim()}\n`);
         execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'pipe' });
+        // 确保存在提交身份：CI 等环境可能无全局 git 身份。仅在当前无身份时设置仓库级回退身份，
+        // 已有全局身份则沿用用户身份（git config user.email 读取本地+全局，存在则退出码 0）。
+        try {
+          execFileSync('git', ['config', 'user.email'], { cwd: projectDir, stdio: 'pipe' });
+        } catch {
+          execFileSync('git', ['config', 'user.email', 'ai-devflow@local'], { cwd: projectDir, stdio: 'pipe' });
+          execFileSync('git', ['config', 'user.name', 'ai-devflow'], { cwd: projectDir, stdio: 'pipe' });
+        }
         execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: projectDir, stdio: 'pipe' });
       } catch (err) {
         // git 不可用不阻塞：仍创建项目，但提示用户。
