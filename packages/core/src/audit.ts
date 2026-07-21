@@ -29,19 +29,19 @@ export function auditTask(task: Task, ctx: AuditContext): AuditFinding[] {
     if (!ctx.hasExecutionRecord) t('warn', '任务进行中但无执行记录');
   }
   if (task.status === 'in_review') {
-    if (ctx.hasTestResult === false) t('warn', '测试中但无测试结果');
-    if (ctx.testPassed === undefined) t('info', '测试中但测试结果未知');
+    if (ctx.hasTestResult === false) t('warn', '待验收但无测试结果');
+    if (ctx.testPassed === undefined) t('info', '待验收但测试结果未知');
   }
   if (task.status === 'archived') {
-    if (ctx.testPassed !== true) t('error', '已归档但测试未通过');
-    if (!ctx.hasArtifacts) t('warn', '已归档但无产物');
+    // 归档（验收通过并归档）必须有产物；不再用 testPassed 作为硬门禁。
+    if (!ctx.hasArtifacts) t('error', '已归档但无执行产物');
   }
   // 手动暂停（来自 in_review）无需检查点；Agent 运行中暂停（来自 in_progress）需要检查点才能恢复。
   if (task.status === 'awaiting_input' && task.pausedFrom !== 'in_review' && !ctx.hasCheckpoint) {
     t('error', '待沟通但无检查点，无法恢复');
   }
   if (task.status === 'backlog' && ctx.hasExecutionRecord) {
-    t('info', '需求池中存在历史执行记录');
+    t('info', '需求池中存在历史执行记录（backlog 已弃用，应迁移为 ready）');
   }
   return out;
 }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, useAsync, LoadingOrError, fmtTime } from '../lib.js';
 import { useT } from '../i18n/index.js';
+import { useTheme } from '../theme.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
@@ -12,9 +13,11 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { AgentDetection, NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, AiProviderConfig } from '@ai-devflow/core';
+import type { AgentDetection, NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, AiProviderConfig, ThemeMode, TaskRole, AgentType, Project, RoleAgentConfig, ProjectSettings, AgentCapabilitySupport } from '@ai-devflow/core';
 
-const NOTIF_STATUSES: TaskStatus[] = ['backlog', 'ready', 'in_progress', 'awaiting_input', 'in_review'];
+const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
+
+const ROLES: TaskRole[] = ['planner', 'coder', 'reviewer', 'tester'];
 
 export function SettingsPage(): React.ReactElement {
   const t = useT();
@@ -22,10 +25,96 @@ export function SettingsPage(): React.ReactElement {
     <div>
       <div className="mb-4"><h2 className="m-0 text-lg font-semibold">{t('settings.title')}</h2></div>
       <div className="flex flex-col gap-4">
+        <ThemeSection />
+        <UpdateSection />
         <AgentSection />
+        <AgentConfigSection />
         <NotificationRulesSection />
         <WebhooksSection />
         <AiProviderSection />
+      </div>
+    </div>
+  );
+}
+
+// ---- 应用更新（Part 6） ----
+function UpdateSection(): React.ReactElement {
+  const t = useT();
+  const { data, error, reload } = useAsync(() => api.updates.status(), []);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const unsub = api.events.subscribe((ev) => {
+      if (ev.kind === 'update-status') reload();
+    });
+    return unsub;
+  }, [reload]);
+
+  const check = async () => {
+    setBusy(true);
+    try { await api.updates.check(); await reload(); }
+    finally { setBusy(false); }
+  };
+
+  const status = data ?? { state: 'idle' as const, currentVersion: '' };
+  const state = status.state;
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <h3 className="m-0 text-sm font-semibold">{t('update.title')}</h3>
+      <div className="mt-2 flex items-center gap-2">
+        <Badge variant="outline">{t('settings.agents.col.version')}: {status.currentVersion || '-'}</Badge>
+        {status.version && <Badge variant="success">→ {status.version}</Badge>}
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        {state === 'idle' && t('update.idle')}
+        {state === 'checking' && t('update.checking')}
+        {state === 'available' && t('update.available', { v: status.version ?? '' })}
+        {state === 'downloading' && t('update.downloading', { p: Math.round(status.progress?.percent ?? 0) })}
+        {state === 'downloaded' && t('update.downloaded', { v: status.version ?? '' })}
+        {state === 'no-update' && t('update.noUpdate')}
+        {state === 'error' && t('update.error', { msg: status.error ?? '' })}
+      </div>
+      {state === 'downloading' && (
+        <div className="mt-2 h-1.5 w-full overflow-hidden rounded bg-secondary">
+          <div className="h-full bg-primary transition-all" style={{ width: `${status.progress?.percent ?? 0}%` }} />
+        </div>
+      )}
+      {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
+      <div className="mt-3 flex gap-2">
+        {state === 'downloaded' ? (
+          <>
+            <Button size="sm" onClick={() => api.updates.installUpdate()}>{t('update.installNow')}</Button>
+            <Button size="sm" variant="ghost" onClick={reload}>{t('update.later')}</Button>
+          </>
+        ) : (
+          <Button size="sm" variant="outline" disabled={busy || state === 'checking'} onClick={check}>
+            {busy || state === 'checking' ? t('update.checking') : t('update.check')}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- 主题（Part 1） ----
+function ThemeSection(): React.ReactElement {
+  const t = useT();
+  const { mode, setMode } = useTheme();
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <h3 className="m-0 text-sm font-semibold">{t('settings.theme')}</h3>
+      <p className="text-xs text-muted-foreground">{t('settings.theme.hint')}</p>
+      <div className="mt-2 flex flex-col gap-1.5">
+        <Label>{t('settings.theme')}</Label>
+        <Select value={mode} onValueChange={(v) => setMode(v as ThemeMode)}>
+          <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="system">{t('settings.theme.system')}</SelectItem>
+            <SelectItem value="light">{t('settings.theme.light')}</SelectItem>
+            <SelectItem value="dark">{t('settings.theme.dark')}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
     </div>
   );
@@ -64,6 +153,161 @@ function AgentSection(): React.ReactElement {
       </LoadingOrError>
     </div>
   );
+}
+
+// ---- 项目 Agent 能力配置（Part 2） ----
+function AgentConfigSection(): React.ReactElement {
+  const t = useT();
+  const projectsQ = useAsync(() => api.projects.list(), []);
+  const capsQ = useAsync(() => api.agents.capabilities(), []);
+  const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  const projects = projectsQ.data ?? [];
+  const activeProjectId = projectId ?? projects[0]?.id;
+
+  const settingsQ = useAsync(
+    () => (activeProjectId ? api.settings.getProjectSettings(activeProjectId) : Promise.resolve({} as ProjectSettings)),
+    [activeProjectId],
+  );
+  const [draft, setDraft] = useState<ProjectSettings>({});
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (settingsQ.data) {
+      setDraft(settingsQ.data);
+      setSaved(false);
+    }
+  }, [settingsQ.data, activeProjectId]);
+
+  const caps = (capsQ.data ?? {}) as Partial<Record<AgentType, AgentCapabilitySupport>>;
+
+  const setRole = (role: TaskRole, patch: Partial<RoleAgentConfig>) => {
+    setDraft((prev) => ({
+      ...prev,
+      roleConfigs: { ...prev.roleConfigs, [role]: { ...(prev.roleConfigs?.[role] ?? {}), ...patch } },
+    }));
+    setSaved(false);
+  };
+
+  const save = async () => {
+    if (!activeProjectId) return;
+    setError(undefined);
+    try {
+      await api.settings.updateProjectSettings(activeProjectId, draft);
+      setSaved(true);
+      settingsQ.reload();
+    } catch (e) { setError((e as Error).message); }
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <h3 className="m-0 text-sm font-semibold">{t('settings.agentConfig')}</h3>
+      <p className="text-xs text-muted-foreground">{t('settings.agentConfig.hint')}</p>
+      <LoadingOrError loading={projectsQ.loading} error={projectsQ.error} data={projectsQ.data} reload={projectsQ.reload}>
+        {(projs: Project[]) => (
+          <div className="mt-2 flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label>{t('settings.agentConfig.project')}</Label>
+              <Select value={activeProjectId ?? ''} onValueChange={setProjectId}>
+                <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {projs.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            {ROLES.map((role) => {
+              const cfg = draft.roleConfigs?.[role] ?? {};
+              const agent: AgentType | '' = cfg.agentType ?? '';
+              const effAgent = (agent || 'claude_code') as AgentType;
+              const support = caps[effAgent];
+              return (
+                <div key={role} className="rounded-md border border-border p-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="text-sm font-medium">{t(`role.${role}`)}</span>
+                    <div className="flex-1" />
+                    <Select value={agent} onValueChange={(v) => setRole(role, { agentType: (v || undefined) as AgentType | undefined })}>
+                      <SelectTrigger className="h-8 w-44"><SelectValue placeholder={t('agent.default')} /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">{t('agent.default')}</SelectItem>
+                        <SelectItem value="claude_code">{t('agent.claude_code')}</SelectItem>
+                        <SelectItem value="codex">{t('agent.codex')}</SelectItem>
+                        <SelectItem value="pi">{t('agent.pi')}</SelectItem>
+                        <SelectItem value="test">{t('agent.test')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    <CapabilityField
+                      label={t('settings.agentConfig.tools')}
+                      value={(cfg.tools ?? []).join(',')}
+                      supported={support ? support.tools : undefined}
+                      hint={support && !support.tools ? t('settings.agentConfig.unsupported') : undefined}
+                      onChange={(v) => setRole(role, { tools: splitCsv(v) })}
+                    />
+                    <CapabilityField
+                      label={t('settings.agentConfig.disallowedTools')}
+                      value={(cfg.disallowedTools ?? []).join(',')}
+                      supported={support ? support.tools : undefined}
+                      hint={support && !support.tools ? t('settings.agentConfig.unsupported') : undefined}
+                      onChange={(v) => setRole(role, { disallowedTools: splitCsv(v) })}
+                    />
+                    <CapabilityField
+                      label={t('settings.agentConfig.plugins')}
+                      value={(cfg.plugins ?? []).join(',')}
+                      supported={support ? support.plugins : undefined}
+                      hint={support && !support.plugins ? t('settings.agentConfig.unsupported') : undefined}
+                      onChange={(v) => setRole(role, { plugins: splitCsv(v) })}
+                    />
+                    <CapabilityField
+                      label={t('settings.agentConfig.skills')}
+                      value={(cfg.skills ?? []).join(',')}
+                      supported={support ? support.skills !== false : undefined}
+                      hint={support && support.skills === false ? t('settings.agentConfig.unsupported') : undefined}
+                      onChange={(v) => setRole(role, { skills: splitCsv(v) })}
+                    />
+                    <label className={`flex items-center gap-1.5 text-xs ${support && !support.approval ? 'opacity-50' : ''}`}>
+                      <Checkbox
+                        checked={cfg.requireApproval === true}
+                        disabled={!!support && !support.approval}
+                        onCheckedChange={(v) => setRole(role, { requireApproval: v === true })}
+                      />
+                      {t('settings.agentConfig.requireApproval')}
+                      {support && !support.approval && <span className="text-muted-foreground">({t('settings.agentConfig.unsupported')})</span>}
+                    </label>
+                  </div>
+                </div>
+              );
+            })}
+            {error && <div className="text-xs text-destructive">{error}</div>}
+            {saved && !error && <div className="text-xs text-ok">{t('settings.agentConfig.saved')}</div>}
+            <div>
+              <Button size="sm" onClick={save}>{t('common.save')}</Button>
+            </div>
+          </div>
+        )}
+      </LoadingOrError>
+    </div>
+  );
+}
+
+function CapabilityField({ label, value, supported, hint, onChange }: {
+  label: string;
+  value: string;
+  supported?: boolean;
+  hint?: string;
+  onChange: (v: string) => void;
+}): React.ReactElement {
+  const disabled = supported === false;
+  return (
+    <div className={`flex flex-col gap-1 ${disabled ? 'opacity-50' : ''}`}>
+      <Label className="text-xs">{label}{hint ? <span className="ml-1 text-muted-foreground">({hint})</span> : null}</Label>
+      <Input value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs" />
+    </div>
+  );
+}
+
+function splitCsv(v: string): string[] {
+  return v.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
 function NotificationRulesSection(): React.ReactElement {

@@ -42,12 +42,13 @@ describe('gates', () => {
     ).toBe(true);
   });
 
-  it('requires test pass + audit for in_review -> archived', () => {
-    expect(canTransition({ status: 'in_review' }, 'archived', ctx({ testPassed: true, auditOk: false })).ok).toBe(false);
-    expect(canTransition({ status: 'in_review' }, 'archived', ctx({ testPassed: false, auditOk: true })).ok).toBe(false);
-    expect(
-      canTransition({ status: 'in_review' }, 'archived', ctx({ testPassed: true, auditOk: true })).ok,
-    ).toBe(true);
+  it('requires explicit acceptance + artifacts for in_review -> archived (no drag bypass)', () => {
+    // 普通迁移（如拖拽）无法提供 accepted -> 拒绝，不得绕过人工验收
+    expect(canTransition({ status: 'in_review' }, 'archived', ctx({ hasArtifacts: true })).ok).toBe(false);
+    // 有验收但无产物 -> 拒绝
+    expect(canTransition({ status: 'in_review' }, 'archived', ctx({ accepted: true, hasArtifacts: false })).ok).toBe(false);
+    // 验收 + 产物 -> 允许
+    expect(canTransition({ status: 'in_review' }, 'archived', ctx({ accepted: true, hasArtifacts: true })).ok).toBe(true);
   });
 
   it('allows in_progress -> awaiting_input without preconditions', () => {

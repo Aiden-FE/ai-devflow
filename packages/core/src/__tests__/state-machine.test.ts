@@ -34,6 +34,13 @@ describe('state machine', () => {
     expect(isLegalTransition('archived', 'backlog')).toBe(false);
   });
 
+  it('removes backlog as a target (需求池 removed)', () => {
+    // ready 不再可退回 backlog；awaiting_input 退回 ready 而非 backlog
+    expect(isLegalTransition('ready', 'backlog')).toBe(false);
+    expect(isLegalTransition('awaiting_input', 'backlog')).toBe(false);
+    expect(isLegalTransition('awaiting_input', 'ready')).toBe(true);
+  });
+
   it('legalTargets only returns legal next states', () => {
     expect(legalTargets('backlog')).toEqual(['ready']);
     expect(legalTargets('archived')).toEqual([]);

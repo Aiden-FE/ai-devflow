@@ -7,9 +7,8 @@ import { useT } from './i18n/index.js';
 
 export const api = window.api;
 
-/** 五条泳道（已移除"待沟通"独立泳道；"待测试"更名为"测试中"）。 */
+/** 四条可见泳道：ready -> in_progress -> in_review(待验收) -> archived。backlog（需求池）已移除；awaiting_input 为暂停标识不独立成道。 */
 export const LANES: { status: TaskStatus; labelKey: string }[] = [
-  { status: 'backlog', labelKey: 'status.backlog' },
   { status: 'ready', labelKey: 'status.ready' },
   { status: 'in_progress', labelKey: 'status.in_progress' },
   { status: 'in_review', labelKey: 'status.in_review' },
@@ -17,8 +16,8 @@ export const LANES: { status: TaskStatus; labelKey: string }[] = [
 ];
 
 /**
- * 任务所属的泳道：awaiting_input（待沟通）任务回到其暂停前的来源泳道展示，
- * 以"待沟通"标识区分；其余任务按自身状态归属。
+ * 任务所属的泳道：awaiting_input（待沟通/待授权）任务回到其暂停前的来源泳道展示，
+ * 以“待沟通”标识区分；其余任务按自身状态归属。
  */
 export function laneForTask(task: Task): TaskStatus {
   if (task.status === 'awaiting_input') return task.pausedFrom ?? 'in_progress';

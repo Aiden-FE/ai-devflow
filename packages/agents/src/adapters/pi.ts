@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentDetection } from '@ai-devflow/core';
+import type { AgentEvent, AgentDetection, AgentCapabilitySupport } from '@ai-devflow/core';
 import type { AgentAdapter, AgentRun } from '../types.js';
 import { detectByCommand } from '../detect.js';
 import { spawnAgentProcess, logEventsFromLine } from './base.js';
@@ -23,6 +23,11 @@ export class PiAdapter implements AgentAdapter {
 
   detect(): Promise<AgentDetection> {
     return detectByCommand('pi', this.opts.executable ?? DEFAULT_CMD, ['--version']);
+  }
+
+  /** Pi CLI 的能力未经验证（本机未安装），如实声明均不支持；安装后再行评估。 */
+  capabilities(): AgentCapabilitySupport {
+    return { tools: false, plugins: false, skills: false, approval: false };
   }
 
   async run(req: import('@ai-devflow/core').AgentRunRequest): Promise<AgentRun> {

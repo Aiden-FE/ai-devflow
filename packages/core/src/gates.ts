@@ -33,11 +33,13 @@ export function canTransition(
   // 源状态特定门禁（例如进入 in_review 需要产物）
   // 从待沟通恢复到 in_review 时不重复要求产物（任务此前已具备）。
   if (target === 'in_review' && task.status !== 'awaiting_input' && !ctx.hasArtifacts) {
-    reasons.push('进入测试中前需有执行产物');
+    reasons.push('进入待验收前需有执行产物');
   }
   if (target === 'archived') {
-    if (ctx.testPassed !== true) reasons.push('归档前需测试通过');
-    if (ctx.auditOk !== true) reasons.push('归档前需状态审计通过');
+    // 归档（验收通过并归档）：必须显式人工验收 + 有执行产物。
+    // 不再用“存在执行记录”伪装 testPassed、auditOk 固定 true。
+    if (ctx.accepted !== true) reasons.push('归档需经人工验收（验收通过并归档）');
+    if (!ctx.hasArtifacts) reasons.push('归档前需有执行产物');
   }
   if (target === 'in_progress' && task.status === 'ready' && !ctx.hasAgentAssigned) {
     reasons.push('开始执行前需分配 Agent');
@@ -45,7 +47,7 @@ export function canTransition(
   if (target === 'ready' && !ctx.hasAcceptance) {
     reasons.push('进入待开发前需有验收标准');
   }
-  // 从待沟通恢复（无论回到开发中还是测试中）都要求先有用户回答。
+  // 从待沟通恢复（无论回到开发中还是待验收）都要求先有用户回答。
   if (
     task.status === 'awaiting_input' &&
     (target === 'in_progress' || target === 'in_review') &&
@@ -60,11 +62,12 @@ export function canTransition(
 /** 目标状态的通用门禁。 */
 const STATUS_GATES: Partial<Record<TaskStatus, (ctx: GateContext) => GateResult>> = {
   archived: (ctx) => ({
-    ok: ctx.testPassed === true && ctx.auditOk === true,
+    // 验收归档门禁：显式人工验收 + 有执行产物（拒绝拖拽绕过）。
+    ok: ctx.accepted === true && ctx.hasArtifacts === true,
     reasons:
-      ctx.testPassed === true && ctx.auditOk === true
+      ctx.accepted === true && ctx.hasArtifacts === true
         ? []
-        : ['归档需测试通过且审计通过'],
+        : ['归档需人工验收通过且有执行产物'],
   }),
 };
 
@@ -78,10 +81,10 @@ export function validateTransition(
   return { allowed: r.ok, reasons: r.reasons };
 }
 
-/** 测试失败退回开发：要求附证据。 */
+/** 验收不通过退回开发：要求附证据。 */
 export function canReturnToDev(ctx: GateContext): GateResult {
   if (ctx.testFailedWithEvidence !== true) {
-    return { ok: false, reasons: ['测试失败退回开发需附失败证据'] };
+    return { ok: false, reasons: ['验收不通过退回开发需附失败证据'] };
   }
   return { ok: true, reasons: [] };
 }

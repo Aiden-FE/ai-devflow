@@ -4,10 +4,11 @@ import type {
   AgentDetection,
   AgentRunRequest,
   AgentEvent,
+  AgentCapabilitySupport,
   Checkpoint,
 } from '@ai-devflow/core';
 
-export type { AgentType, AgentDetection, AgentRunRequest, AgentEvent, Checkpoint };
+export type { AgentType, AgentDetection, AgentRunRequest, AgentEvent, AgentCapabilitySupport, Checkpoint };
 
 export interface AgentRun {
   /** 事件流：调度器逐条消费并落库/转发 Renderer。 */
@@ -24,8 +25,16 @@ export interface AgentAdapter {
   readonly id: AgentType;
   /** 检测本机是否具备运行条件。 */
   detect(): Promise<AgentDetection>;
-  /** 启动一次执行。resumeFrom/userInput 用于待沟通恢复。 */
+  /** 启动一次执行。resumeFrom/userInput 用于待沟通恢复；capabilities 为解析后的能力配置。 */
   run(req: AgentRunRequest): Promise<AgentRun>;
+  /**
+   * 声明本适配器支持的能力。不支持的字段在 UI 禁用并说明，不静默忽略。
+   * - tools: 是否支持工具白名单限制
+   * - plugins: 是否支持插件加载
+   * - skills: 'all-or-none' 仅支持全开/全关；false 不支持
+   * - approval: 是否支持把权限请求转为人工 approval_request
+   */
+  capabilities(): AgentCapabilitySupport;
 }
 
 /** 适配器构造时可读的配置。 */

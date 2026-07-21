@@ -6,8 +6,13 @@ import {
   detectByCommand,
   parseClaudeLine,
   parseCodexLine,
+  ClaudeCodeAdapter,
+  CodexAdapter,
+  PiAdapter,
+  claudeCapabilityArgs,
+  claudePermissionMode,
 } from '../index.js';
-import type { AgentRunRequest } from '@ai-devflow/core';
+import type { AgentRunRequest, AgentCapabilities } from '@ai-devflow/core';
 
 describe('registry', () => {
   it('createDefaultRegistry registers all four adapters', () => {
@@ -231,5 +236,107 @@ describe('codex line parsing', () => {
 
   it('plain info line maps to info', () => {
     expect((L('all good')[0] as { level: string }).level).toBe('info');
+  });
+});
+
+describe('adapter capability declarations', () => {
+  it('claude supports tools/plugins/skills(all-or-none)/approval', () => {
+    const c = new ClaudeCodeAdapter().capabilities();
+    expect(c.tools).toBe(true);
+    expect(c.plugins).toBe(true);
+    expect(c.skills).toBe('all-or-none');
+    expect(c.approval).toBe(true);
+  });
+  it('codex declares unsupported (sandbox is its model, not per-tool)', () => {
+    const c = new CodexAdapter().capabilities();
+    expect(c.tools).toBe(false);
+    expect(c.plugins).toBe(false);
+    expect(c.approval).toBe(false);
+  });
+  it('pi declares unsupported (not installed / unverified)', () => {
+    const c = new PiAdapter().capabilities();
+    expect(c.tools).toBe(false);
+    expect(c.approval).toBe(false);
+  });
+  it('test adapter declares full support for protocol testing', () => {
+    const c = new ControllableTestAdapter().capabilities();
+    expect(c.tools).toBe(true);
+    expect(c.approval).toBe(true);
+  });
+});
+
+describe('claude capability -> CLI args (no fabricated flags)', () => {
+  it('permission mode: manual when requireApproval, else acceptEdits (never bypass)', () => {
+    expect(claudePermissionMode({ agentType: 'claude_code', requireApproval: true } as AgentCapabilities)).toBe('manual');
+    expect(claudePermissionMode({ agentType: 'claude_code' } as AgentCapabilities)).toBe('acceptEdits');
+    expect(claudePermissionMode(undefined)).toBe('acceptEdits');
+  });
+  it('maps tools/disallowedTools/plugins/skills to real flags', () => {
+    const args = claudeCapabilityArgs({
+      agentType: 'claude_code',
+      tools: ['Bash', 'Edit'],
+      disallowedTools: ['WebFetch'],
+      plugins: ['/local/plugin', 'https://example.com/p.zip'],
+      skills: [],
+    } as AgentCapabilities);
+    expect(args).toEqual([
+      '--allowedTools', 'Bash,Edit',
+      '--disallowedTools', 'WebFetch',
+      '--plugin-dir', '/local/plugin',
+      '--plugin-url', 'https://example.com/p.zip',
+      '--disable-slash-commands',
+    ]);
+  });
+  it('non-empty skills list is left enabled (all-or-none, no per-skill)', () => {
+    const args = claudeCapabilityArgs({ agentType: 'claude_code', skills: ['summarize'] } as AgentCapabilities);
+    expect(args.some((a) => a === '--disable-slash-commands')).toBe(false);
+  });
+});
+
+describe('claude approval surfacing', () => {
+  it('emits approval_request for tool_use when requireApproval', () => {
+    const ev = parseClaudeLine(
+      { stream: 'stdout', text: JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'rm -rf /' } }] } }) },
+      { requireApproval: true },
+    );
+    const ar = ev.find((e) => e.type === 'approval_request') as Extract<import('@ai-devflow/core').AgentEvent, { type: 'approval_request' }> | undefined;
+    expect(ar).toBeDefined();
+    expect(ar!.toolName).toBe('Bash');
+    expect(ar!.toolUseId).toBe('tu1');
+    expect(ar!.input).toContain('rm -rf');
+  });
+  it('does not emit approval_request when requireApproval is false', () => {
+    const ev = parseClaudeLine(
+      { stream: 'stdout', text: JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }] } }) },
+      { requireApproval: false },
+    );
+    expect(ev.some((e) => e.type === 'approval_request')).toBe(false);
+  });
+});
+
+describe('test adapter approval + interactionResponse resume', () => {
+  const req: AgentRunRequest = { taskId: 't1', prompt: 'p', cwd: '/tmp' };
+  it('emits approval_request then resumes done on allow', async () => {
+    const a = new ControllableTestAdapter({
+      script: (r) => {
+        if (r.interactionResponse?.kind === 'approval') {
+          return r.interactionResponse.value === 'allow'
+            ? [{ type: 'log', level: 'info', text: 'approved', t: 0 }, { type: 'done', summary: 'ok', t: 0 }]
+            : [{ type: 'error', message: 'denied', recoverable: false, t: 0 }];
+        }
+        return [
+          { type: 'log', level: 'info', text: 'want bash', t: 0 },
+          { type: 'approval_request', toolName: 'Bash', toolUseId: 'tu1', description: 'rm', t: 0 },
+        ];
+      },
+    });
+    const r1 = await a.run(req);
+    const e1 = [];
+    for await (const ev of r1.events) e1.push(ev);
+    expect(e1.at(-1)!.type).toBe('approval_request');
+    const r2 = await a.run({ ...req, interactionResponse: { kind: 'approval', value: 'allow' } });
+    const e2 = [];
+    for await (const ev of r2.events) e2.push(ev);
+    expect(e2.at(-1)!.type).toBe('done');
   });
 });

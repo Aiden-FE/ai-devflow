@@ -1,12 +1,12 @@
 // IPC 处理器注册。每个 ns:method 对应一个显式通道；不存在任意命令执行入口。
 // 安全：路径校验、状态门禁、敏感字段加密落盘。
-import { ipcMain, dialog, BrowserWindow } from 'electron';
+import { ipcMain, dialog, BrowserWindow, nativeTheme } from 'electron';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
-import type { AiChatMessage, Task, TaskStatus } from '@ai-devflow/core';
+import type { AiChatMessage, Task, TaskStatus, ThemeMode } from '@ai-devflow/core';
 import {
   randomId,
   now,
@@ -18,6 +18,20 @@ import {
 import { chatStream, proposeTasks, proposeRequirement } from './ai.js';
 
 const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
+
+/** 读取持久化主题模式（默认 system）。 */
+function readThemeMode(): ThemeMode {
+  const raw = servicesRef?.repos.credentials.get('theme');
+  return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'system';
+}
+
+/** 计算解析后的主题：system -> 跟随系统；否则固定。 */
+function resolvedTheme(mode: ThemeMode): 'light' | 'dark' {
+  return mode === 'system' ? (nativeTheme.shouldUseDarkColors ? 'dark' : 'light') : mode;
+}
+
+// services 引用（供 theme 同步处理器在注册前读取）。registerIpc 时赋值。
+let servicesRef: Services | undefined;
 
 /**
  * 从本地路径或 Git URL 推导项目名（大驼峰）。
@@ -32,7 +46,11 @@ export function deriveProjectName(input: string): string {
 }
 
 export function registerIpc(services: Services, send: (e: StreamEvent) => void, sendAi: (e: AiStreamEvent) => void): void {
-  const { repos, orchestrator, timeoutEngine, webhooks, registry, encryptSecret, decryptSecret } = services;
+  servicesRef = services;
+  const { repos, orchestrator, timeoutEngine, webhooks, registry, encryptSecret, decryptSecret, updater } = services;
+
+  // ---- 主题：启动时应用持久化模式 ----
+  nativeTheme.themeSource = readThemeMode();
 
   // ---- 编排器事件转发 ----
   orchestrator.on('task-event', (e) => send({ kind: 'task-event', taskId: e.taskId, data: e.event }));
@@ -44,6 +62,16 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   orchestrator.on('task-retry', (e) => send({ kind: 'task-status', taskId: e.taskId, data: `retry:${e.reason}` }));
   orchestrator.on('task-recovered-failed', (e) => send({ kind: 'task-status', taskId: e.taskId, data: 'recovered-failed' }));
   orchestrator.on('task-awaiting', (e) => send({ kind: 'task-awaiting', taskId: e.taskId, data: null }));
+  orchestrator.on('task-message', (e) => send({ kind: 'task-message', taskId: e.taskId, data: e.message }));
+  orchestrator.on('task-interaction', (e) => send({ kind: 'task-interaction', taskId: e.taskId, data: e.interaction }));
+
+  // ---- 主题：系统主题变化时通知 Renderer（仅 system 模式下解析结果会变） ----
+  nativeTheme.on('updated', () => {
+    send({ kind: 'theme-changed', taskId: '', data: { mode: readThemeMode(), resolved: resolvedTheme(readThemeMode()) } });
+  });
+
+  // ---- 自动更新：状态变化转发 ----
+  updater.start((s) => send({ kind: 'update-status', taskId: '', data: s }));
 
   // ---- 项目 ----
   ipcMain.handle(channel('projects', 'list'), () => repos.projects.list());
@@ -170,7 +198,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       projectId: iteration.projectId,
       title: input.title,
       description: input.description,
-      status: 'backlog',
+      status: 'ready',
       agentType: input.agentType,
       role: input.role,
       stages: [{ id: 'impl', name: '实现', role: input.role }],
@@ -187,8 +215,8 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('tasks', 'update'), (_e, input: UpdateTaskInput) => {
     const t = repos.tasks.get(input.id);
     if (!t) throw new Error('任务不存在');
-    if (t.status !== 'backlog' && t.status !== 'ready') {
-      throw new Error('仅需求池/待开发状态的任务可编辑');
+    if (t.status !== 'ready') {
+      throw new Error('仅待开发状态的任务可编辑');
     }
     if (input.title !== undefined) t.title = input.title;
     if (input.description !== undefined) t.description = input.description;
@@ -202,6 +230,10 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('tasks', 'updateStatus'), (_e, id, target: TaskStatus) => {
     const t = repos.tasks.get(id);
     if (!t) throw new Error('任务不存在');
+    // 归档必须经人工验收入口（tasks.accept），看板拖拽不得绕过。
+    if (target === 'archived') {
+      throw new Error('归档需经“验收通过并归档”，不支持直接拖拽归档');
+    }
     const req = repos.requirements.get(t.requirementId);
     const hasExec = repos.executions.listByTask(id).length > 0;
     const hasCp = !!repos.checkpoints.getLatest(id);
@@ -209,19 +241,34 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       hasAcceptance: !!req?.acceptance,
       hasAgentAssigned: !!t.agentType,
       hasArtifacts: hasExec || hasCp,
-      testPassed: target === 'archived' ? hasExec : undefined,
-      auditOk: target === 'archived' ? true : undefined,
       hasUserAnswer: !!repos.pendingQuestions.get(id)?.answer,
     });
     if (!gate.ok) throw new Error(`状态迁移被门禁拒绝：${gate.reasons.join('; ')}`);
     repos.tasks.updateStatus(id, target, now());
+  });
+  // 验收通过并归档：唯一进入 archived 的入口。需 in_review + 有执行产物 + 显式人工验收。
+  ipcMain.handle(channel('tasks', 'accept'), async (_e, id) => {
+    const t = repos.tasks.get(id);
+    if (!t) throw new Error('任务不存在');
+    if (t.status !== 'in_review') throw new Error('仅待验收任务可验收归档');
+    const hasExec = repos.executions.listByTask(id).length > 0;
+    const gate = canTransition(t, 'archived', {
+      hasAcceptance: true,
+      hasAgentAssigned: !!t.agentType,
+      hasArtifacts: hasExec,
+      accepted: true,
+    });
+    if (!gate.ok) throw new Error(`验收归档被门禁拒绝：${gate.reasons.join('; ')}`);
+    repos.tasks.updateStatus(id, 'archived', now());
+    // 归档后清理 worktree
+    await orchestrator.cleanupWorktree(id).catch(() => {});
   });
   ipcMain.handle(channel('tasks', 'pause'), (_e, id) => {
     // 手动标记待沟通（暂停，等待澄清）。仅 in_progress/in_review 可暂停。
     const t = repos.tasks.get(id);
     if (!t) throw new Error('任务不存在');
     if (t.status !== 'in_progress' && t.status !== 'in_review') {
-      throw new Error('仅开发中/测试中任务可标记待沟通');
+      throw new Error('仅开发中/待验收任务可标记待沟通');
     }
     const gate = canTransition(t, 'awaiting_input', { hasAcceptance: true, hasAgentAssigned: true, hasArtifacts: true });
     if (!gate.ok) throw new Error(`无法暂停：${gate.reasons.join('; ')}`);
@@ -229,11 +276,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   });
   ipcMain.handle(channel('tasks', 'start'), (_e, id) => orchestrator.start(id));
   ipcMain.handle(channel('tasks', 'resume'), (_e, id, answer) => orchestrator.resume(id, answer));
+  ipcMain.handle(channel('tasks', 'resolveInteraction'), (_e, id, interactionId, response) => orchestrator.resolveInteraction(id, interactionId, response));
   ipcMain.handle(channel('tasks', 'cancel'), (_e, id) => orchestrator.cancel(id));
   ipcMain.handle(channel('tasks', 'retry'), (_e, id) => orchestrator.retry(id));
   ipcMain.handle(channel('tasks', 'logs'), (_e, id) => repos.logs.listByTask(id));
   ipcMain.handle(channel('tasks', 'executions'), (_e, id) => repos.executions.listByTask(id));
   ipcMain.handle(channel('tasks', 'pendingQuestion'), (_e, id) => repos.pendingQuestions.get(id));
+  ipcMain.handle(channel('tasks', 'messages'), (_e, id) => repos.taskMessages.listByTask(id));
+  ipcMain.handle(channel('tasks', 'interactions'), (_e, id) => repos.pendingInteractions.listByTask(id));
 
   // ---- Agent ----
   ipcMain.handle(channel('agents', 'detectAll'), async () => {
@@ -241,6 +291,11 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     return Promise.all(types.map((t) => registry.require(t).detect()));
   });
   ipcMain.handle(channel('agents', 'detect'), (_e, type) => registry.require(type).detect());
+  ipcMain.handle(channel('agents', 'capabilities'), () => {
+    const out: Record<string, unknown> = {};
+    for (const a of registry.list()) out[a.id] = a.capabilities();
+    return out;
+  });
 
   // ---- 通知规则 ----
   ipcMain.handle(channel('notificationRules', 'list'), () => repos.notificationRules.list());
@@ -325,6 +380,21 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   });
   ipcMain.handle(channel('settings', 'getProjectSettings'), (_e, projectId) => repos.projects.get(projectId)?.settings ?? {});
   ipcMain.handle(channel('settings', 'updateProjectSettings'), (_e, projectId, settings) => repos.projects.updateSettings(projectId, settings));
+  ipcMain.handle(channel('settings', 'getTheme'), () => readThemeMode());
+  ipcMain.handle(channel('settings', 'setTheme'), (_e, mode: ThemeMode) => {
+    repos.credentials.upsert('theme', mode);
+    nativeTheme.themeSource = mode;
+    send({ kind: 'theme-changed', taskId: '', data: { mode, resolved: resolvedTheme(mode) } });
+  });
+  // 同步返回解析后主题，供 preload 在首绘前设置 <html> class（避免亮色启动闪黑）。
+  ipcMain.on('ai-devflow:theme:resolved', (e) => {
+    e.returnValue = resolvedTheme(readThemeMode());
+  });
+
+  // ---- 自动更新 ----
+  ipcMain.handle(channel('updates', 'check'), () => updater.check());
+  ipcMain.handle(channel('updates', 'installUpdate'), () => updater.installUpdate());
+  ipcMain.handle(channel('updates', 'status'), () => updater.status());
 
   // ---- AI 沟通：流式对话 + 结构化草稿（任务 / 需求） ----
   ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement'; context?: string }) => {

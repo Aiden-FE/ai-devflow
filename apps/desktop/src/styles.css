@@ -5,7 +5,7 @@
 
 /*
  * shadcn/ui 设计令牌（Tailwind v4 CSS-first，baseColor: zinc，new-york）。
- * 浅色定义在 :root，深色定义在 .dark（<html class="dark">，本应用恒为深色）。
+ * 浅色定义在 :root，深色定义在 .dark（<html class="dark">，由 ThemeProvider/preload 同步）。
  * @theme inline 将令牌映射为工具类（bg-background / text-foreground / border-border …）。
  * 另保留项目扩展令牌：ok/warn/err（语义色）、lane-*（泳道色）。
  */
@@ -29,6 +29,7 @@
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.92 0.004 286.32);
   --ring: oklch(0.705 0.015 286.067);
+  color-scheme: light;
 
   /* 语义色（浅/深通用） */
   --ok: #3fb950;
@@ -42,6 +43,10 @@
   --lane-in_review: #2cbac1;
   --lane-archived: #3fb950;
   --lane-awaiting: #a371f7;
+
+  /* 对话窗口：终端风背景（浅色用浅灰，深色用近黑） */
+  --console-bg: oklch(0.97 0.001 286.375);
+  --console-fg: oklch(0.2 0.005 285.823);
 }
 
 .dark {
@@ -64,6 +69,8 @@
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.552 0.016 285.938);
   color-scheme: dark;
+  --console-bg: oklch(0.16 0.005 285.823);
+  --console-fg: oklch(0.95 0 0);
 }
 
 @theme inline {
@@ -96,6 +103,8 @@
   --color-lane-in_review: var(--lane-in_review);
   --color-lane-archived: var(--lane-archived);
   --color-lane-awaiting: var(--lane-awaiting);
+  --color-console-bg: var(--console-bg);
+  --color-console-fg: var(--console-fg);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
