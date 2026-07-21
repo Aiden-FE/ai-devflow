@@ -1,6 +1,6 @@
 {
   "name": "ai-devflow",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "packageManager": "pnpm@11.15.1",
   "scripts": {
