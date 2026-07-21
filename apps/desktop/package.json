@@ -9,17 +9,18 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
+    "stage:pi": "node scripts/stage-pi-runtime.mjs",
     "build:electron": "node build-electron.mjs",
     "build:renderer": "vite build",
-    "build": "pnpm build:renderer && pnpm build:electron",
+    "build": "pnpm stage:pi && pnpm build:renderer && pnpm build:electron",
     "dev": "node scripts/dev.mjs",
     "start": "node scripts/start.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node scripts/run-e2e.mjs",
-    "package": "electron-builder --dir",
-    "release": "electron-builder",
-    "dist": "electron-builder --publish never"
+    "package": "pnpm build && electron-builder --dir",
+    "release": "pnpm build && electron-builder",
+    "dist": "pnpm build && electron-builder --publish never"
   },
   "build": {
     "appId": "com.ai-devflow.desktop",
@@ -36,6 +37,15 @@
       "dist-electron/**",
       "package.json",
       "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "build/pi-runtime",
+        "to": "pi-runtime",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",

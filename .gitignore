@@ -17,6 +17,9 @@ apps/desktop/dist-electron/
 !apps/desktop/build/
 !apps/desktop/build/**
 
+# 内置 Pi staging 产物（构建期由 stage:pi 生成，体积大，不入库）
+apps/desktop/build/pi-runtime/
+
 *.tsbuildinfo
 
 .env

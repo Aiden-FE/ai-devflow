@@ -1,0 +1,9 @@
+{
+  "name": "@ai-devflow/pi-runtime-bundle",
+  "version": "0.0.0",
+  "private": true,
+  "description": "固定版本的内置 Pi 运行时载体。仅承载精确依赖，供构建期 staging 到 extraResources；不含源码、脚本或测试。升级 Pi 必须通过应用 PR 更新此精确版本、锁文件、资源校验和与兼容性测试。",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10"
+  }
+}

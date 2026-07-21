@@ -19,3 +19,10 @@ export {
   type ProviderHealthStore,
   type ModelChoice,
 } from './provider-router.js';
+export {
+  BundledPiLocator,
+  type PiRuntimeManifest,
+  type VerifiedPiRuntime,
+  type BundledPiLocatorOptions,
+  type ExecLike,
+} from './runtime-locator.js';

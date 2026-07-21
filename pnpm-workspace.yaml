@@ -7,6 +7,12 @@ onlyBuiltDependencies:
 
 dangerouslyAllowAllBuilds: true
 
+# 运行脚本前不做依赖再校验：pnpm v11 默认会在运行脚本前执行 install --production 并在无 TTY 时
+# 弹「清理 modules 目录」确认而中断（stage:pi 嵌套 pnpm deploy 时尤其明显）。依赖安装统一由
+# 显式 `pnpm install` 管理。
+verifyDepsBeforeRun: false
+confirmModulesPurge: false
+
 # ai-sdk@4 依赖 zod-to-json-schema，但 3.25+ 改为 import "zod/v3"（zod v4 子路径），
 # 与本项目 zod@3.23 不兼容。锁定到 3.23.5（直接 import "zod"）。
 overrides:
