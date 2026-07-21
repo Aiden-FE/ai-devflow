@@ -7,7 +7,8 @@ const shared = {
   platform: 'node',
   format: 'cjs',
   target: 'node22',
-  external: ['electron'],
+  // electron: 运行时提供；electron-updater: 由 electron-builder 打包进 asar，运行时从 node_modules require（懒加载）。
+  external: ['electron', 'electron-updater'],
   sourcemap: 'linked',
   logLevel: 'info',
   outExtension: { '.js': '.cjs' },

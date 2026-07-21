@@ -18,6 +18,10 @@ import type {
   NotificationDelivery,
   WebhookConfig,
   WebhookDelivery,
+  TaskMessage,
+  PendingInteraction,
+  InteractionKind,
+  InteractionStatus,
 } from '@ai-devflow/core';
 import { tx } from './tx.js';
 
@@ -177,6 +181,41 @@ function mapWebhookDelivery(r: Record<string, unknown>): WebhookDelivery {
   };
 }
 
+function mapTaskMessage(r: Record<string, unknown>): TaskMessage {
+  return {
+    id: r.id as string,
+    taskId: r.task_id as string,
+    executionId: (r.execution_id as string | null) ?? undefined,
+    role: r.role as TaskMessage['role'],
+    kind: r.kind as TaskMessage['kind'],
+    text: (r.text as string | null) ?? undefined,
+    toolName: (r.tool_name as string | null) ?? undefined,
+    toolUseId: (r.tool_use_id as string | null) ?? undefined,
+    toolInput: (r.tool_input as string | null) ?? undefined,
+    toolResult: (r.tool_result as string | null) ?? undefined,
+    isError: (r.is_error as number) === 1,
+    t: r.t as number,
+  };
+}
+
+function mapPendingInteraction(r: Record<string, unknown>): PendingInteraction {
+  return {
+    id: r.id as string,
+    taskId: r.task_id as string,
+    kind: r.kind as InteractionKind,
+    messageId: (r.message_id as string | null) ?? undefined,
+    title: r.title as string,
+    detail: (r.detail as string | null) ?? undefined,
+    toolName: (r.tool_name as string | null) ?? undefined,
+    toolUseId: (r.tool_use_id as string | null) ?? undefined,
+    requestId: (r.request_id as string | null) ?? undefined,
+    status: r.status as InteractionStatus,
+    response: (r.response as string | null) ?? undefined,
+    createdAt: r.created_at as number,
+    resolvedAt: (r.resolved_at as number | null) ?? undefined,
+  };
+}
+
 // ---------- Repositories ----------
 
 export interface Repositories {
@@ -193,6 +232,8 @@ export interface Repositories {
   webhookConfigs: WebhookConfigsRepo;
   webhookDeliveries: WebhookDeliveriesRepo;
   credentials: CredentialsRepo;
+  taskMessages: TaskMessagesRepo;
+  pendingInteractions: PendingInteractionsRepo;
 }
 
 export function createRepositories(db: DatabaseSync): Repositories {
@@ -210,6 +251,8 @@ export function createRepositories(db: DatabaseSync): Repositories {
     webhookConfigs: webhookConfigsRepo(db),
     webhookDeliveries: webhookDeliveriesRepo(db),
     credentials: credentialsRepo(db),
+    taskMessages: taskMessagesRepo(db),
+    pendingInteractions: pendingInteractionsRepo(db),
   };
 }
 
@@ -644,6 +687,75 @@ function credentialsRepo(db: DatabaseSync): CredentialsRepo {
     },
     delete(key) {
       db.prepare('DELETE FROM credentials WHERE key=?').run(key);
+    },
+  };
+}
+
+export interface TaskMessagesRepo {
+  insert(m: TaskMessage): void;
+  listByTask(taskId: string, limit?: number): TaskMessage[];
+}
+function taskMessagesRepo(db: DatabaseSync): TaskMessagesRepo {
+  return {
+    insert(m) {
+      db.prepare(
+        `INSERT INTO task_messages(id,task_id,execution_id,role,kind,text,tool_name,tool_use_id,tool_input,tool_result,is_error,t)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        m.id, m.taskId, m.executionId ?? null, m.role, m.kind, m.text ?? null,
+        m.toolName ?? null, m.toolUseId ?? null, m.toolInput ?? null, m.toolResult ?? null,
+        m.isError ? 1 : 0, m.t,
+      );
+    },
+    listByTask(taskId, limit = 2000) {
+      // 时间正序，截断最近 N 条（与 logs 一致策略：DESC 取最近 N 再反转为正序）。
+      return (db
+        .prepare('SELECT * FROM (SELECT * FROM task_messages WHERE task_id=? ORDER BY t DESC LIMIT ?) ORDER BY t ASC')
+        .all(taskId, limit) as Record<string, unknown>[]).map(mapTaskMessage);
+    },
+  };
+}
+
+export interface PendingInteractionsRepo {
+  insert(i: PendingInteraction): void;
+  get(id: string): PendingInteraction | undefined;
+  getPendingForTask(taskId: string): PendingInteraction | undefined;
+  listByTask(taskId: string): PendingInteraction[];
+  resolve(id: string, status: InteractionStatus, response: string | undefined, at: number): void;
+  delete(id: string): void;
+}
+function pendingInteractionsRepo(db: DatabaseSync): PendingInteractionsRepo {
+  return {
+    insert(i) {
+      db.prepare(
+        `INSERT INTO pending_interactions(id,task_id,kind,message_id,title,detail,tool_name,tool_use_id,request_id,status,response,created_at,resolved_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        i.id, i.taskId, i.kind, i.messageId ?? null, i.title, i.detail ?? null,
+        i.toolName ?? null, i.toolUseId ?? null, i.requestId ?? null, i.status, i.response ?? null,
+        i.createdAt, i.resolvedAt ?? null,
+      );
+    },
+    get(id) {
+      const r = db.prepare('SELECT * FROM pending_interactions WHERE id=?').get(id) as Record<string, unknown> | undefined;
+      return r ? mapPendingInteraction(r) : undefined;
+    },
+    getPendingForTask(taskId) {
+      const r = db.prepare(
+        "SELECT * FROM pending_interactions WHERE task_id=? AND status='pending' ORDER BY created_at ASC LIMIT 1",
+      ).get(taskId) as Record<string, unknown> | undefined;
+      return r ? mapPendingInteraction(r) : undefined;
+    },
+    listByTask(taskId) {
+      return (db.prepare('SELECT * FROM pending_interactions WHERE task_id=? ORDER BY created_at ASC').all(taskId) as Record<string, unknown>[]).map(mapPendingInteraction);
+    },
+    resolve(id, status, response, at) {
+      db.prepare('UPDATE pending_interactions SET status=?, response=?, resolved_at=? WHERE id=?').run(
+        status, response ?? null, at, id,
+      );
+    },
+    delete(id) {
+      db.prepare('DELETE FROM pending_interactions WHERE id=?').run(id);
     },
   };
 }

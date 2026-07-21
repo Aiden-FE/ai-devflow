@@ -4,10 +4,15 @@ node_modules/
 .pnpm-store/
 
 dist/
+release/
 build/
 out/
 coverage/
 .vite/
+
+# electron-builder buildResources（应用图标）需入库
+!apps/desktop/build/
+!apps/desktop/build/**
 
 *.tsbuildinfo
 

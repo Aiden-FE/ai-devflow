@@ -54,7 +54,7 @@ export const MIGRATIONS: Migration[] = [
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
         title TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'backlog',
+        status TEXT NOT NULL DEFAULT 'ready',
         agent_type TEXT,
         role TEXT NOT NULL DEFAULT 'coder',
         stages_json TEXT NOT NULL DEFAULT '[]',
@@ -191,6 +191,57 @@ export const MIGRATIONS: Migration[] = [
     description: 'purge legacy thinking_tokens log spam (suppressed in parser since)',
     sql: `
       DELETE FROM log_entries WHERE text = 'system: thinking_tokens';
+    `,
+  },
+  {
+    version: 6,
+    description: 'remove backlog (需求池): migrate legacy backlog tasks/rules to ready',
+    sql: `
+      -- 需求池已移除：新建任务直接进入 ready。历史 backlog 任务迁为 ready。
+      UPDATE tasks SET status = 'ready' WHERE status = 'backlog';
+      -- 待沟通暂停来源若指向 backlog，迁为 ready（避免遗留无效来源）。
+      UPDATE tasks SET paused_from = 'ready' WHERE paused_from = 'backlog';
+      -- backlog 通知规则迁为 ready（安全迁移，保留规则）。
+      UPDATE notification_rules SET status = 'ready' WHERE status = 'backlog';
+    `,
+  },
+  {
+    version: 7,
+    description: 'task conversation messages + generic pending interactions',
+    sql: `
+      CREATE TABLE IF NOT EXISTS task_messages (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        execution_id TEXT REFERENCES execution_records(id) ON DELETE SET NULL,
+        role TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        text TEXT,
+        tool_name TEXT,
+        tool_use_id TEXT,
+        tool_input TEXT,
+        tool_result TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0,
+        t INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, t);
+
+      CREATE TABLE IF NOT EXISTS pending_interactions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        message_id TEXT,
+        title TEXT NOT NULL,
+        detail TEXT,
+        tool_name TEXT,
+        tool_use_id TEXT,
+        request_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        response TEXT,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_interactions_task ON pending_interactions(task_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_interactions_pending ON pending_interactions(task_id, status);
     `,
   },
 ];

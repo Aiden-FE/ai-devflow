@@ -6,15 +6,21 @@ import { execFileSync } from 'node:child_process';
 
 // Mock 'electron'：捕获 ipcMain.handle 注册的处理器，其余为 no-op。
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
+const syncHandlers = new Map<string, (e: unknown) => unknown>();
 vi.mock('electron', () => ({
-  ipcMain: { handle: (ch: string, fn: (...args: unknown[]) => unknown) => handlers.set(ch, fn), on: () => {} },
+  ipcMain: {
+    handle: (ch: string, fn: (...args: unknown[]) => unknown) => handlers.set(ch, fn),
+    on: (ch: string, fn: (e: unknown) => unknown) => syncHandlers.set(ch, fn),
+  },
+  ipcRenderer: { sendSync: () => 'dark' },
   dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
   safeStorage: {
     isEncryptionAvailable: () => false,
     encryptString: (s: string) => Buffer.from(s, 'utf8'),
     decryptString: (b: { toString: () => string }) => Buffer.from(b.toString(), 'base64').toString('utf8'),
   },
-  app: { getPath: () => '/tmp', isPackaged: false, whenReady: () => Promise.resolve(), on: () => {} },
+  app: { getPath: () => '/tmp', isPackaged: false, getVersion: () => '0.0.0', whenReady: () => Promise.resolve(), on: () => {} },
+  nativeTheme: { themeSource: 'system', shouldUseDarkColors: false, on: () => {} },
   Notification: class { on() { return this; } show() {} },
   BrowserWindow: class { static fromWebContents() { return null; } },
   session: { defaultSession: { webRequest: { onHeadersReceived() {} } } },
@@ -23,16 +29,17 @@ vi.mock('electron', () => ({
 }));
 
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import { AgentRegistry, ControllableTestAdapter, type AgentAdapter, type AgentRun } from '@ai-devflow/agents';
+import { AgentRegistry, ControllableTestAdapter, ClaudeCodeAdapter, CodexAdapter, PiAdapter, type AgentAdapter, type AgentRun } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, NullNotifier } from '@ai-devflow/notifications';
 import { encryptSecret, decryptSecret } from '../credentials.js';
 import { registerIpc, deriveProjectName } from '../ipc.js';
 import type { Services } from '../services.js';
+import type { Updater } from '../updater.js';
 import type { StreamEvent } from '../api.js';
 import type { DatabaseSync } from '@ai-devflow/persistence';
 import { now } from '@ai-devflow/core';
-import type { AgentType, AgentDetection, AgentRunRequest } from '@ai-devflow/core';
+import type { AgentType, AgentDetection, AgentRunRequest, AgentCapabilitySupport } from '@ai-devflow/core';
 
 // 假适配器：detect 恒可用，run 不产出（仅用于 detectAll 测试，不调真实 CLI）。
 class FakeAdapter implements AgentAdapter {
@@ -41,7 +48,16 @@ class FakeAdapter implements AgentAdapter {
   async run(_req: AgentRunRequest): Promise<AgentRun> {
     return { events: (async function* () {})(), cancel: async () => {}, done: async () => ({ exitCode: 0, ok: true }) };
   }
+  capabilities(): AgentCapabilitySupport { return { tools: false, plugins: false, skills: false, approval: false }; }
 }
+
+// no-op 更新器（dev 下 createUpdater 也返回 no-op，这里显式构造供测试装配）。
+const noopUpdater: Updater = {
+  start(onStatus) { onStatus({ state: 'idle', currentVersion: '0.0.0' }); },
+  async check() {},
+  async installUpdate() {},
+  status() { return { state: 'idle', currentVersion: '0.0.0' }; },
+};
 
 let db: DatabaseSync;
 let repos: Repositories;
@@ -76,6 +92,7 @@ beforeEach(() => {
     worktreesBaseDir: workdir,
     encryptSecret,
     decryptSecret,
+    updater: noopUpdater,
   };
   registerIpc(services, (e) => sent.push(e), () => {});
 });
@@ -119,10 +136,11 @@ describe('typed IPC wiring', () => {
       id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'backlog',
       role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0,
     });
-    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/门禁|非法/);
+    // 归档必须经 tasks.accept，updateStatus 直接拒绝（看板拖拽不得绕过）。
+    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/归档|门禁|非法/);
   });
 
-  it('end-to-end: create -> advance -> start -> in_review via IPC', async () => {
+  it('end-to-end: create -> start -> in_review via IPC', async () => {
     const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
     const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
@@ -133,9 +151,7 @@ describe('typed IPC wiring', () => {
     task.worktreePath = join(workdir, 'wt');
     repos.tasks.update(task);
 
-    expect(t.status).toBe('backlog');
-    await call('tasks', 'updateStatus', t.id, 'ready');
-    await call('tasks', 'updateStatus', t.id, 'in_progress');
+    expect(t.status).toBe('ready');
     await call('tasks', 'start', t.id);
     expect(repos.tasks.get(t.id)!.status).toBe('in_review');
     // 事件被转发
@@ -196,11 +212,11 @@ describe('typed IPC wiring', () => {
     expect(repos.requirements.get('r')!.archived).toBe(true);
   });
 
-  it('tasks.update edits only backlog/ready tasks', async () => {
+  it('tasks.update edits only ready tasks', async () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
     repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
-    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'Old', description: '', status: 'backlog', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'Old', description: '', status: 'ready', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
     const updated = (await call('tasks', 'update', { id: 't', title: 'New', role: 'reviewer', agentType: 'codex' })) as { title: string; role: string; agentType: string };
     expect(updated.title).toBe('New');
     expect(repos.tasks.get('t')!.role).toBe('reviewer');
@@ -231,8 +247,8 @@ describe('typed IPC wiring', () => {
     const pred = await call('tasks', 'create', { requirementId: r.id, title: 'Pred', description: '', role: 'coder', agentType: 'test' }) as { id: string };
     const succ = await call('tasks', 'create', { requirementId: r.id, title: 'Succ', description: '', role: 'coder', agentType: 'test', dependsOn: [pred.id] }) as { id: string };
     expect(repos.tasks.get(succ.id)!.dependsOn).toEqual([pred.id]);
-    // 推进到待开发后启动 -> 前置未完成，被依赖门禁拒绝
-    await call('tasks', 'updateStatus', succ.id, 'ready');
+    // 新建任务直接为 ready；启动 -> 前置未完成，被依赖门禁拒绝
+    expect(repos.tasks.get(succ.id)!.status).toBe('ready');
     await expect(call('tasks', 'start', succ.id)).rejects.toThrow(/前置任务未完成/);
   });
 
@@ -253,6 +269,43 @@ describe('typed IPC wiring', () => {
     const r = (await call('notificationRules', 'create', { id: '', status: 'in_progress', minutes: 5, channels: ['desktop'], enabled: true })) as { id: string };
     expect(repos.notificationRules.list().length).toBe(1);
     expect(r.id).toBeTruthy();
+  });
+
+  it('tasks.accept is the only archive path; drag (updateStatus) to archived is rejected', async () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    // 待验收任务，无执行产物
+    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'in_review', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    await expect(call('tasks', 'accept', 't')).rejects.toThrow(/产物/); // 无执行产物 -> 拒绝
+    // 拖拽归档被拒
+    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/归档/);
+    // 补一条执行记录（产物）
+    repos.executions.insert({ id: 'e1', taskId: 't', attempt: 1, agentType: 'test', startedAt: now(), status: 'succeeded' });
+    await call('tasks', 'accept', 't');
+    expect(repos.tasks.get('t')!.status).toBe('archived');
+    // 非待验收任务验收拒绝
+    repos.tasks.insert({ id: 't2', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T2', description: '', status: 'ready', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    await expect(call('tasks', 'accept', 't2')).rejects.toThrow(/待验收/);
+  });
+
+  it('agents.capabilities returns per-adapter support', async () => {
+    // 用真实适配器验证能力声明（capabilities 不调 detect，安全）。
+    services.registry.register(new ClaudeCodeAdapter());
+    services.registry.register(new CodexAdapter());
+    services.registry.register(new PiAdapter());
+    const caps = (await call('agents', 'capabilities')) as Record<string, { tools: boolean; approval: boolean }>;
+    expect(caps['claude_code']!.tools).toBe(true);
+    expect(caps['claude_code']!.approval).toBe(true);
+    expect(caps['codex']!.tools).toBe(false);
+    expect(caps['pi']!.approval).toBe(false);
+  });
+
+  it('settings theme round-trips and persists', async () => {
+    await call('settings', 'setTheme', 'light');
+    expect(await call('settings', 'getTheme')).toBe('light');
+    await call('settings', 'setTheme', 'system');
+    expect(await call('settings', 'getTheme')).toBe('system');
   });
 });
 

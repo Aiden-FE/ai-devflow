@@ -99,7 +99,7 @@ describe('repositories CRUD', () => {
 function makeTask(id: string, reqId: string, iterId: string, projId: string) {
   return {
     id, requirementId: reqId, iterationId: iterId, projectId: projId,
-    title: 'T', description: '', status: 'backlog' as const, role: 'coder' as const,
+    title: 'T', description: '', status: 'ready' as const, role: 'coder' as const,
     stages: [], currentStage: 0, statusChangedAt: 1, createdAt: 1, updatedAt: 1, retryCount: 0,
   };
 }
@@ -111,20 +111,19 @@ describe('full lifecycle', () => {
     repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'high', acceptance: 'acc', createdAt: 1, archived: false });
   });
 
-  it('advances backlog -> ... -> archived with statusChangedAt updates', () => {
+  it('advances ready -> ... -> archived with statusChangedAt updates', () => {
     repos.tasks.insert(makeTask('t', 'r', 'i', 'p'));
     const t0 = repos.tasks.get('t')!;
-    expect(t0.status).toBe('backlog');
+    expect(t0.status).toBe('ready');
 
-    repos.tasks.updateStatus('t', 'ready', 100);
-    expect(repos.tasks.get('t')!.status).toBe('ready');
-    expect(repos.tasks.get('t')!.statusChangedAt).toBe(100);
+    repos.tasks.updateStatus('t', 'in_progress', 150);
+    expect(repos.tasks.get('t')!.status).toBe('in_progress');
+    expect(repos.tasks.get('t')!.statusChangedAt).toBe(150);
 
     repos.tasks.assignAgent('t', 'claude_code');
     expect(repos.tasks.get('t')!.agentType).toBe('claude_code');
 
-    repos.tasks.updateStatus('t', 'in_progress', 200);
-    repos.tasks.updateStatus('t', 'in_review', 300);
+    repos.tasks.updateStatus('t', 'in_review', 200);
     repos.tasks.updateStatus('t', 'archived', 400);
     const final = repos.tasks.get('t')!;
     expect(final.status).toBe('archived');
@@ -270,7 +269,7 @@ describe('paused_from & requirement archive', () => {
   it('listByRequirement returns only the requirement tasks', () => {
     setup();
     repos.tasks.insert({
-      id: 't2', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T2', description: '', status: 'backlog',
+      id: 't2', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T2', description: '', status: 'ready',
       role: 'coder', stages: [], currentStage: 0, statusChangedAt: 1, createdAt: 2, updatedAt: 2, retryCount: 0,
     });
     expect(repos.tasks.listByRequirement('r').length).toBe(2);
@@ -288,7 +287,7 @@ describe('paused_from & requirement archive', () => {
   it('task depends_on round-trips and updates', () => {
     setup();
     repos.tasks.insert({
-      id: 'td', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'TD', description: '', status: 'backlog',
+      id: 'td', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'TD', description: '', status: 'ready',
       role: 'coder', stages: [], currentStage: 0, statusChangedAt: 1, createdAt: 1, updatedAt: 1, retryCount: 0,
       dependsOn: ['t', 't2'],
     });
@@ -300,5 +299,92 @@ describe('paused_from & requirement archive', () => {
     td.dependsOn = ['t'];
     repos.tasks.update(td);
     expect(repos.tasks.get('td')!.dependsOn).toEqual(['t']);
+  });
+});
+
+describe('backlog removal migration (v6)', () => {
+  it('migrates legacy backlog tasks / paused_from / notification rules to ready', () => {
+    // 模拟历史库：先建库跑全部迁移，再把 schema_version 回退到 5，注入 backlog 数据，
+    // 重开库触发 v6/v7 迁移（v6 把 backlog 迁为 ready）。
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-backlog-'));
+    const path = join(dir, 'test.db');
+    try {
+      let d = openDatabase(path);
+      let r = createRepositories(d);
+      r.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+      r.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+      r.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
+      // 回退到 v5，使 v6/v7 在重开时重跑
+      d.prepare('DELETE FROM schema_version WHERE version >= 6').run();
+      // 历史任务：backlog 状态 + paused_from=backlog
+      d.prepare("INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,status,role,stages_json,current_stage,status_changed_at,created_at,updated_at,retry_count,paused_from,depends_on_json) VALUES('t','r','i','p','T','','backlog','coder','[]',0,1,1,1,0,'backlog','[]')").run();
+      r.notificationRules.insert({ id: 'nb', status: 'backlog', minutes: 5, channels: ['desktop'], enabled: true });
+      d.close();
+
+      // 重开 -> v6 迁移生效
+      d = openDatabase(path);
+      r = createRepositories(d);
+      const t = r.tasks.get('t')!;
+      expect(t.status).toBe('ready');
+      expect(t.pausedFrom).toBe('ready');
+      const rules = r.notificationRules.list();
+      expect(rules.every((x) => x.status !== 'backlog')).toBe(true);
+      expect(rules.find((x) => x.id === 'nb')!.status).toBe('ready');
+      d.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('new tasks default to ready (fresh schema)', () => {
+    // 省略 status 插入应得到 ready（DEFAULT 'ready'）。
+    const d = openDatabase(':memory:');
+    const r = createRepositories(d);
+    r.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    r.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
+    d.prepare("INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,role,stages_json,current_stage,status_changed_at,created_at,updated_at,retry_count,depends_on_json) VALUES('t','r','i','p','T','','coder','[]',0,1,1,1,0,'[]')").run();
+    expect(r.tasks.get('t')!.status).toBe('ready');
+    d.close();
+  });
+});
+
+describe('task messages & pending interactions', () => {
+  beforeEach(() => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
+    repos.tasks.insert(makeTask('t', 'r', 'i', 'p'));
+  });
+
+  it('task messages insert/list in time order', () => {
+    repos.taskMessages.insert({ id: 'm1', taskId: 't', role: 'user', kind: 'text', text: 'hi', t: 1 });
+    repos.taskMessages.insert({ id: 'm2', taskId: 't', role: 'assistant', kind: 'tool_call', toolName: 'Bash', toolUseId: 'tu1', toolInput: '{"cmd":"ls"}', t: 2 });
+    repos.taskMessages.insert({ id: 'm3', taskId: 't', role: 'tool', kind: 'tool_result', toolUseId: 'tu1', toolResult: 'out', t: 3 });
+    const list = repos.taskMessages.listByTask('t');
+    expect(list.map((m) => m.id)).toEqual(['m1', 'm2', 'm3']);
+    expect(list[1]!.kind).toBe('tool_call');
+    expect(list[2]!.isError).toBe(false);
+  });
+
+  it('pending interactions insert/getPending/resolve', () => {
+    repos.pendingInteractions.insert({
+      id: 'pi1', taskId: 't', kind: 'approval', title: 'Bash: rm -rf', toolName: 'Bash', toolUseId: 'tu1',
+      requestId: 'req1', status: 'pending', createdAt: 1,
+    });
+    expect(repos.pendingInteractions.getPendingForTask('t')!.id).toBe('pi1');
+    expect(repos.pendingInteractions.getPendingForTask('nope')).toBeUndefined();
+    repos.pendingInteractions.resolve('pi1', 'denied', undefined, 2);
+    expect(repos.pendingInteractions.get('pi1')!.status).toBe('denied');
+    expect(repos.pendingInteractions.get('pi1')!.resolvedAt).toBe(2);
+    // 已解决的不再算作 pending
+    expect(repos.pendingInteractions.getPendingForTask('t')).toBeUndefined();
+  });
+
+  it('pending interactions listByTask ordered', () => {
+    repos.pendingInteractions.insert({ id: 'a', taskId: 't', kind: 'clarification', title: 'q1', status: 'answered', response: 'x', createdAt: 1, resolvedAt: 2 });
+    repos.pendingInteractions.insert({ id: 'b', taskId: 't', kind: 'confirmation', title: 'q2', status: 'pending', createdAt: 3 });
+    const list = repos.pendingInteractions.listByTask('t');
+    expect(list.map((x) => x.id)).toEqual(['a', 'b']);
   });
 });

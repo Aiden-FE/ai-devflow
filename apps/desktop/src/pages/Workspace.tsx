@@ -140,7 +140,7 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
         <h3 className="mt-0 text-sm font-semibold">{t('ws.kanban')} <span className="ml-1 text-xs font-normal text-muted-foreground">{t('ws.kanban.hint')}</span></h3>
         <LoadingOrError loading={tasksQ.loading} error={tasksQ.error} data={tasksQ.data} reload={tasksQ.reload}>
           {() => (
-            <div className="grid grid-cols-5 gap-2 items-start">
+            <div className="grid grid-cols-4 gap-2 items-start">
               {LANES.map((lane) => (
                 <Lane key={lane.status} status={lane.status} label={t(lane.labelKey)}
                   tasks={tasksByLane[lane.status]} selectedId={selectedTask}

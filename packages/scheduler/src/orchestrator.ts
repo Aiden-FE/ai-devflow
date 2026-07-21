@@ -2,12 +2,16 @@ import { EventEmitter } from 'node:events';
 import type {
   AgentEvent,
   AgentType,
+  AgentCapabilities,
   Checkpoint,
   ExecutionRecord,
   LogEntry,
   Task,
   TaskStatus,
   Project,
+  TaskMessage,
+  PendingInteraction,
+  InteractionKind,
 } from '@ai-devflow/core';
 import {
   canTransition,
@@ -37,6 +41,27 @@ export interface TaskEvent {
   event: AgentEvent;
 }
 
+export interface TaskMessageEvent {
+  taskId: string;
+  message: TaskMessage;
+}
+
+export interface TaskInteractionEvent {
+  taskId: string;
+  interaction: PendingInteraction;
+}
+
+/** 启动/恢复参数。 */
+export interface StartInit {
+  resumeFrom?: Checkpoint;
+  /** 澄清回答文本（clarification）。 */
+  userInput?: string;
+  /** 通用交互响应（approval/confirmation）。 */
+  interactionResponse?: { kind: InteractionKind; value: string };
+  /** 授权恢复：批准/拒绝的工具（合并进能力配置以放行/拒绝对应工具）。 */
+  approvalTool?: { name: string; allow: boolean };
+}
+
 const IMPLICIT_STAGE_ID = '__main__';
 
 export class Orchestrator extends EventEmitter {
@@ -44,6 +69,8 @@ export class Orchestrator extends EventEmitter {
   private runs = new Map<string, { run: AgentRun; canceled: boolean }>();
   private retryPolicy: RetryPolicy;
   private autoRetry: boolean;
+  /** 最近一次解析的能力配置（授权恢复合并用）。 */
+  private capsByTask = new Map<string, AgentCapabilities>();
 
   constructor(
     private repos: Repositories,
@@ -57,7 +84,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** 启动任务：分派 Agent、创建 worktree、运行流水线。 */
-  async start(taskId: string, init?: { resumeFrom?: Checkpoint; userInput?: string }): Promise<void> {
+  async start(taskId: string, init?: StartInit): Promise<void> {
     const task = this.repos.tasks.get(taskId);
     if (!task) throw new Error(`任务不存在：${taskId}`);
     if (this.runs.has(taskId)) throw new Error(`任务已在运行：${taskId}`);
@@ -66,7 +93,7 @@ export class Orchestrator extends EventEmitter {
     if (!project) throw new Error(`项目不存在：${task.projectId}`);
 
     // 串行依赖：前置任务未完成（未进入 in_review/archived）则禁止启动。
-    // resume（待沟通恢复）传 init，跳过此检查：后继此前已启动过，依赖早已满足。
+    // resume（待沟通/待授权恢复）传 init，跳过此检查：后继此前已启动过，依赖早已满足。
     if (!init && task.dependsOn && task.dependsOn.length > 0) {
       const predecessors = task.dependsOn
         .map((id) => this.repos.tasks.get(id))
@@ -88,13 +115,13 @@ export class Orchestrator extends EventEmitter {
       const gate = canTransition(task, 'in_progress', {
         hasAcceptance: true,
         hasAgentAssigned: !!task.agentType,
-        hasUserAnswer: !!init?.userInput,
+        hasUserAnswer: !!init?.userInput || !!init?.interactionResponse,
         hasArtifacts: false,
       });
       if (!gate.ok && task.status !== 'awaiting_input') {
         throw new Error(`无法启动任务：${gate.reasons.join('; ')}`);
       }
-      this.transition(task, 'in_progress');
+      this.transition(task, 'in_progress', { hasUserAnswer: !!init?.userInput || !!init?.interactionResponse });
     }
 
     const release = await this.sem.acquire();
@@ -112,7 +139,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** 运行流水线各阶段。 */
-  private async runPipeline(task: Task, project: Project, init?: { resumeFrom?: Checkpoint; userInput?: string }): Promise<void> {
+  private async runPipeline(task: Task, project: Project, init?: StartInit): Promise<void> {
     const stages = task.stages.length > 0 ? task.stages : [{ id: IMPLICIT_STAGE_ID, name: '执行', role: task.role }];
     const startStage = init?.resumeFrom?.stageIndex ?? task.currentStage ?? 0;
     const agentType = this.resolveAgentType(task, project);
@@ -120,6 +147,19 @@ export class Orchestrator extends EventEmitter {
       this.repos.tasks.assignAgent(task.id, agentType);
       task.agentType = agentType;
     }
+
+    // 解析能力配置：角色 RoleAgentConfig + 任务显式 agentType 覆盖。
+    let capabilities = this.resolveCapabilities(task, project, agentType);
+    // 授权恢复：把已批准/已拒绝工具并入能力配置（放行 -> allowedTools，拒绝 -> disallowedTools）。
+    if (init?.approvalTool) {
+      const { name, allow } = init.approvalTool;
+      if (allow) {
+        capabilities = { ...capabilities, tools: Array.from(new Set([...(capabilities.tools ?? []), name])) };
+      } else {
+        capabilities = { ...capabilities, disallowedTools: Array.from(new Set([...(capabilities.disallowedTools ?? []), name])) };
+      }
+    }
+    this.capsByTask.set(task.id, capabilities);
 
     // 先创建执行记录：这样 worktree 创建失败等也能落日志并计入尝试次数，
     // 避免 getLatest() 永远 undefined 导致 attempt 不递增、无限重试。
@@ -185,6 +225,8 @@ export class Orchestrator extends EventEmitter {
         cwd: worktreePath!,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
         userInput: i === startStage ? init?.userInput : undefined,
+        interactionResponse: i === startStage ? init?.interactionResponse : undefined,
+        capabilities,
       });
       this.runs.set(task.id, { run, canceled: false });
 
@@ -197,9 +239,10 @@ export class Orchestrator extends EventEmitter {
             break;
           }
           await this.handleEvent(task, execution, ev);
-          if (ev.type === 'ask_user') {
+          if (ev.type === 'ask_user' || ev.type === 'approval_request') {
             askedUser = true;
-            // 暂停：记录检查点与提问，转 awaiting_input，停止当前运行
+            // 暂停：记录检查点与待处理交互，转 awaiting_input，停止当前运行。
+            // 拒绝授权不判定成功：暂停后由用户决策，恢复时按决策放行/拒绝，绝不自动归档。
             this.recordCheckpoint(task, stage, i, ev);
             this.transition(task, 'awaiting_input');
             await run.cancel();
@@ -216,7 +259,7 @@ export class Orchestrator extends EventEmitter {
         this.runs.delete(task.id);
       }
 
-      if (askedUser) return; // 等待用户回答后 resume
+      if (askedUser) return; // 等待用户回答/授权后 resume
 
       if (!stageDone) {
         // 阶段未正常完成（被取消或异常）
@@ -235,7 +278,7 @@ export class Orchestrator extends EventEmitter {
       this.repos.executions.update(execution);
     }
 
-    // 全部阶段完成 -> 合并特性分支到项目默认分支，使产出落入主项目 -> in_review
+    // 全部阶段完成 -> 合并特性分支到项目默认分支，使产出落入主项目 -> in_review（待验收）
     const branchName = `ai-devflow/${task.id}`;
     const mergeRes = await mergeWorktreeBranch({
       repoPath: project.path,
@@ -247,6 +290,7 @@ export class Orchestrator extends EventEmitter {
     } else {
       this.log(execution, 'warn', `未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）`);
     }
+    // Agent 完成后进入待验收；归档必须经人工验收（tasks.accept），禁止自动归档。
     this.transition(task, 'in_review');
   }
 
@@ -267,6 +311,14 @@ export class Orchestrator extends EventEmitter {
         const entry: LogEntry = { id: randomId(), taskId: task.id, executionId: execution.id, level, text, t };
         this.repos.logs.insert(entry);
         this.emit('log', entry);
+        // 同步落对话消息（旧 log_entries 保留兼容，对话窗口读 task_messages）。
+        if (ev.type === 'log') {
+          this.recordMessage(task, execution, { role: level === 'error' ? 'system' : 'assistant', kind: level === 'error' ? 'error' : 'text', text: ev.text, t });
+        } else if (ev.type === 'file_change') {
+          this.recordMessage(task, execution, { role: 'assistant', kind: 'tool_call', toolName: this.deriveToolName(text), text: `${ev.action} ${ev.path}`, t });
+        } else {
+          this.recordMessage(task, execution, { role: 'tool', kind: 'tool_result', toolResult: ev.summary, isError: !ev.passed, text: ev.summary, t });
+        }
         break;
       }
       case 'ask_user': {
@@ -276,22 +328,66 @@ export class Orchestrator extends EventEmitter {
           context: ev.context,
           askedAt: t,
         });
+        const msg = this.recordMessage(task, execution, { role: 'assistant', kind: 'clarification_request', text: ev.question, t });
+        this.createInteraction(task, 'clarification', ev.question, { messageId: msg.id, detail: ev.context });
+        break;
+      }
+      case 'approval_request': {
+        const msg = this.recordMessage(task, execution, {
+          role: 'assistant', kind: 'approval_request', text: ev.description,
+          toolName: ev.toolName, toolUseId: ev.toolUseId, toolInput: ev.input, t,
+        });
+        this.createInteraction(task, 'approval', ev.toolName, {
+          messageId: msg.id, detail: ev.description,
+          toolName: ev.toolName, toolUseId: ev.toolUseId, requestId: ev.requestId,
+        });
         break;
       }
       case 'status':
-        // 阶段内状态更新，不落状态机
+        this.recordMessage(task, execution, { role: 'system', kind: 'status', text: ev.detail ?? ev.stage, t });
         break;
       case 'done':
         execution.summary = ev.summary;
+        this.recordMessage(task, execution, { role: 'system', kind: 'status', text: ev.summary, t });
         break;
       case 'error': {
         execution.summary = ev.message;
         const entry: LogEntry = { id: randomId(), taskId: task.id, executionId: execution.id, level: 'error', text: `[agent error] ${ev.message}`, t };
         this.repos.logs.insert(entry);
         this.emit('log', entry);
+        this.recordMessage(task, execution, { role: 'system', kind: 'error', text: ev.message, t });
         break;
       }
     }
+  }
+
+  /** 从日志文本启发式推导工具名（如 "Write /a/b.ts" -> "Write"）。 */
+  private deriveToolName(text: string): string | undefined {
+    const m = /^([A-Za-z_]+)\s/.exec(text);
+    return m?.[1];
+  }
+
+  /** 记录一条对话消息并转发 Renderer。 */
+  private recordMessage(task: Task, execution: ExecutionRecord | undefined, msg: Omit<TaskMessage, 'id' | 'taskId' | 't'> & { t?: number }): TaskMessage {
+    const m: TaskMessage = { id: randomId(), taskId: task.id, executionId: execution?.id, t: msg.t ?? now(), ...msg };
+    this.repos.taskMessages.insert(m);
+    this.emit('task-message', { taskId: task.id, message: m } satisfies TaskMessageEvent);
+    return m;
+  }
+
+  /** 创建一条待处理交互并转发 Renderer。 */
+  private createInteraction(
+    task: Task,
+    kind: InteractionKind,
+    title: string,
+    opts: { messageId?: string; detail?: string; toolName?: string; toolUseId?: string; requestId?: string },
+  ): PendingInteraction {
+    const i: PendingInteraction = {
+      id: randomId(), taskId: task.id, kind, title, status: 'pending', createdAt: now(), ...opts,
+    };
+    this.repos.pendingInteractions.insert(i);
+    this.emit('task-interaction', { taskId: task.id, interaction: i } satisfies TaskInteractionEvent);
+    return i;
   }
 
   /** 写一条任务日志并转发给 Renderer。 */
@@ -302,26 +398,87 @@ export class Orchestrator extends EventEmitter {
   }
 
   private recordCheckpoint(task: Task, stage: { id: string }, stageIndex: number, ev: AgentEvent): void {
+    // 待沟通存提问上下文；授权存工具调用信息，便于恢复时重建。
+    const context = ev.type === 'ask_user'
+      ? ev.context
+      : ev.type === 'approval_request'
+        ? JSON.stringify({ toolName: ev.toolName, toolUseId: ev.toolUseId, description: ev.description })
+        : '';
     const cp: Checkpoint = {
       id: randomId(),
       taskId: task.id,
       stageId: stage.id,
       stageIndex,
-      context: ev.type === 'ask_user' ? ev.context : '',
+      context,
       createdAt: now(),
     };
     this.repos.checkpoints.upsert(cp);
   }
 
-  /** 用户回答后从检查点恢复。 */
+  /** 用户回答澄清后从检查点恢复（兼容旧 ask_user 流程）。 */
   async resume(taskId: string, userInput: string): Promise<void> {
     const task = this.repos.tasks.get(taskId);
     if (!task) throw new Error(`任务不存在：${taskId}`);
     if (task.status !== 'awaiting_input') throw new Error(`任务不在待沟通状态：${task.status}`);
+    // 解决最早的 pending 澄清交互（如有）。
+    const inter = this.repos.pendingInteractions.getPendingForTask(taskId);
+    if (inter && inter.kind === 'clarification') {
+      this.repos.pendingInteractions.resolve(inter.id, 'answered', userInput, now());
+    }
     this.repos.pendingQuestions.answer(taskId, userInput, now());
+    this.recordMessage(task, undefined, { role: 'user', kind: 'text', text: userInput });
     const cp = this.repos.checkpoints.getLatest(taskId);
     this.transition(task, 'in_progress', { hasUserAnswer: true });
     await this.start(taskId, { resumeFrom: cp ?? undefined, userInput });
+  }
+
+  /**
+   * 解决通用待处理交互（澄清/授权/确认）后从检查点恢复。
+   * - clarification: response 为用户文本回答。
+   * - approval: response 为 'allow' | 'deny'；批准则把工具并入白名单恢复，拒绝则并入黑名单（不判定成功）。
+   * - confirmation: response 为 'confirm' | 'cancel'。
+   */
+  async resolveInteraction(taskId: string, interactionId: string, response: string): Promise<void> {
+    const task = this.repos.tasks.get(taskId);
+    if (!task) throw new Error(`任务不存在：${taskId}`);
+    if (task.status !== 'awaiting_input') throw new Error(`任务不在待沟通状态：${task.status}`);
+    const inter = this.repos.pendingInteractions.get(interactionId);
+    if (!inter) throw new Error(`交互不存在：${interactionId}`);
+    if (inter.status !== 'pending') throw new Error(`交互已处理：${inter.status}`);
+
+    const cp = this.repos.checkpoints.getLatest(taskId);
+    if (inter.kind === 'clarification') {
+      this.repos.pendingInteractions.resolve(interactionId, 'answered', response, now());
+      this.repos.pendingQuestions.answer(taskId, response, now());
+      this.recordMessage(task, undefined, { role: 'user', kind: 'text', text: response });
+      this.transition(task, 'in_progress', { hasUserAnswer: true });
+      await this.start(taskId, { resumeFrom: cp ?? undefined, userInput: response });
+      return;
+    }
+    if (inter.kind === 'approval') {
+      const allow = response === 'allow';
+      this.repos.pendingInteractions.resolve(interactionId, allow ? 'approved' : 'denied', response, now());
+      this.recordMessage(task, undefined, {
+        role: 'user', kind: 'text',
+        text: `${allow ? '已批准' : '已拒绝'}：${inter.toolName ?? inter.title}`,
+      });
+      this.transition(task, 'in_progress', { hasUserAnswer: true });
+      await this.start(taskId, {
+        resumeFrom: cp ?? undefined,
+        interactionResponse: { kind: 'approval', value: allow ? 'allow' : 'deny' },
+        approvalTool: inter.toolName ? { name: inter.toolName, allow } : undefined,
+      });
+      return;
+    }
+    // confirmation
+    const confirm = response === 'confirm';
+    this.repos.pendingInteractions.resolve(interactionId, confirm ? 'confirmed' : 'cancelled', response, now());
+    this.recordMessage(task, undefined, { role: 'user', kind: 'text', text: confirm ? '已确认' : '已取消' });
+    this.transition(task, 'in_progress', { hasUserAnswer: true });
+    await this.start(taskId, {
+      resumeFrom: cp ?? undefined,
+      interactionResponse: { kind: 'confirmation', value: response },
+    });
   }
 
   /** 取消任务。 */
@@ -393,12 +550,11 @@ export class Orchestrator extends EventEmitter {
   }
 
   private transition(task: Task, target: TaskStatus, ctx?: Partial<Parameters<typeof canTransition>[2]>): void {
+    // 归档门禁 accepted 由调用方（tasks.accept）显式提供；编排器自身不会自动归档。
     const gate = canTransition(task, target, {
       hasAcceptance: true,
       hasAgentAssigned: !!task.agentType,
       hasArtifacts: true,
-      testPassed: target === 'archived' ? true : undefined,
-      auditOk: target === 'archived' ? true : undefined,
       hasUserAnswer: false,
       ...ctx,
     });
@@ -414,9 +570,27 @@ export class Orchestrator extends EventEmitter {
 
   private resolveAgentType(task: Task, project: Project): AgentType {
     if (task.agentType) return task.agentType;
+    const roleConfig = project.settings.roleConfigs?.[task.role];
+    if (roleConfig?.agentType) return roleConfig.agentType;
     const roleOverride = project.settings.agentRoles?.[task.role];
     if (roleOverride) return roleOverride;
     return defaultAgentForRole(task.role);
+  }
+
+  /**
+   * 解析能力配置：角色 RoleAgentConfig（优先）+ 任务显式 agentType 覆盖。
+   * 任务显式 agentType 优先于角色默认；工具/插件/Skills/授权来自角色配置。
+   */
+  private resolveCapabilities(task: Task, project: Project, agentType: AgentType): AgentCapabilities {
+    const roleConfig = project.settings.roleConfigs?.[task.role];
+    return {
+      agentType,
+      plugins: roleConfig?.plugins,
+      skills: roleConfig?.skills,
+      tools: roleConfig?.tools,
+      disallowedTools: roleConfig?.disallowedTools,
+      requireApproval: roleConfig?.requireApproval ?? false,
+    };
   }
 
   /**
@@ -424,7 +598,8 @@ export class Orchestrator extends EventEmitter {
    * 不含 'test'（测试适配器需显式指定）。无可用适配器时抛出清晰错误。
    */
   private async resolveDefaultAgent(task: Task, project: Project): Promise<AgentType> {
-    const roleOverride = project.settings.agentRoles?.[task.role];
+    const roleConfig = project.settings.roleConfigs?.[task.role];
+    const roleOverride = roleConfig?.agentType ?? project.settings.agentRoles?.[task.role];
     const candidates: AgentType[] = [];
     if (roleOverride) candidates.push(roleOverride);
     for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) {
@@ -484,7 +659,7 @@ export class Orchestrator extends EventEmitter {
       await removeWorktree({
         repoPath: project.path,
         worktreePath: task.worktreePath,
-        branchName: `ai-devflow/${task.id}`,
+        branchName: `ai-devflow/${taskId}`,
         keepBranch: opts?.keepBranch,
       }).catch(() => {});
     }

@@ -34,8 +34,8 @@ describe('audit', () => {
     expect(f.some((x) => x.message.includes('worktree'))).toBe(true);
   });
 
-  it('errors when archived without test pass', () => {
-    const f = auditTask(task({ status: 'archived' }), ctx({ testPassed: false }));
+  it('errors when archived without artifacts', () => {
+    const f = auditTask(task({ status: 'archived' }), ctx({ hasArtifacts: false }));
     expect(f.some((x) => x.severity === 'error')).toBe(true);
     expect(auditOk(f)).toBe(false);
   });

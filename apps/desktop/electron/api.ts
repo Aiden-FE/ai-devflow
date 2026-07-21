@@ -16,10 +16,14 @@ import type {
   WebhookDelivery,
   ProjectSettings,
   Locale,
+  ThemeMode,
   AiProviderConfig,
   AiChatMessage,
   AiTaskProposal,
   AiRequirementProposal,
+  TaskMessage,
+  PendingInteraction,
+  UpdateStatus,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -52,7 +56,7 @@ export interface CreateTaskInput {
   dependsOn?: string[];
 }
 
-/** 任务可编辑字段（仅 backlog/ready 允许编辑）。agentType 为 null 表示清除（按角色默认）；dependsOn 为 null 表示清空依赖。 */
+/** 任务可编辑字段（仅 ready 允许编辑）。agentType 为 null 表示清除（按角色默认）；dependsOn 为 null 表示清空依赖。 */
 export interface UpdateTaskInput {
   id: string;
   title?: string;
@@ -69,7 +73,17 @@ export type AiStreamEvent =
   | { type: 'error'; sessionId: string; error: string };
 
 export interface StreamEvent {
-  kind: 'task-event' | 'log' | 'task-status' | 'task-canceled' | 'task-failed' | 'task-awaiting';
+  kind:
+    | 'task-event'
+    | 'log'
+    | 'task-status'
+    | 'task-canceled'
+    | 'task-failed'
+    | 'task-awaiting'
+    | 'task-message'
+    | 'task-interaction'
+    | 'theme-changed'
+    | 'update-status';
   taskId: string;
   data: unknown;
 }
@@ -111,23 +125,37 @@ export interface DesktopApi {
     listByRequirement(requirementId: string): Promise<Task[]>;
     get(id: string): Promise<Task | undefined>;
     create(input: CreateTaskInput): Promise<Task>;
-    /** 编辑任务（仅 backlog/ready）。 */
+    /** 编辑任务（仅 ready）。 */
     update(input: UpdateTaskInput): Promise<Task>;
     updateStatus(id: string, target: TaskStatus): Promise<void>;
+    /**
+     * 验收通过并归档：唯一进入 archived 的入口。
+     * 仅 in_review 且有执行产物时允许；看板拖拽无法绕过（updateStatus 不接受 archived）。
+     */
+    accept(id: string): Promise<void>;
     /** 手动标记待沟通（暂停，等待用户澄清）。 */
     pause(id: string): Promise<void>;
     start(id: string): Promise<void>;
+    /** 回答澄清问题后恢复（兼容旧 ask_user 流程）。 */
     resume(id: string, answer: string): Promise<void>;
+    /** 解决通用待处理交互（澄清/授权/确认）后恢复。 */
+    resolveInteraction(id: string, interactionId: string, response: string): Promise<void>;
     cancel(id: string): Promise<void>;
     retry(id: string): Promise<void>;
     logs(id: string): Promise<LogEntry[]>;
     executions(id: string): Promise<ExecutionRecord[]>;
     pendingQuestion(id: string): Promise<import('@ai-devflow/core').PendingQuestion | undefined>;
+    /** 任务对话消息（Part 3 对话窗口）。 */
+    messages(id: string): Promise<TaskMessage[]>;
+    /** 待处理交互列表。 */
+    interactions(id: string): Promise<PendingInteraction[]>;
   };
   // ---- Agent ----
   agents: {
     detectAll(): Promise<AgentDetection[]>;
     detect(type: AgentType): Promise<AgentDetection>;
+    /** 各适配器声明支持的能力（UI 据此启用/禁用配置项）。 */
+    capabilities(): Promise<Partial<Record<AgentType, import('@ai-devflow/core').AgentCapabilitySupport>>>;
   };
   // ---- 通知规则 ----
   notificationRules: {
@@ -149,10 +177,24 @@ export interface DesktopApi {
   settings: {
     getLocale(): Promise<Locale>;
     setLocale(locale: Locale): Promise<void>;
+    /** 主题模式：light/dark/system（默认 system，UI 显示“自动”）。 */
+    getTheme(): Promise<ThemeMode>;
+    setTheme(mode: ThemeMode): Promise<void>;
+    /** 同步获取当前解析后的主题（'light'|'dark'），供 preload 在首绘前设置 <html> class，避免闪黑。 */
+    getResolvedThemeSync(): 'light' | 'dark';
     getAiProvider(): Promise<AiProviderConfig | undefined>;
     setAiProvider(cfg: AiProviderConfig | undefined): Promise<void>;
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
+  };
+  // ---- 自动更新（Part 6，仅 app.isPackaged 时可用） ----
+  updates: {
+    /** 手动检查更新。 */
+    check(): Promise<void>;
+    /** 下载完成后退出并安装更新。 */
+    installUpdate(): Promise<void>;
+    /** 当前更新状态。 */
+    status(): Promise<UpdateStatus>;
   };
   // ---- AI 沟通（流式对话 + 结构化草稿） ----
   ai: {

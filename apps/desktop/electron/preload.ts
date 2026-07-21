@@ -1,10 +1,21 @@
 // preload：通过 contextBridge 暴露受限的类型化 API。Renderer 无 Node 权限。
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopApi, StreamEvent, AiStreamEvent } from './api.js';
-import type { AiChatMessage } from '@ai-devflow/core';
+import type { AiChatMessage, ThemeMode } from '@ai-devflow/core';
 
 const invoke = (ns: string, method: string) => (...args: unknown[]) =>
   ipcRenderer.invoke(`ai-devflow:${ns}:${method}`, ...args);
+
+// 首绘前同步设置 <html> class 与 color-scheme，避免亮色启动闪黑。
+// 仅在主进程已注册同步处理器时生效；失败则忽略（不影响渲染）。
+try {
+  const resolved = ipcRenderer.sendSync('ai-devflow:theme:resolved') as 'light' | 'dark' | undefined;
+  if (resolved === 'light' || resolved === 'dark') {
+    const root = document.documentElement;
+    root.classList.toggle('dark', resolved === 'dark');
+    root.style.colorScheme = resolved;
+  }
+} catch { /* 主进程未就绪时忽略 */ }
 
 const api: DesktopApi = {
   projects: {
@@ -37,18 +48,23 @@ const api: DesktopApi = {
     create: (input) => invoke('tasks', 'create')(input),
     update: (input) => invoke('tasks', 'update')(input),
     updateStatus: (id, target) => invoke('tasks', 'updateStatus')(id, target),
+    accept: (id) => invoke('tasks', 'accept')(id),
     pause: (id) => invoke('tasks', 'pause')(id),
     start: (id) => invoke('tasks', 'start')(id),
     resume: (id, answer) => invoke('tasks', 'resume')(id, answer),
+    resolveInteraction: (id, interactionId, response) => invoke('tasks', 'resolveInteraction')(id, interactionId, response),
     cancel: (id) => invoke('tasks', 'cancel')(id),
     retry: (id) => invoke('tasks', 'retry')(id),
     logs: (id) => invoke('tasks', 'logs')(id),
     executions: (id) => invoke('tasks', 'executions')(id),
     pendingQuestion: (id) => invoke('tasks', 'pendingQuestion')(id),
+    messages: (id) => invoke('tasks', 'messages')(id),
+    interactions: (id) => invoke('tasks', 'interactions')(id),
   },
   agents: {
     detectAll: () => invoke('agents', 'detectAll')(),
     detect: (type) => invoke('agents', 'detect')(type),
+    capabilities: () => invoke('agents', 'capabilities')(),
   },
   notificationRules: {
     list: () => invoke('notificationRules', 'list')(),
@@ -67,10 +83,24 @@ const api: DesktopApi = {
   settings: {
     getLocale: () => invoke('settings', 'getLocale')(),
     setLocale: (locale) => invoke('settings', 'setLocale')(locale),
+    getTheme: () => invoke('settings', 'getTheme')(),
+    setTheme: (mode: ThemeMode) => invoke('settings', 'setTheme')(mode),
+    getResolvedThemeSync: () => {
+      try {
+        return (ipcRenderer.sendSync('ai-devflow:theme:resolved') as 'light' | 'dark') ?? 'dark';
+      } catch {
+        return 'dark';
+      }
+    },
     getAiProvider: () => invoke('settings', 'getAiProvider')(),
     setAiProvider: (cfg) => invoke('settings', 'setAiProvider')(cfg),
     getProjectSettings: (projectId) => invoke('settings', 'getProjectSettings')(projectId),
     updateProjectSettings: (projectId, settings) => invoke('settings', 'updateProjectSettings')(projectId, settings),
+  },
+  updates: {
+    check: () => invoke('updates', 'check')(),
+    installUpdate: () => invoke('updates', 'installUpdate')(),
+    status: () => invoke('updates', 'status')(),
   },
   ai: {
     // 流式对话：主进程通过 ai-devflow:ai-stream 频道回传增量/完成/错误。

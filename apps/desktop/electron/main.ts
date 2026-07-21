@@ -1,6 +1,6 @@
 // Electron 主进程入口。
 // 安全：nodeIntegration=false、contextIsolation=true、sandbox=true、严格 CSP、显式 IPC。
-import { app, BrowserWindow, session, protocol, shell } from 'electron';
+import { app, BrowserWindow, session, protocol, shell, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createServices } from './services.js';
@@ -8,6 +8,7 @@ import { registerIpc } from './ipc.js';
 import { ElectronNotifier, parseDeepLink } from './notifier.js';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent } from './api.js';
+import type { ThemeMode } from '@ai-devflow/core';
 
 // esbuild 打包为 CJS，__dirname 指向 dist-electron/。
 declare const __dirname: string;
@@ -17,14 +18,20 @@ let mainWindow: BrowserWindow | undefined;
 let services: Services | undefined;
 let pendingDeepLinkTaskId: string | undefined;
 
-function createWindow(): BrowserWindow {
+/** 读取持久化主题模式（默认 system）。 */
+function readThemeMode(svc: Services): ThemeMode {
+  const raw = svc.repos.credentials.get('theme');
+  return raw === 'light' || raw === 'dark' || raw === 'system' ? raw : 'system';
+}
+
+function createWindow(backgroundColor: string): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 840,
     minWidth: 960,
     minHeight: 640,
     show: false,
-    backgroundColor: '#0f1115',
+    backgroundColor,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -105,10 +112,14 @@ app.whenReady().then(async () => {
   installCsp();
   registerDeepLinkProtocol();
 
-  mainWindow = createWindow();
-
   const notifier = new ElectronNotifier(() => mainWindow, (taskId) => handleDeepLink(taskId));
   services = createServices(notifier);
+
+  // 主题：在创建窗口前应用 nativeTheme.themeSource 与窗口背景，避免亮色启动闪黑。
+  const mode = readThemeMode(services);
+  nativeTheme.themeSource = mode;
+  const bg = (mode === 'dark' || (mode === 'system' && nativeTheme.shouldUseDarkColors)) ? '#0f1115' : '#ffffff';
+  mainWindow = createWindow(bg);
 
   const send = (e: StreamEvent) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -136,7 +147,11 @@ app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      const m = services ? readThemeMode(services) : 'system';
+      const bg = (m === 'dark' || (m === 'system' && nativeTheme.shouldUseDarkColors)) ? '#0f1115' : '#ffffff';
+      createWindow(bg);
+    }
   });
 });
 

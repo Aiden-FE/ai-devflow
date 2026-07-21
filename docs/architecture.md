@@ -63,32 +63,33 @@ ai-devflow/
 实体：`Project`、`Iteration`、`Requirement`、`Task`、`ExecutionRecord`、`Checkpoint`、
 `NotificationRule`/`NotificationDelivery`、`WebhookConfig`/`WebhookDelivery`、`Credential`。
 
-六泳道（Task.status）：
+泳道（Task.status，可见 4 条 + 1 个暂停标识）：
 
-| 状态               | 含义           |
-| ------------------ | -------------- |
-| `backlog`          | 需求池         |
-| `ready`            | 待开发         |
-| `in_progress`      | 开发中（执行） |
-| `awaiting_input`   | 待沟通         |
-| `in_review`        | 待测试         |
-| `archived`         | 已归档（终态） |
+| 状态               | 含义                       |
+| ------------------ | -------------------------- |
+| `ready`            | 待开发（新建任务直接进入） |
+| `in_progress`      | 开发中（执行）             |
+| `awaiting_input`   | 待沟通/待授权（暂停标识，不独立成道，保留 pausedFrom） |
+| `in_review`        | 待验收                     |
+| `archived`         | 已归档（终态）             |
+
+`backlog`（需求池）已移除：新建任务直接进入 `ready`；历史 backlog 任务由迁移改为 ready（含通知规则与 paused_from）。
 
 合法迁移（`core/state-machine.ts`）：
 
 ```
-backlog        --(gate: 有需求+验收标准)--> ready
 ready          --(gate: 已分配 Agent)--> in_progress
-in_progress    --(agent 提问)--> awaiting_input
-awaiting_input --(用户回答，从检查点恢复)--> in_progress
-in_progress    --(gate: agent 报告完成+有产物)--> in_review
-in_review      --(gate: 测试失败，附证据)--> in_progress   # 退回开发
-in_review      --(gate: 测试通过+审计 OK)--> archived
+in_progress    --(agent 提问/需授权)--> awaiting_input
+awaiting_input --(用户回答/授权/确认，从检查点恢复)--> in_progress / in_review
+in_progress    --(gate: agent 报告完成+有产物)--> in_review（待验收）
+in_review      --(验收不通过，退回开发)--> in_progress
+in_review      --(gate: 人工验收 accepted + 有产物)--> archived
 ```
 
 任何其它迁移为非法，状态机与拖拽校验共同拒绝。门禁判定见 `core/gates.ts`：
 - `canTransition(task, target, ctx)` 返回 `{ ok, reasons[] }`。
 - 拖拽时 Renderer 调用 `validateTransition`，Main 落库前再校验一次（防绕过）。
+- **归档门禁**：`archived` 需 `accepted === true && hasArtifacts === true`。`accepted` 只能由 `tasks.accept` 显式人工验收设置；`tasks.updateStatus(archived)` 直接拒绝，看板拖拽无法绕过。不再用“存在执行记录”伪装 testPassed、auditOk 固定 true。
 - 状态审计 `auditTask(task, ctx)` 比对任务记录与实际 worktree 产物/测试结果，输出 `inconsistencies[]`。
 
 ## 5. Agent 桥接器协议
@@ -100,16 +101,26 @@ interface AgentAdapter {
   readonly id: AgentType;                 // 'claude_code' | 'codex' | 'pi' | 'test'
   detect(): Promise<AgentDetection>;      // { available, version?, path?, reason? }
   run(req: AgentRunRequest): AgentRun;    // 启动一次执行，返回事件流句柄
+  capabilities(): AgentCapabilitySupport; // 声明支持的能力，不支持者在 UI 禁用并说明
+}
+interface AgentCapabilitySupport {
+  tools: boolean;          // 工具白名单限制
+  plugins: boolean;        // 插件加载
+  skills: 'all-or-none' | false;  // Claude Code 仅全开/全关
+  approval: boolean;       // 把权限请求转为人工 approval_request
 }
 interface AgentRunRequest {
   taskId: string; prompt: string; cwd: string;
-  resumeFrom?: Checkpoint; userInput?: string; // 待沟通恢复时携带
+  resumeFrom?: Checkpoint; userInput?: string;   // 待沟通恢复时携带
+  capabilities?: AgentCapabilities;              // 由 Orchestrator 解析的最终能力配置
+  interactionResponse?: { kind: InteractionKind; value: string }; // 授权/确认恢复
 }
 type AgentEvent =
   | { type: 'log'; level: 'info'|'warn'|'error'; text: string; t: number }
   | { type: 'file_change'; path: string; action: 'create'|'modify'|'delete'; t: number }
   | { type: 'test_result'; passed: boolean; summary: string; evidence: string; t: number }
   | { type: 'ask_user'; question: string; context: string; t: number }
+  | { type: 'approval_request'; toolName: string; toolUseId: string; requestId?: string; description: string; input?: string; t: number }
   | { type: 'status'; stage: string; detail?: string; t: number }
   | { type: 'done'; summary: string; t: number }
   | { type: 'error'; message: string; recoverable: boolean; t: number };
@@ -119,6 +130,12 @@ interface AgentRun {
   pid?: number;
 }
 ```
+
+**能力配置 → CLI 参数（均来自各 CLI `--help`，未臆造）**：
+- Claude Code：`--allowedTools` / `--disallowedTools`（工具白/黑名单）、`--plugin-dir` / `--plugin-url`（插件）、
+  `--disable-slash-commands`（Skills 全关，非空列表=全开）、`--permission-mode manual`（授权模式下逐工具暂停）。
+- Codex：非交互 `exec` 不支持逐工具人工授权与插件/Skills；权限模型是沙箱（`--sandbox`）。如实声明均不支持。
+- Pi：本机未安装，能力未经验证，如实声明均不支持。
 
 三桥接器实现：
 - **ClaudeCodeAdapter**：`claude -p "<prompt>" --output-format stream-json`，逐行解析 JSON 事件映射为
@@ -197,3 +214,43 @@ interface AgentRun {
 4. 用 `ControllableTestAdapter` 的模式写一个针对该适配器的协议边界测试。
 
 桥接器只负责把 CLI 输出归一化为 `AgentEvent`，调度器、worktree、检查点逻辑对所有适配器通用。
+
+## 11. 自动更新与发版
+
+**应用内更新**（`apps/desktop/electron/updater.ts`）：
+- 基于 `electron-updater` + electron-builder 的 GitHub Provider。仅 `app.isPackaged` 时启用；
+  开发/E2E 返回 no-op，`electron-updater` 不可用时降级为 no-op，均不影响应用。
+- 启动后异步检查（不阻塞 ready），发现版本后静默下载（`autoDownload=true`，
+  `autoInstallOnAppQuit=false`）。
+- 状态经类型化 IPC `updates.status()/check()/installUpdate()` 暴露，并通过 `update-status`
+  事件流转发 Renderer：`idle/checking/available/downloading/downloaded/error/no-update`，
+  downloading 时附带进度。
+- 下载完成在设置页提示当前/新版本，点击“立即升级”才 `quitAndInstall()`。
+- 更新失败、无更新、校验失败仅记录错误状态，绝不抛出影响应用。
+
+**electron-builder 配置**（`apps/desktop/package.json` `build`）：
+- `appId=com.ai-devflow.desktop`、`productName=ai-devflow`、`asar=true`、构件命名含版本/平台/架构。
+- `publish` 指向 GitHub（`Aiden-FE/ai-devflow`）；mac 产出 `dmg`+`zip`（更新链路用 zip），
+  win `nsis`，linux `AppImage`；图标 `build/icon.png`（512×512，electron-builder 自动派生 .icns/.ico）。
+- `directories.output=release`，`files` 打包 `dist/`+`dist-electron/`+`package.json`。
+
+**发版工作流**（`.github/workflows/release.yml`）：
+- `workflow_dispatch` 输入 semver；`if: github.ref == 'refs/heads/main'` 仅允许基于 main 发布。
+- 校验 semver 合法性；用 `git ls-remote` + `gh release view` 拒绝重复 Tag/Release。
+- `pnpm install --frozen-lockfile` 后依次 `typecheck` → `lint` → `test` → `pnpm --filter @ai-devflow/desktop build`。
+- 将根与 desktop 的 `version` 统一设为输入 semver（统一应用版本来源），提交并打 `v<version>` Tag、推送。
+- `pnpm --filter @ai-devflow/desktop release`（electron-builder）构建安装包 + blockmap +
+  `latest-mac.yml`/`latest.yml` 等更新 metadata，并上传到该 Tag 对应的 GitHub Release。
+- `permissions: contents: write`（最小权限）。
+
+**Secrets**（仓库 Settings → Secrets → Actions）：
+- 必需：`RELEASE_TOKEN`（contents:write，供 electron-builder 创建 Release 与上传构件）。
+- 可选（mac 正式签名/公证；缺失则产出未签名构件，更新链路仍可用）：
+  `MAC_CERTS`（base64 .p12）、`MAC_CERTS_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`。
+
+**验证流程**：触发发版后，Releases 出现 `vX.Y.Z` 与 `latest-mac.yml`/dmg/zip/blockmap；
+本地安装低于该版本的旧包，启动后 `electron-updater` 检测到更新并下载，点击“立即升级”完成升级。
+
+**仍受签名环境限制**：本机/CI 无 Apple 开发者证书时，mac 构件为未签名（首次打开需绕过 Gatekeeper），
+无法做完整公证；更新链路（zip + latest-mac.yml + electron-updater）功能完整。GitHub Release
+的实际创建依赖仓库存在且 `RELEASE_TOKEN` 具备写权限。

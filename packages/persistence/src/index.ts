@@ -19,4 +19,6 @@ export {
   type WebhookConfigsRepo,
   type WebhookDeliveriesRepo,
   type CredentialsRepo,
+  type TaskMessagesRepo,
+  type PendingInteractionsRepo,
 } from './repositories.js';

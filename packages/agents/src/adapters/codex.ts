@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentDetection } from '@ai-devflow/core';
+import type { AgentEvent, AgentDetection, AgentCapabilitySupport } from '@ai-devflow/core';
 import type { AgentAdapter, AgentRun } from '../types.js';
 import { detectByCommand } from '../detect.js';
 import { buildRun, logEventsFromLine, spawnAgentProcess, type RawLine } from './base.js';
@@ -18,6 +18,15 @@ export class CodexAdapter implements AgentAdapter {
 
   detect(): Promise<AgentDetection> {
     return detectByCommand('codex', this.opts.executable ?? DEFAULT_CMD, ['--version']);
+  }
+
+  /**
+   * Codex exec 的权限模型是沙箱（--sandbox read-only/workspace-write/danger-full-access），
+   * 非交互 exec 不支持逐工具人工授权，也无插件/Skills 概念。故如实声明均不支持：
+   * 这些字段在 UI 禁用并说明，不静默忽略。
+   */
+  capabilities(): AgentCapabilitySupport {
+    return { tools: false, plugins: false, skills: false, approval: false };
   }
 
   async run(req: import('@ai-devflow/core').AgentRunRequest): Promise<AgentRun> {

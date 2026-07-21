@@ -1,17 +1,41 @@
 # ai-devflow
 
-本地优先的 AI 开发工作台。把自动化开发流程做成泳道看板，由本地 AI Agent 桥接器（Claude Code、Codex、Pi）在隔离的 Git worktree 中真实执行任务，SQLite 持久化全部状态、执行记录、检查点与通知，支持应用重启后恢复。
+本地优先的 AI 开发工作台。把自动化开发流程做成泳道看板，由本地 AI Agent 桥接器（Claude Code、Codex、Pi）在隔离的 Git worktree 中真实执行任务，SQLite 持久化全部状态、执行记录、对话消息、检查点与通知，支持应用重启后恢复。
 
 ## 架构
 
 详见 [docs/architecture.md](docs/architecture.md)。要点：
 
-- `packages/core`：纯 TS 领域模型、六泳道状态机、门禁、超时/Webhook 计算、CLI 标准化、重试/恢复、校验/脱敏。
+- `packages/core`：纯 TS 领域模型、泳道状态机、门禁、超时/Webhook 计算、CLI 标准化、重试/恢复、校验/脱敏。
 - `packages/persistence`：基于 Node 26 内建 `node:sqlite` 的迁移、事务、Repository。
-- `packages/agents`：`AgentAdapter` 协议 + Claude Code / Codex / Pi 三桥接器 + 可控测试适配器 + 检测。
-- `packages/scheduler`：角色分派、流水线、并发上限、阶段依赖、Git worktree 隔离、检查点、暂停/恢复/取消/重试、待沟通恢复、重启恢复。
+- `packages/agents`：`AgentAdapter` 协议（含能力声明）+ Claude Code / Codex / Pi 三桥接器 + 可控测试适配器 + 检测。
+- `packages/scheduler`：角色分派、能力解析、流水线、并发上限、阶段依赖、Git worktree 隔离、检查点、暂停/恢复/取消/重试、澄清/授权恢复、重启恢复。
 - `packages/notifications`：持久化超时规则、桌面通知+深链+防重复、Webhook 配置/签名/重试/投递历史。
-- `apps/desktop`：Electron（main + preload + 类型化 IPC + 安全配置）+ React 渲染器（项目/迭代/需求/看板/任务详情/设置）。
+- `apps/desktop`：Electron（main + preload + 类型化 IPC + 安全配置 + 自动更新）+ React 渲染器（项目/迭代/需求/看板/任务对话/设置/主题）。
+
+## 看板与状态
+
+可见泳道：`ready（待开发）→ in_progress（开发中）→ in_review（待验收）→ archived（已归档）`。
+
+- 需求池（backlog）已移除：新建任务直接进入待开发。
+- `awaiting_input`（待沟通/待授权）不是独立泳道，而是暂停标识（保留 `pausedFrom` 在原泳道展示）。
+- 任务完成进入**待验收**；归档必须经任务详情“验收通过并归档”并二次确认，看板拖拽不得绕过。
+
+## 主题
+
+支持 `浅色 / 深色 / 自动（跟随系统）`，默认自动。结合 Electron `nativeTheme.themeSource` 同步 `<html>` class、`color-scheme` 与窗口背景，避免亮色启动闪黑；设置页提供选择器并持久化。
+
+## Agent 能力配置
+
+设置页“项目 Agent 能力配置”可按项目与角色（规划/开发/审查/测试）配置：默认 Agent、允许/禁用工具、插件、Skills、是否要求人工授权。各适配器声明自身支持的能力，不支持者在 UI 禁用并说明。任务显式指定的 Agent 优先于角色默认。Claude Code 通过 `--allowedTools/--disallowedTools`（工具）、`--plugin-dir/--plugin-url`（插件）、`--disable-slash-commands`（Skills 全开/全关）落地；授权模式下用 `--permission-mode manual` 把工具调用转为 `approval_request`。
+
+## 任务对话与授权
+
+任务详情以对话窗口展示实时消息（user/assistant/system/tool、tool_call/tool_result、澄清/授权/确认请求、错误/状态），刷新/重启后历史不丢失；旧 `log_entries` 保留兼容，执行记录折叠展示。等待交互时进入 `awaiting_input`，回答/批准/确认后从检查点或 Agent session 恢复；等待期间不空转、不自动重试；拒绝授权不判定成功。
+
+## 自动更新与发版
+
+使用 electron-builder GitHub Provider + `electron-updater`：仅打包后启用，启动后异步检查、静默下载，下载完成提示当前/新版本，点击“立即升级”才退出安装；提供手动检查。发版通过 `.github/workflows/release.yml`（`workflow_dispatch` 输入 semver，仅基于 main，拒绝重复 Tag/Release，先 typecheck/lint/test 再构建安装包与更新 metadata，创建 `v<version>` Tag 与 GitHub Release）。详见 [docs/architecture.md §11](docs/architecture.md#11-自动更新与发版)。
 
 ## 环境要求
 

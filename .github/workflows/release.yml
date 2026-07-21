@@ -1,0 +1,130 @@
+name: release
+
+# 手动触发发版：只允许基于 main 发布，输入 semver 版本号。
+# 触发方式：GitHub → Actions → release → Run workflow → 填写 version（如 0.1.0）。
+#
+# 必需 Secrets（仓库 Settings → Secrets → Actions）：
+#   - RELEASE_TOKEN: 具备 contents:write 的 fine-grained / PAT，用于 electron-builder 创建 Release 与上传构件。
+# 可选 Secrets（签名/公证，仅 macOS 正式分发需要；缺失则产出未签名安装包，更新链路仍可用）：
+#   - MAC_CERTS: base64 编码的 .p12 证书（CSC_LINK 内容）
+#   - MAC_CERTS_PASSWORD: .p12 密码
+#   - APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID: 公证凭据
+#
+# 验证流程：
+#   1. 触发后在本仓库 Releases 看到 vX.Y.Z 与 latest-mac.yml / dmg / zip / blockmap。
+#   2. 本地安装旧版（package.json version 低于 X.Y.Z），启动后 electron-updater 检查到更新并下载，
+#      点击“立即升级”完成升级（见 docs/architecture.md §11）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver 版本号（不含 v 前缀，如 0.1.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # 只允许基于 main 发布
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - name: Validate semver
+        run: |
+          if ! echo "${{ inputs.version }}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "非法 semver：${{ inputs.version }}"
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Reject duplicate tag/release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            echo "Tag ${TAG} 已存在，拒绝重复发版"
+            exit 1
+          fi
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release ${TAG} 已存在，拒绝重复发版"
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Quality gates (typecheck + lint + test)
+        run: |
+          pnpm typecheck
+          pnpm lint
+          pnpm test
+
+      - name: Bump version to ${{ inputs.version }}
+        run: |
+          npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+          npm --prefix apps/desktop version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Build desktop (renderer + electron)
+        run: pnpm --filter @ai-devflow/desktop build
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json apps/desktop/package.json
+          git diff --cached --quiet || git commit -m "chore(release): v${{ inputs.version }}"
+
+      - name: Tag v${{ inputs.version }}
+        run: |
+          git tag "v${{ inputs.version }}"
+
+      - name: Push commit and tag
+        run: |
+          git push origin main
+          git push origin "v${{ inputs.version }}"
+
+      - name: Build installers + publish to GitHub Release (macOS)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          CSC_LINK: ${{ secrets.MAC_CERTS }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # 构建正式安装包 + blockmap + updater metadata，并上传到刚创建的 tag 对应 Release。
+          # 无签名凭据时产出未签名构件（CSC_IDENTITY_AUTO_DISCOVERY=false 跳过自动发现），更新链路仍可用。
+          if [ -z "$CSC_LINK" ]; then
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+          pnpm --filter @ai-devflow/desktop release
+
+      - name: Upload workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.version }}
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.yml
+            apps/desktop/release/*.blockmap
+          if-no-files-found: ignore

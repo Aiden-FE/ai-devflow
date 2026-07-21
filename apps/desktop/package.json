@@ -1,6 +1,6 @@
 {
   "name": "@ai-devflow/desktop",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.cjs",
@@ -15,7 +15,50 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node scripts/run-e2e.mjs",
-    "package": "electron-builder --dir"
+    "package": "electron-builder --dir",
+    "release": "electron-builder",
+    "dist": "electron-builder --publish never"
+  },
+  "build": {
+    "appId": "com.ai-devflow.desktop",
+    "productName": "ai-devflow",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json",
+      "!**/*.map"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "icon": "build/icon.png",
+      "category": "Development"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Aiden-FE",
+        "repo": "ai-devflow",
+        "releaseType": "release"
+      }
+    ]
   },
   "dependencies": {
     "@ai-devflow/agents": "workspace:*",
@@ -28,6 +71,7 @@
     "ai": "^4.0.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
+    "electron-updater": "^6.3.9",
     "lucide-react": "^0.460.0",
     "radix-ui": "^1.6.2",
     "tailwind-merge": "^2.5.0",

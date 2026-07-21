@@ -228,11 +228,109 @@ describe('orchestrator serial dependencies', () => {
   });
 });
 
+describe('orchestrator approval flow + capabilities', () => {
+  it('passes resolved capabilities to adapter and merges roleConfig agentType', async () => {
+    // 项目配置：coder 角色 -> codex + 工具白名单
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-caps-'));
+    const reg = new AgentRegistry();
+    reg.register(new AvailableFakeAdapter('codex'));
+    const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
+    r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: { roleConfigs: { coder: { agentType: 'codex', tools: ['Read', 'Edit'] } } } });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const t = makeTask();
+    t.agentType = undefined; // 按角色默认 -> codex
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    expect(r2.tasks.get(t.id)!.agentType).toBe('codex');
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('pauses on approval_request, resumes to in_review on allow (deny is not success)', async () => {
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-approval-'));
+    const reg = new AgentRegistry();
+    reg.register(new ControllableTestAdapter({
+      script: (req) => {
+        if (req.interactionResponse?.kind === 'approval') {
+          return req.interactionResponse.value === 'allow'
+            ? [{ type: 'log', level: 'info', text: 'approved run', t: 0 }, { type: 'done', summary: 'ok', t: 0 }]
+            : [{ type: 'error', message: 'tool denied', recoverable: false, t: 0 }];
+        }
+        return [
+          { type: 'log', level: 'info', text: 'want to run bash', t: 0 },
+          { type: 'approval_request', toolName: 'Bash', toolUseId: 'tu1', description: 'rm -rf', t: 0 },
+        ];
+      },
+    }));
+    const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
+    r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const t = makeTask();
+    r2.tasks.insert(t);
+
+    await orch2.start(t.id);
+    expect(r2.tasks.get(t.id)!.status).toBe('awaiting_input');
+    const inter = r2.pendingInteractions.getPendingForTask(t.id);
+    expect(inter?.kind).toBe('approval');
+    expect(inter?.toolName).toBe('Bash');
+    // 对话消息包含 approval_request
+    const msgs = r2.taskMessages.listByTask(t.id);
+    expect(msgs.some((m) => m.kind === 'approval_request')).toBe(true);
+
+    // 批准 -> 恢复并完成到待验收
+    await orch2.resolveInteraction(t.id, inter!.id, 'allow');
+    expect(r2.tasks.get(t.id)!.status).toBe('in_review');
+    expect(r2.pendingInteractions.get(inter!.id)!.status).toBe('approved');
+
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('denial does not mark success (task returns to ready on error)', async () => {
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-deny-'));
+    const reg = new AgentRegistry();
+    reg.register(new ControllableTestAdapter({
+      script: (req) => {
+        if (req.interactionResponse?.kind === 'approval' && req.interactionResponse.value === 'deny') {
+          return [{ type: 'error', message: 'denied', recoverable: false, t: 0 }];
+        }
+        return [{ type: 'approval_request', toolName: 'Bash', toolUseId: 'tu1', description: 'x', t: 0 }];
+      },
+    }));
+    const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
+    r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    const inter = r2.pendingInteractions.getPendingForTask(t.id)!;
+    await orch2.resolveInteraction(t.id, inter.id, 'deny').catch(() => {});
+    // 拒绝后任务不应进入待验收/归档（不判定成功）
+    const final = r2.tasks.get(t.id)!.status;
+    expect(['ready', 'in_progress', 'awaiting_input']).toContain(final);
+    expect(r2.pendingInteractions.get(inter.id)!.status).toBe('denied');
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 // 可用适配器桩：detect 恒可用，run 产出 done。
 class AvailableFakeAdapter implements AgentAdapter {
   constructor(readonly id: import('@ai-devflow/core').AgentType) {}
   async detect() {
     return { agentType: this.id, available: true, version: 'fake' };
+  }
+  capabilities(): import('@ai-devflow/core').AgentCapabilitySupport {
+    return { tools: true, plugins: true, skills: 'all-or-none', approval: true };
   }
   async run(_req: AgentRunRequest): Promise<AgentRun> {
     return {

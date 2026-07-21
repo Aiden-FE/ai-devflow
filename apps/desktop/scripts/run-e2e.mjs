@@ -87,7 +87,7 @@ try {
   await win.getByText('Req1').first().waitFor();
   check('创建需求（含验收标准）', true);
 
-  // 4. 创建任务（指定测试适配器）
+  // 4. 创建任务（指定测试适配器）-> 直接进入待开发泳道（需求池已移除）
   await win.getByRole('button', { name: '创建任务' }).click();
   await dialog().waitFor();
   await dialog().locator('input').nth(0).fill('Task1');
@@ -96,8 +96,8 @@ try {
   await dialog().getByRole('combobox').nth(1).click();
   await win.getByRole('option', { name: '测试适配器' }).click();
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
-  await win.locator('[data-task-card]').first().waitFor();
-  check('创建任务进入需求池', true);
+  await win.locator('[data-lane="ready"] [data-task-card]').first().waitFor();
+  check('创建任务直接进入待开发', true);
 
   // 5. 配置并检测 Agent
   await win.getByRole('button', { name: '设置' }).click();
@@ -107,21 +107,15 @@ try {
   await win.getByRole('button', { name: '工作台' }).click();
   await win.getByText('看板').first().waitFor({ timeout: 10000 });
 
-  // 6. 拖拽：需求池 -> 待开发
-  const card = win.locator('[data-task-card]').first();
-  await card.dragTo(win.locator('[data-lane="ready"]'));
-  await win.locator('[data-lane="ready"] [data-task-card]').first().waitFor({ timeout: 5000 });
-  check('拖拽迁移（门禁校验）', true);
-
-  // 7. 启动任务并查看流式日志（侧滑窗）
+  // 6. 启动任务并查看任务对话窗口（侧滑窗）
   await win.locator('[data-lane="ready"] [data-task-card]').first().click();
   await dialog().waitFor(); // Sheet 打开
   await dialog().getByRole('button', { name: '启动' }).click();
-  await win.getByText('实时日志').waitFor({ timeout: 5000 });
-  check('启动任务并查看实时日志（侧滑窗）', await win.getByText('实时日志').isVisible());
-  // 任务执行后推进到测试中/归档
+  await win.getByText('任务对话').waitFor({ timeout: 5000 });
+  check('启动任务并查看任务对话（侧滑窗）', await win.getByText('任务对话').isVisible());
+  // 任务执行后推进到待验收/归档（待验收=人工验收入口，不自动归档）
   await win.locator('[data-lane="in_review"] [data-task-card], [data-lane="archived"] [data-task-card]').first().waitFor({ timeout: 15000 });
-  check('任务执行后推进到测试中/归档', true);
+  check('任务执行后推进到待验收/归档', true);
 
   // 8. 语言切换（默认中文 -> English -> 中文）
   await win.keyboard.press('Escape'); // 关闭任务详情侧滑窗
