@@ -6,21 +6,25 @@ export type AgentType = 'claude_code' | 'codex' | 'pi' | 'test';
 /**
  * 任务状态（内部值）。
  *
- * 可见泳道：ready -> in_progress -> in_review -> archived。
- * `awaiting_input` 不是独立泳道，而是开发中/待验收任务的暂停标识（保留 pausedFrom 在原泳道展示）。
- * `backlog`（需求池）已移除：新建任务直接进入 ready；历史 backlog 任务由迁移改为 ready。
- * 保留为联合成员仅供迁移与类型兼容，运行时不再产生该状态。
+ * 可见泳道：ready -> in_progress -> testing -> in_review -> archived。
+ * - `testing`（测试中）：开发 Agent 完成后进入，由 reviewer 角色对应的审查 Agent 自动审查；
+ *   审查通过才合并并进入 in_review（待验收），不通过退回 in_progress 携带反馈修复。
+ *   开发任务禁止从 in_progress 直接进入 in_review（状态机不提供该迁移），必须经过 testing。
+ * - `awaiting_input` 不是独立泳道，而是开发中/测试中/待验收任务的暂停标识（保留 pausedFrom 在原泳道展示）。
+ * - `backlog`（需求池）已移除：新建任务直接进入 ready；历史 backlog 任务由迁移改为 ready。
+ *   保留为联合成员仅供迁移与类型兼容，运行时不再产生该状态。
  */
 export type TaskStatus =
   | 'backlog'
   | 'ready'
   | 'in_progress'
+  | 'testing'
   | 'awaiting_input'
   | 'in_review'
   | 'archived';
 
 /** 可见泳道状态（不含 backlog 与暂停标识 awaiting_input）。 */
-export const VISIBLE_LANES: TaskStatus[] = ['ready', 'in_progress', 'in_review', 'archived'];
+export const VISIBLE_LANES: TaskStatus[] = ['ready', 'in_progress', 'testing', 'in_review', 'archived'];
 
 /** 任务角色，映射到 AgentType。 */
 export type TaskRole = 'planner' | 'coder' | 'reviewer' | 'tester';
@@ -51,6 +55,7 @@ export interface ProjectSettings {
   /**
    * 角色 -> 能力配置（新字段，优先于 agentRoles）。
    * 兼容旧数据：缺省时回退到 agentRoles + 角色默认。
+   * 逐字段继承全局：未配置（undefined）的字段继承 GlobalAgentConfig；显式值（含 []）覆盖全局。
    */
   roleConfigs?: Partial<Record<TaskRole, RoleAgentConfig>>;
   /** 该项目并发上限覆盖。 */
@@ -58,8 +63,20 @@ export interface ProjectSettings {
 }
 
 /**
+ * 全局 Agent 能力默认配置：角色 -> RoleAgentConfig。
+ * 存入 credentials('global_agent_config')（明文 JSON，非密钥）。
+ * 运行时合并顺序：项目显式值 > 全局值 > 系统默认（defaultAgentForRole / 适配器默认）。
+ */
+export type GlobalAgentConfig = Partial<Record<TaskRole, RoleAgentConfig>>;
+
+/**
  * 单个角色（planner/coder/reviewer/tester）的 Agent 能力配置。
- * 各字段缺省表示“不限制 / 按角色默认”。配置存入 projects.settings_json。
+ *
+ * 字段语义（重要 —— 区分「未配置」与「空数组」）：
+ * - `undefined`（未配置）= 继承上一层（项目继承全局；全局继承系统默认），表示「不限制 / 按默认」。
+ * - `[]`（显式空数组）= 明确的覆盖值：tools=[] 表示禁用全部工具、skills=[] 表示关闭全部 skills、
+ *   plugins=[] 表示不加载额外插件。合并时 `[]` 会覆盖继承值，不会被当成「未配置」。
+ * 项目级配置存入 projects.settings_json；全局默认存入 credentials('global_agent_config')。
  */
 export interface RoleAgentConfig {
   /** 默认 Agent（覆盖角色默认映射）。缺省=按角色默认。 */
@@ -266,8 +283,20 @@ export interface AgentDetection {
   agentType: AgentType;
   available: boolean;
   version?: string;
+  /** 解析到的 CLI 绝对路径（找不到时回退为命令名）。 */
   path?: string;
   reason?: string;
+  /**
+   * 不可用时的错误类别，便于 UI 区分处置：
+   * - 'not-found'：未找到 CLI（ENOENT）。
+   * - 'incompatible-node'：CLI 已找到，但其 shebang/PATH 命中的 Node 运行时过旧（如不支持 ??=）。
+   * - 'other'：其它检测失败。
+   */
+  errorKind?: 'not-found' | 'incompatible-node' | 'other';
+  /** 解析到的 Node 可执行文件绝对路径（诊断用，incompatible-node 时尤其重要）。 */
+  nodePath?: string;
+  /** Node 运行时版本（诊断用）。 */
+  nodeVersion?: string;
 }
 
 /** Agent 运行请求。 */
@@ -300,6 +329,10 @@ export interface GateContext {
   hasUserAnswer?: boolean;
   /** 归档门禁：是否经过显式人工验收（tasks.accept）。 */
   accepted?: boolean;
+  /** 审查门禁：reviewer Agent 审查是否通过（testing -> in_review 必须为 true，拒绝拖拽绕过）。 */
+  reviewPassed?: boolean;
+  /** 验收不通过退回：必填的退回原因（canReject 要求非空）。 */
+  rejectReason?: string;
 }
 
 export interface GateResult {
@@ -344,11 +377,57 @@ export interface AiChatMessage {
   content: string;
 }
 
-/** AI 提议的任务草稿（用户确认后落库）。 */
+/** 「测试连接」结果：脱敏后的最终请求地址、HTTP 状态与服务端摘要（不含 API Key）。 */
+export interface TestConnectionResult {
+  ok: boolean;
+  /** HTTP 状态码（0 表示网络层失败）。 */
+  status: number;
+  /** 脱敏后的最终请求地址。 */
+  url: string;
+  /** 服务端响应摘要（脱敏、截断）。 */
+  serverSummary?: string;
+  /** 失败原因（脱敏）。 */
+  error?: string;
+}
+
+/**
+ * AI 提议的任务草稿（用户确认后落库）。
+ * AI 根据任务间关系自动输出依赖 DAG：每个草稿有稳定 draftId，dependsOn 引用其它草稿的 draftId。
+ * 落库时由批量创建把 draftId 映射为真实 taskId（见 validateProposalDag 与 tasks:createBatch）。
+ */
 export interface AiTaskProposal {
+  /** 草稿稳定标识（AI 输出，如 "t1"/"t2"；用于 dependsOn 引用与落库映射）。 */
+  draftId: string;
   title: string;
   description: string;
   role: TaskRole;
+  /** 依赖的其它草稿 draftId 列表（DAG；无依赖则保持并行）。 */
+  dependsOn?: string[];
+}
+
+/**
+ * 验收不通过退回请求（专用 reject 操作，禁止用无原因的通用 updateStatus 代替）。
+ */
+export interface RejectTaskInput {
+  taskId: string;
+  /** 退回原因（必填，写入任务消息/审计）。 */
+  reason: string;
+  /** 目标状态：'ready'=仅改状态待开发；'in_progress'=立即携原因执行修复。默认 in_progress。 */
+  target: 'ready' | 'in_progress';
+}
+
+/**
+ * 审查结论（reviewer Agent 输出，持久化到执行记录与任务对话）。
+ */
+export interface ReviewVerdict {
+  /** 审查是否通过：通过才合并并进入待验收；不通过退回开发中携带反馈。 */
+  pass: boolean;
+  /** 结论摘要。 */
+  summary: string;
+  /** 反馈（不通过时的修复建议；通过时可为空）。 */
+  feedback?: string;
+  /** 覆盖的规则维度（需求覆盖 / 测试构建 lint / 明显回归 / 安全问题 / 无关改动）。 */
+  checks?: string[];
 }
 
 /** AI 提议的需求草稿（用户确认后落库）。 */
@@ -446,7 +525,15 @@ export interface PendingInteraction {
 
 // ---- 自动更新（Part 6） ----
 
-export type UpdateState = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error' | 'no-update';
+export type UpdateState =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'error'
+  | 'no-update';
 
 export interface UpdateProgress {
   percent: number;
@@ -464,5 +551,12 @@ export interface UpdateStatus {
   /** 下载进度（downloading 时）。 */
   progress?: UpdateProgress;
   /** 错误信息（error 时）。 */
+  error?: string;
+}
+
+/** 「立即升级」安装结果：不允许静默 no-op，失败时返回可诊断信息。 */
+export interface InstallUpdateResult {
+  ok: boolean;
+  /** 失败/不可安装时的可诊断信息（含当前状态）。 */
   error?: string;
 }

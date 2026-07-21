@@ -7,16 +7,22 @@ import type {
   ExecutionRecord,
   LogEntry,
   Task,
+  TaskRole,
   TaskStatus,
   Project,
   TaskMessage,
   PendingInteraction,
   InteractionKind,
+  GlobalAgentConfig,
+  ReviewVerdict,
+  RejectTaskInput,
 } from '@ai-devflow/core';
 import {
   canTransition,
+  canReject,
   checkTaskDependencies,
   defaultAgentForRole,
+  resolveRoleConfig,
   now,
   randomId,
   decideRetry,
@@ -34,6 +40,8 @@ export interface OrchestratorOptions {
   retryPolicy?: RetryPolicy;
   /** 是否在可恢复失败时自动重试。 */
   autoRetry?: boolean;
+  /** 审查不通过后自动返工修复的最大轮数（超过则停在开发中等待人工介入，避免无限循环）。默认 2。 */
+  maxReviewRounds?: number;
 }
 
 export interface TaskEvent {
@@ -63,6 +71,9 @@ export interface StartInit {
 }
 
 const IMPLICIT_STAGE_ID = '__main__';
+
+/** 审查 Agent 必须覆盖的基本规则维度（随审查结论一并持久化）。 */
+const REVIEW_CHECKS = ['需求覆盖', '测试/构建/lint', '明显回归', '安全问题', '无关改动'];
 
 export class Orchestrator extends EventEmitter {
   private sem: Semaphore;
@@ -278,20 +289,251 @@ export class Orchestrator extends EventEmitter {
       this.repos.executions.update(execution);
     }
 
-    // 全部阶段完成 -> 合并特性分支到项目默认分支，使产出落入主项目 -> in_review（待验收）
-    const branchName = `ai-devflow/${task.id}`;
-    const mergeRes = await mergeWorktreeBranch({
-      repoPath: project.path,
-      branchName,
-      defaultBranch: project.defaultBranch,
-    });
-    if (mergeRes.merged) {
-      this.log(execution, 'info', `已合并到 ${project.defaultBranch}，产出已落入主项目`);
-    } else {
-      this.log(execution, 'warn', `未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）`);
+    // 全部开发阶段完成 -> 进入「测试中」，启动 reviewer 角色对应的审查 Agent。
+    // 开发任务禁止直接进入待验收：必须经审查通过才合并并进入 in_review。
+    this.transition(task, 'testing');
+    await this.reviewAndFinalize(task, project);
+  }
+
+  /**
+   * 审查并定稿：运行 reviewer 审查 Agent。
+   * - 通过 -> 合并特性分支到默认分支 -> in_review（待验收），归档仍需人工验收（tasks.accept）。
+   * - 不通过 -> 退回 in_progress 并携反馈从头返工（有界，超过 maxReviewRounds 停下等人工介入）。
+   */
+  private async reviewAndFinalize(task: Task, project: Project): Promise<void> {
+    const verdict = await this.runReview(task, project);
+    if (verdict.pass) {
+      const branchName = `ai-devflow/${task.id}`;
+      const mergeRes = await mergeWorktreeBranch({
+        repoPath: project.path,
+        branchName,
+        defaultBranch: project.defaultBranch,
+      });
+      const latest = this.repos.executions.getLatest(task.id);
+      if (mergeRes.merged) {
+        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
+      } else {
+        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
+      }
+      // 审查通过才进入待验收（门禁 reviewPassed 强制，拒绝拖拽/IPC 绕过）。
+      this.transition(task, 'in_review', { reviewPassed: true });
+      return;
     }
-    // Agent 完成后进入待验收；归档必须经人工验收（tasks.accept），禁止自动归档。
-    this.transition(task, 'in_review');
+
+    // 审查不通过 -> 退回开发中携反馈修复。
+    const feedback = verdict.feedback ?? verdict.summary;
+    this.recordMessage(task, this.repos.executions.getLatest(task.id), {
+      role: 'assistant', kind: 'text', text: `审查不通过，退回开发中修复：${feedback}`,
+    });
+    const maxRounds = this.opts.maxReviewRounds ?? 2;
+    if (task.retryCount >= maxRounds) {
+      // 有界：避免审查-返工无限循环。停在开发中并给出可见错误，等待人工介入。
+      this.transition(task, 'in_progress');
+      this.emit('task-error', {
+        taskId: task.id,
+        error: `审查 ${maxRounds} 轮仍不通过，已停止自动返工，请人工介入。最后反馈：${feedback}`,
+      });
+      return;
+    }
+    this.repos.tasks.incRetry(task.id);
+    task.retryCount += 1;
+    this.transition(task, 'in_progress');
+    // 携反馈从头重新执行开发（重置阶段索引）。
+    task.currentStage = 0;
+    this.repos.tasks.update(task);
+    await this.runPipeline(task, project, { userInput: `[审查反馈，请据此修复] ${feedback}` });
+  }
+
+  /**
+   * 启动 reviewer 角色对应的审查 Agent 并解析审查结论。
+   * 审查上下文包含：需求描述/验收标准、任务目标、git diff/产物与基本规则；
+   * 结论与证据持久化到执行记录摘要与任务对话。
+   */
+  private async runReview(task: Task, project: Project): Promise<ReviewVerdict> {
+    const reviewerAgent = await this.resolveReviewerAgent(project);
+    // reviewer 使用「全局配置 + 项目覆盖」解析后的能力配置；审查为只读，不要求人工授权。
+    const capabilities = { ...this.resolveCapabilitiesForRole('reviewer', project, reviewerAgent), requireApproval: false };
+    const execution: ExecutionRecord = {
+      id: randomId(),
+      taskId: task.id,
+      attempt: (this.repos.executions.getLatest(task.id)?.attempt ?? 0) + 1,
+      agentType: reviewerAgent,
+      startedAt: now(),
+      status: 'running',
+    };
+    this.repos.executions.insert(execution);
+    this.log(execution, 'info', `启动审查 Agent ${reviewerAgent}（reviewer，第 ${execution.attempt} 次）`);
+
+    const prompt = this.buildReviewPrompt(task);
+    let output = '';
+    let errored: string | undefined;
+    try {
+      const run = await this.registry.require(reviewerAgent).run({
+        taskId: task.id,
+        prompt,
+        cwd: task.worktreePath ?? project.path,
+        capabilities,
+      });
+      this.runs.set(task.id, { run, canceled: false });
+      try {
+        for await (const ev of run.events) {
+          if (this.isCanceled(task.id)) {
+            await run.cancel();
+            break;
+          }
+          await this.handleEvent(task, execution, ev);
+          if (ev.type === 'done') output += `\n${ev.summary}`;
+          else if (ev.type === 'log') output += `\n${ev.text}`;
+          else if (ev.type === 'error') errored = ev.message;
+        }
+      } finally {
+        this.runs.delete(task.id);
+      }
+    } catch (e) {
+      errored = (e as Error).message;
+    }
+
+    const verdict = this.parseReviewVerdict(output, errored);
+    // 持久化审查结论与证据：执行记录摘要 + 任务对话。
+    this.markExecution(
+      execution,
+      verdict.pass ? 'succeeded' : 'failed',
+      `[review:${verdict.pass ? 'pass' : 'fail'}] ${verdict.summary}${verdict.feedback ? ` | 反馈: ${verdict.feedback}` : ''}`,
+    );
+    this.recordMessage(task, execution, {
+      role: 'assistant',
+      kind: 'text',
+      text: `【审查结论】${verdict.pass ? '通过' : '不通过'}：${verdict.summary}` +
+        `${verdict.feedback ? `\n反馈：${verdict.feedback}` : ''}` +
+        `${verdict.checks?.length ? `\n覆盖维度：${verdict.checks.join('、')}` : ''}`,
+    });
+    return verdict;
+  }
+
+  /** 解析审查 Agent 输出中的结论标记；无明确 PASS 时保守按不通过（绝不绕过审查进入待验收）。 */
+  private parseReviewVerdict(output: string, errored?: string): ReviewVerdict {
+    const failM = /REVIEW_VERDICT:\s*FAIL:?\s*(.*)/i.exec(output);
+    const passM = /REVIEW_VERDICT:\s*PASS\b/i.exec(output);
+    if (failM) {
+      return { pass: false, summary: '审查不通过', feedback: (failM[1] ?? '').trim() || '未给出具体原因', checks: REVIEW_CHECKS };
+    }
+    if (passM) {
+      return { pass: true, summary: '审查通过', checks: REVIEW_CHECKS };
+    }
+    return {
+      pass: false,
+      summary: errored ? `审查执行异常：${errored}` : '审查未给出明确结论',
+      feedback: errored ?? '审查 Agent 未输出 REVIEW_VERDICT 结论，按不通过处理。',
+      checks: REVIEW_CHECKS,
+    };
+  }
+
+  /** 构造审查上下文 prompt：需求/验收标准、任务目标、审查规则与结论输出格式。 */
+  private buildReviewPrompt(task: Task): string {
+    const req = this.repos.requirements.get(task.requirementId);
+    return [
+      '你是一名严格的代码审查 Agent（reviewer）。请审查当前工作区中针对本任务的改动（可用 git diff 查看）。',
+      `【需求描述】${req?.description || '(无)'}`,
+      `【验收标准】${req?.acceptance || '(无)'}`,
+      `【任务目标】${task.title}`,
+      `【任务描述】${task.description || '(无)'}`,
+      '【审查规则】请逐项检查：1) 需求/验收标准是否覆盖；2) 测试/构建/lint 是否通过；3) 是否引入明显回归；4) 是否存在安全问题；5) 是否存在与任务无关的改动。',
+      '【输出要求】最后必须单独输出一行结论，格式为：REVIEW_VERDICT: PASS 或 REVIEW_VERDICT: FAIL: <不通过原因与修复建议>。',
+    ].join('\n');
+  }
+
+  /** 解析 reviewer 角色的可用 Agent：项目覆盖 > 全局 > 角色映射，回退到首个可用适配器。 */
+  private async resolveReviewerAgent(project: Project): Promise<AgentType> {
+    const projectCfg = project.settings.roleConfigs?.reviewer;
+    const globalCfg = this.getGlobalAgentConfig().reviewer;
+    const override = projectCfg?.agentType ?? globalCfg?.agentType ?? project.settings.agentRoles?.reviewer;
+    const candidates: AgentType[] = [];
+    // 测试/E2E 逃生舱：AI_DEVFLOW_REVIEW_AGENT 强制指定审查 Agent（如 'test'），避免在自动化里调真实 CLI。
+    const forced = process.env.AI_DEVFLOW_REVIEW_AGENT as AgentType | undefined;
+    if (forced) candidates.push(forced);
+    if (override && !candidates.includes(override)) candidates.push(override);
+    for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) {
+      if (!candidates.includes(t)) candidates.push(t);
+    }
+    for (const t of candidates) {
+      const adapter = this.registry.get(t);
+      if (!adapter) continue;
+      try {
+        const det = await adapter.detect();
+        if (det.available) return t;
+      } catch {
+        // 检测失败则尝试下一个
+      }
+    }
+    throw new Error('没有可用的审查 Agent 桥接器：未检测到 claude/codex/pi。请安装其中之一并重启。');
+  }
+
+  /**
+   * 验收不通过退回（专用 reject 操作）：原因必填，写入任务消息/审计。
+   * - target='ready'：仅改状态到待开发。
+   * - target='in_progress'（默认）：立即把原因作为修复上下文启动执行；无可用 Agent 时抛错（避免“显示成功但未运行”）。
+   */
+  async rejectTask(input: RejectTaskInput): Promise<void> {
+    const task = this.repos.tasks.get(input.taskId);
+    if (!task) throw new Error(`任务不存在：${input.taskId}`);
+    if (task.status !== 'in_review') throw new Error(`仅待验收任务可退回（当前状态：${task.status}）`);
+    const reason = (input.reason ?? '').trim();
+    const gate = canReject({
+      hasAcceptance: true,
+      hasAgentAssigned: !!task.agentType,
+      hasArtifacts: true,
+      rejectReason: reason,
+    });
+    if (!gate.ok) throw new Error(gate.reasons.join('; '));
+
+    const target: TaskStatus = input.target === 'ready' ? 'ready' : 'in_progress';
+    const project = this.repos.projects.get(task.projectId);
+    if (!project) throw new Error(`项目不存在：${task.projectId}`);
+
+    // 退回开发中需立即执行：先确保有可用 Agent（无则抛错，错误对 UI 可见）。
+    if (target === 'in_progress' && !task.agentType) {
+      const agentType = await this.resolveDefaultAgent(task, project);
+      this.repos.tasks.assignAgent(task.id, agentType);
+      task.agentType = agentType;
+    }
+
+    const label = target === 'ready' ? '待开发' : '开发中';
+    this.recordMessage(task, undefined, { role: 'user', kind: 'text', text: `验收不通过，退回${label}。原因：${reason}` });
+    this.transition(task, target, { hasAcceptance: true, hasArtifacts: true });
+
+    if (target === 'in_progress') {
+      // 立即携原因作为修复上下文启动执行（异步运行；失败经 task-error 事件可见）。
+      task.currentStage = 0;
+      this.repos.tasks.update(task);
+      void this.start(task.id, { userInput: `[验收退回，请据此修复] ${reason}` }).catch((e) =>
+        this.emit('task-error', { taskId: task.id, error: `退回后启动执行失败：${(e as Error).message}` }),
+      );
+    }
+  }
+
+  /** 读取全局 Agent 能力默认配置（credentials('global_agent_config')，明文 JSON）。 */
+  private getGlobalAgentConfig(): GlobalAgentConfig {
+    const raw = this.repos.credentials.get('global_agent_config');
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw) as GlobalAgentConfig;
+    } catch {
+      return {};
+    }
+  }
+
+  /** 解析某一角色的能力配置（全局 + 项目逐字段合并）。 */
+  private resolveCapabilitiesForRole(role: TaskRole, project: Project, agentType: AgentType): AgentCapabilities {
+    const global = this.getGlobalAgentConfig();
+    const merged = resolveRoleConfig(global[role], project.settings.roleConfigs?.[role]).config;
+    return {
+      agentType,
+      plugins: merged.plugins,
+      skills: merged.skills,
+      tools: merged.tools,
+      disallowedTools: merged.disallowedTools,
+      requireApproval: merged.requireApproval ?? false,
+    };
   }
 
   private async handleEvent(task: Task, execution: ExecutionRecord, ev: AgentEvent): Promise<void> {
@@ -413,6 +655,22 @@ export class Orchestrator extends EventEmitter {
       createdAt: now(),
     };
     this.repos.checkpoints.upsert(cp);
+  }
+
+  /**
+   * 手动暂停（标记待沟通）：转 awaiting_input，并创建一条澄清交互写入对话，
+   * 使用户能补充说明后恢复（修复“手动 pause 只改状态、没有 pending interaction 导致无法输入/恢复”）。
+   */
+  async pause(taskId: string, note?: string): Promise<void> {
+    const task = this.repos.tasks.get(taskId);
+    if (!task) throw new Error(`任务不存在：${taskId}`);
+    if (task.status !== 'in_progress' && task.status !== 'in_review' && task.status !== 'testing') {
+      throw new Error('仅开发中/测试中/待验收任务可标记待沟通');
+    }
+    this.transition(task, 'awaiting_input');
+    const title = note && note.trim() ? note.trim() : '手动暂停，等待补充说明';
+    const msg = this.recordMessage(task, undefined, { role: 'system', kind: 'clarification_request', text: title });
+    this.createInteraction(task, 'clarification', title, { messageId: msg.id, detail: '手动暂停：补充说明后将恢复执行。' });
   }
 
   /** 用户回答澄清后从检查点恢复（兼容旧 ask_user 流程）。 */
@@ -572,34 +830,31 @@ export class Orchestrator extends EventEmitter {
     if (task.agentType) return task.agentType;
     const roleConfig = project.settings.roleConfigs?.[task.role];
     if (roleConfig?.agentType) return roleConfig.agentType;
+    // 全局默认配置（项目未显式覆盖时继承）。
+    const globalConfig = this.getGlobalAgentConfig()[task.role];
+    if (globalConfig?.agentType) return globalConfig.agentType;
     const roleOverride = project.settings.agentRoles?.[task.role];
     if (roleOverride) return roleOverride;
     return defaultAgentForRole(task.role);
   }
 
   /**
-   * 解析能力配置：角色 RoleAgentConfig（优先）+ 任务显式 agentType 覆盖。
-   * 任务显式 agentType 优先于角色默认；工具/插件/Skills/授权来自角色配置。
+   * 解析能力配置：项目显式值 > 全局值 > 系统默认，逐字段合并（undefined=继承，[]=显式空覆盖）。
+   * 任务显式 agentType 优先于角色默认；工具/插件/Skills/授权来自合并后的角色配置。
    */
   private resolveCapabilities(task: Task, project: Project, agentType: AgentType): AgentCapabilities {
-    const roleConfig = project.settings.roleConfigs?.[task.role];
-    return {
-      agentType,
-      plugins: roleConfig?.plugins,
-      skills: roleConfig?.skills,
-      tools: roleConfig?.tools,
-      disallowedTools: roleConfig?.disallowedTools,
-      requireApproval: roleConfig?.requireApproval ?? false,
-    };
+    return this.resolveCapabilitiesForRole(task.role, project, agentType);
   }
 
   /**
-   * 解析默认 Agent：按“角色覆盖 > claude_code > codex > pi”顺序检测首个可用适配器。
+   * 解析默认 Agent：按“项目角色覆盖 > 全局角色覆盖 > claude_code > codex > pi”顺序检测首个可用适配器。
    * 不含 'test'（测试适配器需显式指定）。无可用适配器时抛出清晰错误。
    */
   private async resolveDefaultAgent(task: Task, project: Project): Promise<AgentType> {
     const roleConfig = project.settings.roleConfigs?.[task.role];
-    const roleOverride = roleConfig?.agentType ?? project.settings.agentRoles?.[task.role];
+    const globalConfig = this.getGlobalAgentConfig()[task.role];
+    const roleOverride =
+      roleConfig?.agentType ?? globalConfig?.agentType ?? project.settings.agentRoles?.[task.role];
     const candidates: AgentType[] = [];
     if (roleOverride) candidates.push(roleOverride);
     for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) {

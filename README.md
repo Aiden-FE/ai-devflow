@@ -15,11 +15,13 @@
 
 ## 看板与状态
 
-可见泳道：`ready（待开发）→ in_progress（开发中）→ in_review（待验收）→ archived（已归档）`。
+可见泳道：`ready（待开发）→ in_progress（开发中）→ testing（测试中）→ in_review（待验收）→ archived（已归档）`。
 
 - 需求池（backlog）已移除：新建任务直接进入待开发。
 - `awaiting_input`（待沟通/待授权）不是独立泳道，而是暂停标识（保留 `pausedFrom` 在原泳道展示）。
-- 任务完成进入**待验收**；归档必须经任务详情“验收通过并归档”并二次确认，看板拖拽不得绕过。
+- **开发任务禁止直接进入待验收**：开发 Agent 完成后进入**测试中**，由 reviewer 角色对应的审查 Agent 自动审查（上下文含需求/验收标准、任务目标、git diff/产物，覆盖需求覆盖、测试构建 lint、回归、安全、无关改动）。**审查通过才合并并进入待验收**；不通过退回开发中并携带反馈修复（有界返工）。审查结论与证据持久化到执行记录与任务对话。任何拖拽/IPC 都不得绕过门禁。
+- **验收不通过退回**为专用操作：原因必填并写入任务消息/审计，目标状态可选「待开发」（仅改状态）或「开发中」（立即携原因执行修复），默认开发中。
+- 归档必须经任务详情“验收通过并归档”并二次确认，看板拖拽不得绕过。
 
 ## 主题
 
@@ -27,15 +29,41 @@
 
 ## Agent 能力配置
 
-设置页“项目 Agent 能力配置”可按项目与角色（规划/开发/审查/测试）配置：默认 Agent、允许/禁用工具、插件、Skills、是否要求人工授权。各适配器声明自身支持的能力，不支持者在 UI 禁用并说明。任务显式指定的 Agent 优先于角色默认。Claude Code 通过 `--allowedTools/--disallowedTools`（工具）、`--plugin-dir/--plugin-url`（插件）、`--disable-slash-commands`（Skills 全开/全关）落地；授权模式下用 `--permission-mode manual` 把工具调用转为 `approval_request`。
+能力配置采用**「全局默认 + 项目覆盖」**两层：
+
+- 设置页“全局 Agent 能力默认配置”为所有项目设定按角色的默认值（默认 Agent、工具、插件、Skills、授权）。
+- “项目 Agent 能力配置”按项目与角色（规划/开发/审查/测试）覆盖全局。运行时按**项目显式值 > 全局值 > 系统默认**逐字段合并；未填写的字段在 UI 标注「继承全局」并以占位符展示继承值，提供「恢复继承」清除覆盖。
+- **字段语义**：`undefined`=未配置（继承）；`[]`=显式空覆盖（如 `tools=[]` 禁用全部工具、`skills=[]` 关闭全部 Skills）。留空保存**不会**把继承值固化为项目值。
+- 各适配器声明自身支持的能力，不支持者在 UI 禁用并说明。审查 Agent（reviewer 角色）同样使用合并后的能力配置。
+- Claude Code 通过 `--allowedTools/--disallowedTools`（工具）、`--plugin-dir/--plugin-url`（插件）、`--disable-slash-commands`（Skills 全开/全关）落地；授权模式下用 `--permission-mode manual` 把工具调用转为 `approval_request`。
 
 ## 任务对话与授权
 
-任务详情以对话窗口展示实时消息（user/assistant/system/tool、tool_call/tool_result、澄清/授权/确认请求、错误/状态），刷新/重启后历史不丢失；旧 `log_entries` 保留兼容，执行记录折叠展示。等待交互时进入 `awaiting_input`，回答/批准/确认后从检查点或 Agent session 恢复；等待期间不空转、不自动重试；拒绝授权不判定成功。
+任务详情以**聊天窗口**展示实时消息：消息气泡（角色/时间）、工具调用可折叠、长内容局部滚动、自动滚动到底部；刷新/重启后历史不丢失，旧 `log_entries` 保留兼容，执行记录折叠展示。**输入区固定在聊天窗口底部**，仅在 `awaiting_input`（等待澄清、手动暂停）时出现：澄清回复直接作为用户消息发送并恢复任务；授权/确认继续使用明确按钮并显示在同一对话流内。手动「标记待沟通」会创建一条澄清交互，确保用户始终可输入并恢复。等待期间不空转、不自动重试；拒绝授权不判定成功。
+
+## AI 服务商
+
+设置页“AI 服务商”支持 Anthropic（Claude）与 OpenAI 兼容服务：
+
+- **baseURL 规范化（Anthropic）**：可填主机根地址（`https://host`）、`/v1` 前缀（`https://host/v1`）或完整 messages 地址，系统自动归一化为 `.../v1`，避免漏加或重复拼接 `/v1/messages` 导致的 404；OpenAI 兼容路径保持原样。
+- Anthropic 同时携带 `x-api-key` 与 `Authorization: Bearer`，兼容不同网关的鉴权约定（不降级为 OpenAI 协议）。
+- **「测试连接」**：返回脱敏后的最终请求地址、HTTP 状态与服务端摘要；API Key 只进请求头，绝不记录或回传。
+
+## Pi CLI 检测
+
+检测与启动均使用**解析后的绝对 CLI 路径**，并让 CLI 所在 bin 目录**优先进入 PATH**，使 `#!/usr/bin/env node` 的 shebang 命中与该 CLI 同源的 Node（避免「找到了 pi 却因命中旧 Node 不支持 `??=` 而启动失败」）。检测结果区分**「未找到 CLI」**与**「CLI 已找到但 Node 运行时不兼容」**，诊断中给出 CLI 路径与 Node 路径/版本（不硬编码用户路径）。
 
 ## 自动更新与发版
 
-使用 electron-builder GitHub Provider + `electron-updater`：仅打包后启用，启动后异步检查、静默下载，下载完成提示当前/新版本，点击“立即升级”才退出安装；提供手动检查。发版通过 `.github/workflows/release.yml`（`workflow_dispatch` 输入 semver，仅基于 main，拒绝重复 Tag/Release，先 typecheck/lint/test 再构建安装包与更新 metadata，创建 `v<version>` Tag 与 GitHub Release）。详见 [docs/architecture.md §11](docs/architecture.md#11-自动更新与发版)。
+使用 electron-builder GitHub Provider + `electron-updater`：仅打包后启用，启动后异步检查、静默下载，下载完成提示当前/新版本。**「立即升级」**进入安装中状态并真正退出安装重启；不可安装时进入可见 error 状态并展示可诊断信息（绝不静默 no-op）。已移除「稍后」按钮。
+
+发版通过 `.github/workflows/release.yml` 的**三段多平台流水线**（`workflow_dispatch` 输入 semver，仅基于 main，拒绝重复 Tag/Release，先 typecheck/lint/test）：
+
+1. **prepare**：质量门禁 → 生成 CHANGELOG/Release Notes → 版本号 bump → 打 tag 推送（唯一写 git 的阶段）。
+2. **build**（matrix: macOS / Windows / Linux）：checkout tag，`electron-builder --publish never` 构建并校验本平台预期构件齐全后上传 artifact（`if-no-files-found: error`，缺失即失败）。
+3. **publish**：汇总三平台构件并复核齐全后，**统一创建唯一一个 GitHub Release**（正文=生成的 Release Notes），避免矩阵并发创建 Release。
+
+产物：macOS dmg/zip（x64+arm64）、Windows NSIS（x64）、Linux AppImage（x64）及各自 `latest*.yml`/blockmap。`CHANGELOG.md` 与 Release 正文均只描述「上一版本 tag → 当前版本」，按新功能/问题修复/其他变更分组并附 compare 链接。详见 [docs/architecture.md §11](docs/architecture.md#11-自动更新与发版)。
 
 ## 环境要求
 
@@ -58,12 +86,12 @@ pnpm install
 | 命令 | 结果 |
 | --- | --- |
 | `pnpm install` | 成功（Electron 43 二进制经 npmmirror 下载） |
-| `pnpm typecheck` / `pnpm lint` | 6 包全部通过 |
-| `pnpm test` | core 63 + persistence 18 + agents 20(+4 skipped) + scheduler 12 + notifications 10 + desktop 7 = **130 通过 / 4 按需跳过** |
+| `pnpm verify` | typecheck + lint + test + scripts，6 包全部通过 |
+| `pnpm test` | core 98 + persistence 32 + agents 50(+4 skipped) + scheduler 34 + notifications 10 + desktop 46 + scripts 8 = **278 通过 / 4 按需跳过** |
 | `pnpm --filter @ai-devflow/agents verify:real` | 真实 Agent 验收（Claude ✅ 完成；Codex/Pi 诊断+步骤） |
 | `pnpm --filter @ai-devflow/desktop build` | renderer（vite）+ electron（esbuild）构建成功 |
 | `pnpm dev` | Electron 应用启动成功（已实测） |
-| `pnpm --filter @ai-devflow/desktop e2e` | Playwright Electron E2E **8/8 全部通过**（已实测） |
+| `pnpm --filter @ai-devflow/desktop e2e` | Playwright Electron E2E **10/10 全部通过**（已实测，含测试中审查流转与设置页语言切换） |
 
 ## 运行
 
@@ -109,5 +137,5 @@ pnpm --filter @ai-devflow/desktop package # 打包（electron-builder --dir）
 仅列真实限制：
 
 - **Codex 真实任务**：Codex CLI 已安装(0.144.1)并登录(ChatGPT)，但执行时 ChatGPT 后端网络不可达，可验证小任务未能在本机完成；桥接器已正确调用真实 CLI 并产出终止事件，附可重复验收步骤（在可访问 chatgpt.com 后端的环境中于受信任 git 仓库内运行 `codex exec --sandbox read-only "Print exactly AI_DEVFLOW_CODEX_OK"`）。
-- **Pi CLI**：本机未安装 `pi`；桥接器如实报告不可用并附安装/验收步骤。
-- **打包**：`electron-builder --dir`（`package` 脚本）未现场执行完整签名打包（dmg），仅验证了 `build` 产物与 `dev`/`e2e` 运行。
+- **Pi CLI**：本机未安装 `pi`；桥接器如实报告不可用并附安装/验收步骤。检测已能区分「未找到 CLI」与「CLI 找到但 Node 运行时不兼容（如不支持 `??=`）」，并给出 CLI/Node 路径与版本诊断（含多 Node/PATH/shebang 回归测试）。
+- **打包**：三平台发版流水线（macOS/Windows/Linux）已在 `.github/workflows/release.yml` 落地并经 YAML 校验；本机现场执行的是 `build` 产物与 `dev`/`e2e` 运行，完整签名打包（dmg/nsis/AppImage）由 CI 触发。

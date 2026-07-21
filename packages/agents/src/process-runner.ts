@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { envWithAgentPath } from './resolve-path.js';
+import { envWithCliPriority, resolveCommand } from './resolve-path.js';
 
 export interface RawLine {
   stream: 'stdout' | 'stderr';
@@ -24,10 +24,12 @@ export function spawnAgentProcess(opts: {
   env?: Record<string, string>;
   input?: string;
 }): SpawnedProcess {
-  const child: ChildProcess = spawn(opts.command, opts.args, {
+  // 解析为绝对路径，并让 CLI 所在 bin 目录优先进入 PATH 后 spawn：
+  // 保证 shebang `#!/usr/bin/env node` 的 CLI（如 pi）命中与自身同源的 Node，避免旧 Node 语法不兼容。
+  const command = resolveCommand(opts.command);
+  const child: ChildProcess = spawn(command, opts.args, {
     cwd: opts.cwd,
-    // GUI 启动的应用 PATH 缺失用户 shell 目录（~/.local/bin、nvm 等），增强后再 spawn。
-    env: envWithAgentPath({ ...process.env, ...opts.env }),
+    env: envWithCliPriority(command, { ...process.env, ...opts.env }),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 

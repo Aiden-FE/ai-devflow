@@ -7,6 +7,8 @@ export * from './cli.js';
 export * from './retry.js';
 export * from './sanitize.js';
 export * from './audit.js';
+export * from './proposals.js';
+export * from './capability.js';
 
 /** 生成 ID（crypto.randomUUID，Node 22+ 与浏览器均可用）。 */
 export function randomId(): string {

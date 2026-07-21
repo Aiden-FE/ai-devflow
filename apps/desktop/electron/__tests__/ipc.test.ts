@@ -41,12 +41,18 @@ import type { DatabaseSync } from '@ai-devflow/persistence';
 import { now } from '@ai-devflow/core';
 import type { AgentType, AgentDetection, AgentRunRequest, AgentCapabilitySupport } from '@ai-devflow/core';
 
-// 假适配器：detect 恒可用，run 不产出（仅用于 detectAll 测试，不调真实 CLI）。
+// 假适配器：detect 恒可用，run 产出 done（含审查 PASS 标记，使 reviewer 桩审查通过）。
 class FakeAdapter implements AgentAdapter {
   constructor(readonly id: AgentType) {}
   async detect(): Promise<AgentDetection> { return { agentType: this.id, available: true, version: 'fake' }; }
   async run(_req: AgentRunRequest): Promise<AgentRun> {
-    return { events: (async function* () {})(), cancel: async () => {}, done: async () => ({ exitCode: 0, ok: true }) };
+    return {
+      events: (async function* () {
+        yield { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 } as import('@ai-devflow/core').AgentEvent;
+      })(),
+      cancel: async () => {},
+      done: async () => ({ exitCode: 0, ok: true }),
+    };
   }
   capabilities(): AgentCapabilitySupport { return { tools: false, plugins: false, skills: false, approval: false }; }
 }
@@ -55,7 +61,7 @@ class FakeAdapter implements AgentAdapter {
 const noopUpdater: Updater = {
   start(onStatus) { onStatus({ state: 'idle', currentVersion: '0.0.0' }); },
   async check() {},
-  async installUpdate() {},
+  async installUpdate() { return { ok: false, error: '当前为开发/未打包环境，自动更新不可用。' }; },
   status() { return { state: 'idle', currentVersion: '0.0.0' }; },
 };
 
@@ -306,6 +312,78 @@ describe('typed IPC wiring', () => {
     expect(await call('settings', 'getTheme')).toBe('light');
     await call('settings', 'setTheme', 'system');
     expect(await call('settings', 'getTheme')).toBe('system');
+  });
+});
+
+describe('new IPC channels (reject / createBatch / global config / test-connection / install)', () => {
+  function seed() {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+  }
+
+  it('tasks.reject requires a reason and only applies to in_review', async () => {
+    seed();
+    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'in_review', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    await expect(call('tasks', 'reject', { taskId: 't', reason: '  ', target: 'ready' })).rejects.toThrow(/退回原因/);
+    // ready 任务不可退回
+    repos.tasks.insert({ id: 't2', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T2', description: '', status: 'ready', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    await expect(call('tasks', 'reject', { taskId: 't2', reason: 'x', target: 'ready' })).rejects.toThrow(/仅待验收/);
+  });
+
+  it('tasks.reject to ready only changes status and records the reason', async () => {
+    seed();
+    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'in_review', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    await call('tasks', 'reject', { taskId: 't', reason: '未覆盖验收标准', target: 'ready' });
+    expect(repos.tasks.get('t')!.status).toBe('ready');
+    const msgs = repos.taskMessages.listByTask('t').map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('验收不通过') && m.includes('未覆盖验收标准'))).toBe(true);
+  });
+
+  it('tasks.createBatch maps draftId dependencies to real taskIds atomically', async () => {
+    seed();
+    const created = (await call('tasks', 'createBatch', {
+      requirementId: 'r',
+      proposals: [
+        { draftId: 't1', title: 'A', description: '', role: 'coder', dependsOn: [] },
+        { draftId: 't2', title: 'B', description: '', role: 'coder', dependsOn: ['t1'] },
+      ],
+    })) as Array<{ id: string; title: string; dependsOn?: string[] }>;
+    expect(created.length).toBe(2);
+    const a = created.find((c) => c.title === 'A')!;
+    const b = created.find((c) => c.title === 'B')!;
+    expect(b.dependsOn).toEqual([a.id]); // 草稿引用映射为真实 taskId
+  });
+
+  it('tasks.createBatch rejects an invalid DAG (cycle)', async () => {
+    seed();
+    await expect(call('tasks', 'createBatch', {
+      requirementId: 'r',
+      proposals: [
+        { draftId: 'a', title: 'A', description: '', role: 'coder', dependsOn: ['b'] },
+        { draftId: 'b', title: 'B', description: '', role: 'coder', dependsOn: ['a'] },
+      ],
+    })).rejects.toThrow(/环|依赖/);
+    // 原子性：未落库任何任务
+    expect(repos.tasks.listByRequirement('r').length).toBe(0);
+  });
+
+  it('settings global agent config round-trips', async () => {
+    await call('settings', 'setGlobalAgentConfig', { coder: { tools: ['Read', 'Edit'] } });
+    const cfg = (await call('settings', 'getGlobalAgentConfig')) as { coder?: { tools?: string[] } };
+    expect(cfg.coder?.tools).toEqual(['Read', 'Edit']);
+  });
+
+  it('settings.testAiProvider reports a diagnostic error without an API key (no secret leaked)', async () => {
+    const r = (await call('settings', 'testAiProvider', { provider: 'anthropic', apiKey: '', model: 'claude-sonnet-5' })) as { ok: boolean; error?: string };
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/API Key/);
+  });
+
+  it('updates.installUpdate returns a visible result (no silent no-op)', async () => {
+    const r = (await call('updates', 'installUpdate')) as { ok: boolean; error?: string };
+    expect(r.ok).toBe(false);
+    expect(typeof r.error).toBe('string');
   });
 });
 

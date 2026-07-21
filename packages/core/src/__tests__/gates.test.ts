@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canTransition, validateTransition, canReturnToDev, canArchiveRequirement, checkTaskDependencies } from '../gates.js';
+import { canTransition, validateTransition, canReturnToDev, canReject, canArchiveRequirement, checkTaskDependencies } from '../gates.js';
 import type { GateContext } from '../types.js';
 
 const ctx = (over: Partial<GateContext> = {}): GateContext => ({
@@ -33,13 +33,39 @@ describe('gates', () => {
     ).toBe(true);
   });
 
-  it('requires artifacts for in_progress -> in_review', () => {
-    expect(
-      canTransition({ status: 'in_progress' }, 'in_review', ctx({ hasArtifacts: false })).ok,
-    ).toBe(false);
+  it('forbids dev tasks skipping testing (in_progress -> in_review blocked even with artifacts)', () => {
     expect(
       canTransition({ status: 'in_progress' }, 'in_review', ctx({ hasArtifacts: true })).ok,
+    ).toBe(false);
+  });
+
+  it('requires artifacts for in_progress -> testing', () => {
+    expect(canTransition({ status: 'in_progress' }, 'testing', ctx({ hasArtifacts: false })).ok).toBe(false);
+    expect(canTransition({ status: 'in_progress' }, 'testing', ctx({ hasArtifacts: true })).ok).toBe(true);
+  });
+
+  it('requires reviewPassed for testing -> in_review (no drag/IPC bypass)', () => {
+    // 审查未通过 -> 拒绝进入待验收
+    expect(
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: false })).ok,
+    ).toBe(false);
+    // 未提供审查结论（如拖拽）-> 拒绝
+    expect(
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true })).ok,
+    ).toBe(false);
+    // 审查通过 + 产物 -> 允许
+    expect(
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: true })).ok,
     ).toBe(true);
+  });
+
+  it('allows review-fail return testing -> in_progress', () => {
+    expect(canTransition({ status: 'testing' }, 'in_progress', ctx()).ok).toBe(true);
+  });
+
+  it('allows reject in_review -> ready (with acceptance)', () => {
+    expect(canTransition({ status: 'in_review' }, 'ready', ctx({ hasAcceptance: true })).ok).toBe(true);
+    expect(canTransition({ status: 'in_review' }, 'ready', ctx({ hasAcceptance: false })).ok).toBe(false);
   });
 
   it('requires explicit acceptance + artifacts for in_review -> archived (no drag bypass)', () => {
@@ -69,6 +95,13 @@ describe('gates', () => {
   it('canReturnToDev requires evidence', () => {
     expect(canReturnToDev(ctx({ testFailedWithEvidence: false })).ok).toBe(false);
     expect(canReturnToDev(ctx({ testFailedWithEvidence: true })).ok).toBe(true);
+  });
+
+  it('canReject requires a non-empty reason', () => {
+    expect(canReject(ctx({ rejectReason: '' })).ok).toBe(false);
+    expect(canReject(ctx({ rejectReason: '   ' })).ok).toBe(false);
+    expect(canReject(ctx()).ok).toBe(false);
+    expect(canReject(ctx({ rejectReason: '未覆盖验收标准第 2 条' })).ok).toBe(true);
   });
 
   it('allows in_review <-> awaiting_input (pause/resume from testing)', () => {

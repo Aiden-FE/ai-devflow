@@ -10,7 +10,7 @@
 // 结果缓存，供 detect 与 spawn 复用。
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, accessSync, constants } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
 let cached: string | undefined;
@@ -88,12 +88,42 @@ export function envWithAgentPath(env: NodeJS.ProcessEnv = process.env): NodeJS.P
 }
 
 /**
+ * 返回「CLI 所在 bin 目录优先」的增强 PATH 环境。
+ *
+ * 关键修复：很多 Node CLI（如 pi）以 `#!/usr/bin/env node` 为 shebang。
+ * 若 PATH 先命中一个旧 Node（不支持 `??=` 等新语法），即便 CLI 本身被找到，
+ * `pi --version` 也会因 shebang 命中的旧 Node 解析失败。把 CLI 自身所在 bin 目录
+ * 置于 PATH 最前，使 `env node` 解析到与该 CLI 同目录（如 nvm 同一 node 版本）的 Node，
+ * 从而保证 CLI 与其 Node 运行时一致。不硬编码任何用户路径——目录由解析到的 CLI 路径推导。
+ *
+ * @param cliPath 解析后的 CLI 路径（含目录时取其 bin 目录置顶）。
+ */
+export function envWithCliPriority(cliPath: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const add = (p: string) => {
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      parts.push(p);
+    }
+  };
+  // CLI 所在 bin 目录优先（仅当 cliPath 为含目录的路径）。
+  if (cliPath.includes('/')) {
+    const dir = dirname(cliPath);
+    if (dir && dir !== '.') add(dir);
+  }
+  for (const p of splitPath(resolveAgentPath())) add(p);
+  return { ...env, PATH: parts.join(':') };
+}
+
+/**
  * 在增强 PATH 中解析命令的绝对路径（找不到则原样返回命令名）。
  * 用于检测回报真实位置，便于用户确认“终端里有、应用里也能找到”。
+ * @param pathStr 可选：指定搜索用的 PATH（缺省用 resolveAgentPath()）。检测 Node 运行时一致性时传入 CLI 优先的 PATH。
  */
-export function resolveCommand(command: string): string {
+export function resolveCommand(command: string, pathStr?: string): string {
   if (command.includes('/')) return command;
-  for (const dir of splitPath(resolveAgentPath())) {
+  for (const dir of splitPath(pathStr ?? resolveAgentPath())) {
     const full = join(dir, command);
     try {
       accessSync(full, constants.X_OK);

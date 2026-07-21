@@ -18,8 +18,8 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle } from 'lucide-react';
-import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AgentType } from '@ai-devflow/core';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2 } from 'lucide-react';
+import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AgentType, AiTaskProposal } from '@ai-devflow/core';
 
 export function WorkspacePage({ project, projects, onSwitchProject }: {
   project?: Project;
@@ -79,11 +79,13 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
   const [createTaskFor, setCreateTaskFor] = useState<string | undefined>(undefined);
   const [dragError, setDragError] = useState<string | undefined>();
   const [showArchived, setShowArchived] = useState(false);
+  // 侧滑窗放大/还原（item 10）：默认约 640px；放大后覆盖除左侧 220px 菜单栏外的工作台。
+  const [zoomed, setZoomed] = useState(false);
 
   useStream(() => tasksQ.reload());
 
   const tasksByLane = useMemo(() => {
-    const map: Record<TaskStatus, Task[]> = { backlog: [], ready: [], in_progress: [], in_review: [], awaiting_input: [], archived: [] };
+    const map: Record<TaskStatus, Task[]> = { backlog: [], ready: [], in_progress: [], testing: [], in_review: [], awaiting_input: [], archived: [] };
     for (const task of tasksQ.data ?? []) map[laneForTask(task)].push(task);
     return map;
   }, [tasksQ.data]);
@@ -140,7 +142,7 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
         <h3 className="mt-0 text-sm font-semibold">{t('ws.kanban')} <span className="ml-1 text-xs font-normal text-muted-foreground">{t('ws.kanban.hint')}</span></h3>
         <LoadingOrError loading={tasksQ.loading} error={tasksQ.error} data={tasksQ.data} reload={tasksQ.reload}>
           {() => (
-            <div className="grid grid-cols-4 gap-2 items-start">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2 items-start">
               {LANES.map((lane) => (
                 <Lane key={lane.status} status={lane.status} label={t(lane.labelKey)}
                   tasks={tasksByLane[lane.status]} selectedId={selectedTask}
@@ -151,11 +153,21 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
         </LoadingOrError>
       </div>
 
-      {/* 任务详情：侧滑窗 */}
-      <Sheet open={!!selectedTask} onOpenChange={(o) => { if (!o) setSelectedTask(undefined); }}>
-        <SheetContent className="w-[640px] max-w-[90vw] sm:max-w-[640px]">
+      {/* 任务详情：侧滑窗。放大后覆盖除左侧 220px 菜单栏外的工作台；蒙版只盖住工作台区域。 */}
+      <Sheet open={!!selectedTask} onOpenChange={(o) => { if (!o) { setSelectedTask(undefined); setZoomed(false); } }}>
+        <SheetContent
+          overlayClassName="left-0 sm:left-[220px]"
+          className={zoomed
+            ? 'w-[calc(100vw-0px)] sm:w-[calc(100vw-220px)] max-w-none sm:max-w-none'
+            : 'w-[640px] max-w-[90vw] sm:max-w-[640px]'}
+        >
           <SheetHeader>
-            <SheetTitle>{t('nav.workspace')}</SheetTitle>
+            <div className="flex items-center gap-2 pr-8">
+              <SheetTitle className="flex-1">{t('nav.workspace')}</SheetTitle>
+              <Button size="icon-xs" variant="ghost" onClick={() => setZoomed((z) => !z)} title={zoomed ? t('detail.zoom.restore') : t('detail.zoom.expand')}>
+                {zoomed ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </Button>
+            </div>
           </SheetHeader>
           {selectedTask && (
             <ScrollArea className="h-[calc(100vh-80px)]">
@@ -514,9 +526,8 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
-  const [proposals, setProposals] = useState<{ title: string; description: string; role: TaskRole }[] | undefined>();
+  const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
-  const [serial, setSerial] = useState(false);
 
   // 把当前需求内容作为上下文注入 AI，使生成的任务对齐需求与验收标准。
   const context = requirement
@@ -555,19 +566,15 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
     if (!proposals) return;
     setCreating(true); setError(undefined);
     try {
-      let lastId = '';
-      // 串行链接：后一任务 dependsOn 前一任务，形成串行流水。
-      for (const p of proposals) {
-        const task = await api.tasks.create({
-          requirementId, title: p.title, description: p.description, role: p.role,
-          dependsOn: serial && lastId ? [lastId] : undefined,
-        });
-        lastId = task.id;
-      }
-      onCreated(lastId);
+      // 事务化批量创建：主进程把 dependsOn 的草稿引用映射为真实 taskId 并原子落库。
+      // 无依赖任务保持并行，仅为真实串行关系建立依赖（无需手动“串行”开关）。
+      const created = await api.tasks.createBatch({ requirementId, proposals });
+      onCreated(created[created.length - 1]?.id ?? '');
     } catch (e) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
+
+  const titleOf = (draftId?: string) => proposals?.find((p) => p.draftId === draftId)?.title ?? draftId ?? '';
 
   return (
     <div className="mt-3 flex flex-col gap-3">
@@ -581,7 +588,7 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
           <div className="flex h-full items-center justify-center text-muted-foreground">{t('task.ai.placeholder')}</div>
         ) : messages.map((m, i) => (
           <div key={i} className={`mb-2 ${m.role === 'user' ? 'text-right' : ''}`}>
-            <span className={`inline-block max-w-[85%] rounded-md px-2 py-1 ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
+            <span className={`inline-block max-w-[85%] whitespace-pre-wrap break-words rounded-md px-2 py-1 ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
               {m.content || t('task.ai.thinking')}
             </span>
           </div>
@@ -598,20 +605,22 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
         <Button size="sm" variant="outline" onClick={propose} disabled={creating || messages.length === 0}>
           {creating ? t('task.ai.generating') : t('task.ai.propose')}
         </Button>
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Checkbox checked={serial} onCheckedChange={(v) => setSerial(v === true)} />
-          {t('task.ai.serial')}
-        </label>
       </div>
       {proposals && (
         <div className="flex flex-col gap-2">
           <div className="text-xs font-medium text-muted-foreground">{t('task.ai.proposals')}</div>
-          {proposals.map((p, i) => (
-            <div key={i} className="rounded-md border border-border p-2 text-xs">
-              <div className="font-medium">{p.title} <Badge variant="outline" className="ml-1 text-[10px]">{t(`role.${p.role}`)}</Badge>
-                {serial && i > 0 && <Badge variant="secondary" className="ml-1 text-[10px]">{t('task.dependsOn')}</Badge>}
+          {proposals.map((p) => (
+            <div key={p.draftId} className="rounded-md border border-border p-2 text-xs">
+              <div className="flex flex-wrap items-center gap-1 font-medium">
+                <span className="break-words">{p.title}</span>
+                <Badge variant="outline" className="text-[10px]">{t(`role.${p.role}`)}</Badge>
+                {(p.dependsOn?.length ?? 0) > 0 && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {t('task.dependsOn')}: {p.dependsOn!.map(titleOf).join('、')}
+                  </Badge>
+                )}
               </div>
-              <div className="mt-0.5 text-muted-foreground">{p.description}</div>
+              <div className="mt-0.5 break-words text-muted-foreground">{p.description}</div>
             </div>
           ))}
           <Button size="sm" onClick={createAll} disabled={creating}>{t('task.ai.createAll')}</Button>

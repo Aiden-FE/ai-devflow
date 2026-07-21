@@ -7,10 +7,11 @@ import { useT } from './i18n/index.js';
 
 export const api = window.api;
 
-/** 四条可见泳道：ready -> in_progress -> in_review(待验收) -> archived。backlog（需求池）已移除；awaiting_input 为暂停标识不独立成道。 */
+/** 五条可见泳道：ready -> in_progress -> testing(测试中) -> in_review(待验收) -> archived。backlog（需求池）已移除；awaiting_input 为暂停标识不独立成道。 */
 export const LANES: { status: TaskStatus; labelKey: string }[] = [
   { status: 'ready', labelKey: 'status.ready' },
   { status: 'in_progress', labelKey: 'status.in_progress' },
+  { status: 'testing', labelKey: 'status.testing' },
   { status: 'in_review', labelKey: 'status.in_review' },
   { status: 'archived', labelKey: 'status.archived' },
 ];
@@ -112,9 +113,10 @@ export function StatusBadge({ status }: { status: TaskStatus }): React.ReactElem
   const variant: 'default' | 'secondary' | 'outline' | 'success' | 'warning' =
     status === 'archived' ? 'success'
       : status === 'in_progress' ? 'warning'
-        : status === 'awaiting_input' ? 'secondary'
-          : status === 'in_review' ? 'default'
-            : 'outline';
+        : status === 'testing' ? 'default'
+          : status === 'awaiting_input' ? 'secondary'
+            : status === 'in_review' ? 'default'
+              : 'outline';
   return <Badge variant={variant}>{t(`status.${status}`)}</Badge>;
 }
 

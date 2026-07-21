@@ -40,6 +40,7 @@
   --lane-backlog: #6e7681;
   --lane-ready: #4f9cf9;
   --lane-in_progress: #d29922;
+  --lane-testing: #db61a2;
   --lane-in_review: #2cbac1;
   --lane-archived: #3fb950;
   --lane-awaiting: #a371f7;
@@ -100,6 +101,7 @@
   --color-lane-backlog: var(--lane-backlog);
   --color-lane-ready: var(--lane-ready);
   --color-lane-in_progress: var(--lane-in_progress);
+  --color-lane-testing: var(--lane-testing);
   --color-lane-in_review: var(--lane-in_review);
   --color-lane-archived: var(--lane-archived);
   --color-lane-awaiting: var(--lane-awaiting);

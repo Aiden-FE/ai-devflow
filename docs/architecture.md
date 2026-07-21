@@ -58,39 +58,48 @@ ai-devflow/
   读出时解密；DB 文件本身不含明文密钥。
 - 危险操作（删除项目、归档、强制取消）在 Main 校验 + Renderer 二次确认。
 
-## 4. 领域模型与六泳道状态机
+## 4. 领域模型与五泳道状态机
 
 实体：`Project`、`Iteration`、`Requirement`、`Task`、`ExecutionRecord`、`Checkpoint`、
-`NotificationRule`/`NotificationDelivery`、`WebhookConfig`/`WebhookDelivery`、`Credential`。
+`NotificationRule`/`NotificationDelivery`、`WebhookConfig`/`WebhookDelivery`、`Credential`、`TaskMessage`/`PendingInteraction`。
 
-泳道（Task.status，可见 4 条 + 1 个暂停标识）：
+泳道（Task.status，可见 5 条 + 1 个暂停标识）：
 
 | 状态               | 含义                       |
 | ------------------ | -------------------------- |
 | `ready`            | 待开发（新建任务直接进入） |
 | `in_progress`      | 开发中（执行）             |
+| `testing`          | 测试中（开发完成，审查 Agent 自动审查） |
 | `awaiting_input`   | 待沟通/待授权（暂停标识，不独立成道，保留 pausedFrom） |
-| `in_review`        | 待验收                     |
+| `in_review`        | 待验收（审查通过后进入）   |
 | `archived`         | 已归档（终态）             |
 
 `backlog`（需求池）已移除：新建任务直接进入 `ready`；历史 backlog 任务由迁移改为 ready（含通知规则与 paused_from）。
+`testing` 是 `status` TEXT 列的新取值，向后兼容，无需 DDL 迁移（既有数据不受影响）；`tasks.listRecoverable` 将 `testing` 纳入可恢复运行态。
 
 合法迁移（`core/state-machine.ts`）：
 
 ```
 ready          --(gate: 已分配 Agent)--> in_progress
-in_progress    --(agent 提问/需授权)--> awaiting_input
-awaiting_input --(用户回答/授权/确认，从检查点恢复)--> in_progress / in_review
-in_progress    --(gate: agent 报告完成+有产物)--> in_review（待验收）
-in_review      --(验收不通过，退回开发)--> in_progress
+in_progress    --(agent 提问/需授权/手动暂停)--> awaiting_input
+in_progress    --(gate: 开发完成+有产物)--> testing（开发任务禁止直接进待验收）
+testing        --(gate: 审查通过 reviewPassed)--> in_review（合并并待验收）
+testing        --(审查不通过，携反馈返工)--> in_progress
+testing        --(手动暂停)--> awaiting_input
+awaiting_input --(用户回答/授权/确认，从检查点恢复)--> in_progress / testing / in_review
+in_review      --(验收不通过退回：原因必填)--> in_progress（立即修复）/ ready（仅改状态）
 in_review      --(gate: 人工验收 accepted + 有产物)--> archived
 ```
 
 任何其它迁移为非法，状态机与拖拽校验共同拒绝。门禁判定见 `core/gates.ts`：
 - `canTransition(task, target, ctx)` 返回 `{ ok, reasons[] }`。
 - 拖拽时 Renderer 调用 `validateTransition`，Main 落库前再校验一次（防绕过）。
-- **归档门禁**：`archived` 需 `accepted === true && hasArtifacts === true`。`accepted` 只能由 `tasks.accept` 显式人工验收设置；`tasks.updateStatus(archived)` 直接拒绝，看板拖拽无法绕过。不再用“存在执行记录”伪装 testPassed、auditOk 固定 true。
+- **测试中门禁**：进入 `testing` 需有执行产物；`testing -> in_review` 需 `reviewPassed === true`（由审查 Agent 通过后设置），拖拽/IPC 无法提供该字段即被拒绝。
+- **归档门禁**：`archived` 需 `accepted === true && hasArtifacts === true`。`accepted` 只能由 `tasks.accept` 显式人工验收设置；`tasks.updateStatus(archived)` 直接拒绝，看板拖拽无法绕过。
+- **退回门禁**：`canReject(ctx)` 要求 `rejectReason` 非空；退回原因写入任务消息/审计（`tasks.reject` 专用操作，禁止用无原因的 `updateStatus` 代替）。
 - 状态审计 `auditTask(task, ctx)` 比对任务记录与实际 worktree 产物/测试结果，输出 `inconsistencies[]`。
+
+**自动审查（reviewer Agent）**：开发阶段完成后编排器把任务转入 `testing`，解析 reviewer 角色的能力配置（全局+项目合并）并启动审查 Agent。审查上下文含需求描述/验收标准、任务目标、git diff/产物与基本规则（需求覆盖、测试/构建/lint、明显回归、安全问题、无关改动）。审查结论以 `REVIEW_VERDICT: PASS|FAIL` 解析，结论与证据持久化到执行记录摘要与任务对话；通过则合并特性分支并进入待验收，不通过则退回开发中携反馈返工（受 `maxReviewRounds` 约束，避免无限循环）。
 
 ## 5. Agent 桥接器协议
 
@@ -182,9 +191,13 @@ interface AgentRun {
 
 ## 8. 数据持久化
 
-`persistence/db.ts` 用 Node 26 内建 `node:sqlite`（`DatabaseSync`），无原生编译依赖。迁移系统
-`migrations/` 版本化；`tx(fn)` 封装事务；每个实体一个 Repository。DB 文件位于
-`<userData>/ai-devflow.db`，WAL 模式。集成测试覆盖迁移、事务回滚、Repository 生命周期。
+`persistence/db.ts` 用 Node 26 内建 `node:sqlite`（`DatabaseSync`），无原生编译依赖。迁移在
+`migrations.ts` 的 `MIGRATIONS` 数组版本化（当前 v8：v1 初始 schema → … → v7 `task_messages`+`pending_interactions`
+→ v8 `tasks.requirement_id` 索引，支撑依赖 DAG 兄弟查询）；新增 `testing` 状态为 `status` TEXT 列新取值，
+向后兼容、无需 DDL。`tx(fn)` 封装事务（含嵌套 savepoint）；`tasks.insertMany` 事务化批量插入（AI 提议原子落库）。
+每个实体一个 Repository。应用级设置存于 `credentials` KV 表（`locale`/`theme` 明文，`ai_provider` 加密 JSON，
+`global_agent_config` 明文 JSON——全局 Agent 能力默认配置）。DB 文件位于 `<userData>/ai-devflow.db`，WAL 模式。
+集成测试覆盖迁移、事务回滚、Repository 生命周期、批量插入原子性。
 
 ## 9. 测试策略映射
 
@@ -223,33 +236,48 @@ interface AgentRun {
 - 启动后异步检查（不阻塞 ready），发现版本后静默下载（`autoDownload=true`，
   `autoInstallOnAppQuit=false`）。
 - 状态经类型化 IPC `updates.status()/check()/installUpdate()` 暴露，并通过 `update-status`
-  事件流转发 Renderer：`idle/checking/available/downloading/downloaded/error/no-update`，
+  事件流转发 Renderer：`idle/checking/available/downloading/downloaded/installing/error/no-update`，
   downloading 时附带进度。
-- 下载完成在设置页提示当前/新版本，点击“立即升级”才 `quitAndInstall()`。
+- 下载完成在设置页提示当前/新版本，仅保留「立即升级」（已移除「稍后」）。点击后进入 `installing`
+  状态并真正 `quitAndInstall()`（打包环境退出并安装重启）。
+- `installUpdate()` 返回 `InstallUpdateResult`：不可安装（如未下载完成）时进入可见 `error` 状态并
+  返回可诊断信息，**绝不静默 no-op**（修复 v0.0.2 静默下载 v0.0.3 后点「立即升级」无反应）。
+- `createUpdater(deps)` 支持注入 `loadAutoUpdater`/`quitAndInstall`/`startDelayMs`，便于对状态机与
+  事件做单元测试（开发环境 no-op 不再作为唯一验收依据）。
 - 更新失败、无更新、校验失败仅记录错误状态，绝不抛出影响应用。
 
 **electron-builder 配置**（`apps/desktop/package.json` `build`）：
 - `appId=com.ai-devflow.desktop`、`productName=ai-devflow`、`asar=true`、构件命名含版本/平台/架构。
-- `publish` 指向 GitHub（`Aiden-FE/ai-devflow`）；mac 产出 `dmg`+`zip`（更新链路用 zip），
-  win `nsis`，linux `AppImage`；图标 `build/icon.png`（512×512，electron-builder 自动派生 .icns/.ico）。
+- `publish` 指向 GitHub（`Aiden-FE/ai-devflow`）；mac 产出 `dmg`+`zip`（x64+arm64，更新链路用 zip），
+  win `nsis`（x64），linux `AppImage`（x64）；图标 `build/icon.png`（electron-builder 自动派生 .icns/.ico）。
 - `directories.output=release`，`files` 打包 `dist/`+`dist-electron/`+`package.json`。
 
-**发版工作流**（`.github/workflows/release.yml`）：
-- `workflow_dispatch` 输入 semver；`if: github.ref == 'refs/heads/main'` 仅允许基于 main 发布。
-- 校验 semver 合法性；用 `git ls-remote` + `gh release view` 拒绝重复 Tag/Release。
-- `pnpm install --frozen-lockfile` 后依次 `typecheck` → `lint` → `test` → `pnpm --filter @ai-devflow/desktop build`。
-- 将根与 desktop 的 `version` 统一设为输入 semver（统一应用版本来源），提交并打 `v<version>` Tag、推送。
-- `pnpm --filter @ai-devflow/desktop release`（electron-builder）构建安装包 + blockmap +
-  `latest-mac.yml`/`latest.yml` 等更新 metadata，并上传到该 Tag 对应的 GitHub Release。
+**发版工作流**（`.github/workflows/release.yml`，三段多平台流水线，依赖关系明确，避免并发创建同一 Release）：
+- `workflow_dispatch` 输入 semver；`if: github.ref == 'refs/heads/main'` 仅允许基于 main 发布；
+  校验 semver 合法性；用 `git ls-remote` + `gh release view` 拒绝重复 Tag/Release。
+- **prepare**（ubuntu，唯一写 git 的阶段）：`pnpm install --frozen-lockfile` → `typecheck` → `lint` →
+  `test` → `node scripts/gen-changelog.mjs`（生成「上一版本 tag → 当前版本」的 Release Notes 并 prepend
+  到 `CHANGELOG.md`）→ 版本号 bump（根 + desktop）→ 提交 + 打 `v<version>` Tag + 推送。
+- **build**（matrix: `macos-latest` / `windows-latest` / `ubuntu-latest`，`needs: prepare`）：checkout 该 Tag，
+  `pnpm --filter @ai-devflow/desktop build` 后 `electron-builder --publish never`（只产构件 + blockmap +
+  `latest*.yml`，**不创建 Release**），显式校验本平台预期构件齐全后 `upload-artifact`（`if-no-files-found: error`，
+  任一预期构件缺失即失败，不以 ignore 掩盖）。
+- **publish**（`needs: [prepare, build]`）：`download-artifact` 汇总三平台构件并复核完整构件集齐全后，
+  `gh release create --verify-tag -F RELEASE_NOTES.md` **统一创建唯一一个 GitHub Release** 并附全部构件。
 - `permissions: contents: write`（最小权限）。
 
+**CHANGELOG / Release Notes**（`scripts/gen-changelog.mjs`，纯函数 + `node --test` 单测）：
+- 计算上一版本 tag（semver 排序），取 `prevTag..HEAD` 提交，按约定式前缀分组为「新功能 / 问题修复 / 其他变更」，
+  过滤 merge、`chore(release)` 版本号提交、dependabot 等噪音，附 GitHub compare 链接。
+- Release 正文与仓库 `CHANGELOG.md` 对应小节一致，面向用户而非原始 commit log；重跑幂等（同版本小节去重）。
+
 **Secrets**（仓库 Settings → Secrets → Actions）：
-- 必需：`RELEASE_TOKEN`（contents:write，供 electron-builder 创建 Release 与上传构件）。
-- 可选（mac 正式签名/公证；缺失则产出未签名构件，更新链路仍可用）：
+- 必需：`RELEASE_TOKEN`（contents:write，供推送 Tag、创建 Release 与上传构件）。
+- 可选（mac 正式签名/公证；缺失则 `CSC_IDENTITY_AUTO_DISCOVERY=false` 产出未签名构件，更新链路仍可用）：
   `MAC_CERTS`（base64 .p12）、`MAC_CERTS_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`。
 
-**验证流程**：触发发版后，Releases 出现 `vX.Y.Z` 与 `latest-mac.yml`/dmg/zip/blockmap；
-本地安装低于该版本的旧包，启动后 `electron-updater` 检测到更新并下载，点击“立即升级”完成升级。
+**验证流程**：触发发版后，Releases 出现 `vX.Y.Z` 与三平台安装包及 `latest-mac.yml`/`latest.yml`/`latest-linux.yml`/blockmap；
+本地安装低于该版本的旧包，启动后 `electron-updater` 检测到更新并下载，点击「立即升级」完成升级。
 
 **仍受签名环境限制**：本机/CI 无 Apple 开发者证书时，mac 构件为未签名（首次打开需绕过 Gatekeeper），
 无法做完整公证；更新链路（zip + latest-mac.yml + electron-updater）功能完整。GitHub Release
