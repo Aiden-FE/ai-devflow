@@ -290,7 +290,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     const hasCp = !!repos.checkpoints.getLatest(id);
     const gate = canTransition(t, target, {
       hasAcceptance: !!req?.acceptance,
-      hasAgentAssigned: !!t.agentType,
+      hasAgentAssigned: services.providerStore ? services.providerStore.list().length > 0 : true,
       hasArtifacts: hasExec || hasCp,
       hasUserAnswer: !!repos.pendingQuestions.get(id)?.answer,
     });
@@ -305,7 +305,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     const hasExec = repos.executions.listByTask(id).length > 0;
     const gate = canTransition(t, 'archived', {
       hasAcceptance: true,
-      hasAgentAssigned: !!t.agentType,
+      hasAgentAssigned: services.providerStore ? services.providerStore.list().length > 0 : true,
       hasArtifacts: hasExec,
       accepted: true,
     });

@@ -29,7 +29,6 @@ export interface PiRunnerDeps {
   router: ProviderRouter;
   materializer: ProfileMaterializerLike;
   supervisor: PiProcessSupervisor;
-  runtimeEntry: string;
   sessionsBaseDir: string;
   projectToolPath: string;
   attempts?: ExecutionAttemptStore;
@@ -85,8 +84,10 @@ export class PiRunner implements AgentRunner {
 
     const task = (async () => {
       try {
+        // 每次运行前自检内置运行时（manifest/摘要/入口/版本）；失败即可恢复地报错。
+        const runtime = await this.deps.locator.verify();
         await this.deps.router.execute(request.role, async (route, ordinal) => {
-          const outcome = await this.runAttempt(request, route, ordinal, queue, state);
+          const outcome = await this.runAttempt(request, route, ordinal, queue, state, runtime.entry);
           state.prevJournal = outcome.journal;
           if (!outcome.ok) throw outcome.error;
           return outcome;
@@ -120,6 +121,7 @@ export class PiRunner implements AgentRunner {
     ordinal: number,
     queue: AsyncQueue<AgentEvent>,
     state: { prevJournal?: AttemptJournal; spawned?: SpawnedPi },
+    runtimeEntry: string,
   ): Promise<AttemptOutcome> {
     const attemptId = `attempt-${String(ordinal).padStart(2, '0')}-${sanitizeId(route.routeId)}`;
     const sessionDir = join(this.deps.sessionsBaseDir, request.executionId, attemptId);
@@ -148,7 +150,7 @@ export class PiRunner implements AgentRunner {
 
     const initialMessage = buildInitialMessage(request, recoveryJournal);
     const plan = buildPiRunPlan({
-      runtimeEntry: this.deps.runtimeEntry,
+      runtimeEntry,
       profileDir,
       sessionDir,
       isolatedHome,

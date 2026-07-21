@@ -24,6 +24,8 @@ import type {
   InteractionStatus,
 } from '@ai-devflow/core';
 import { tx } from './tx.js';
+import { createProviderHealthRepo, type ProviderHealthRepo } from './provider-health.js';
+import { createExecutionAttemptsRepo, type ExecutionAttemptsRepo } from './execution-attempts.js';
 
 // ---------- 行映射辅助 ----------
 
@@ -81,7 +83,6 @@ function mapTask(r: Record<string, unknown>): Task {
     title: r.title as string,
     description: r.description as string,
     status: r.status as TaskStatus,
-    agentType: (r.agent_type as AgentType | null) ?? undefined,
     role: r.role as TaskRole,
     stages: parseJSON<Stage[]>(r.stages_json as string, []),
     currentStage: r.current_stage as number,
@@ -100,7 +101,6 @@ function mapExecution(r: Record<string, unknown>): ExecutionRecord {
     id: r.id as string,
     taskId: r.task_id as string,
     attempt: r.attempt as number,
-    agentType: r.agent_type as AgentType,
     startedAt: r.started_at as number,
     endedAt: (r.ended_at as number | null) ?? undefined,
     status: r.status as ExecutionRecord['status'],
@@ -234,6 +234,8 @@ export interface Repositories {
   credentials: CredentialsRepo;
   taskMessages: TaskMessagesRepo;
   pendingInteractions: PendingInteractionsRepo;
+  providerHealth: ProviderHealthRepo;
+  executionAttempts: ExecutionAttemptsRepo;
 }
 
 export function createRepositories(db: DatabaseSync): Repositories {
@@ -253,6 +255,8 @@ export function createRepositories(db: DatabaseSync): Repositories {
     credentials: credentialsRepo(db),
     taskMessages: taskMessagesRepo(db),
     pendingInteractions: pendingInteractionsRepo(db),
+    providerHealth: createProviderHealthRepo(db),
+    executionAttempts: createExecutionAttemptsRepo(db),
   };
 }
 
@@ -378,12 +382,12 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
   return {
     insert(t) {
       db.prepare(
-        `INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,status,agent_type,role,
+        `INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,status,role,
            stages_json,current_stage,status_changed_at,created_at,updated_at,worktree_path,retry_count,paused_from,depends_on_json)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
         t.id, t.requirementId, t.iterationId, t.projectId, t.title, t.description, t.status,
-        t.agentType ?? null, t.role, JSON.stringify(t.stages), t.currentStage, t.statusChangedAt,
+        t.role, JSON.stringify(t.stages), t.currentStage, t.statusChangedAt,
         t.createdAt, t.updatedAt, t.worktreePath ?? null, t.retryCount, t.pausedFrom ?? null,
         JSON.stringify(t.dependsOn ?? []),
       );
@@ -419,10 +423,10 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
     },
     update(t) {
       db.prepare(
-        `UPDATE tasks SET title=?,description=?,status=?,agent_type=?,role=?,stages_json=?,current_stage=?,
+        `UPDATE tasks SET title=?,description=?,status=?,role=?,stages_json=?,current_stage=?,
            status_changed_at=?,updated_at=?,worktree_path=?,retry_count=?,paused_from=?,depends_on_json=? WHERE id=?`,
       ).run(
-        t.title, t.description, t.status, t.agentType ?? null, t.role, JSON.stringify(t.stages),
+        t.title, t.description, t.status, t.role, JSON.stringify(t.stages),
         t.currentStage, t.statusChangedAt, t.updatedAt, t.worktreePath ?? null, t.retryCount, t.pausedFrom ?? null,
         JSON.stringify(t.dependsOn ?? []), t.id,
       );
@@ -442,7 +446,9 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
       else stmt.run(status, at, at, pausedFrom, id);
     },
     assignAgent(id, agentType) {
-      db.prepare('UPDATE tasks SET agent_type=?, updated_at=? WHERE id=?').run(agentType, Date.now(), id);
+      // Pi-only：agent_type 列已在 schema v9 删除，此方法保留为 no-op 以兼容旧调用，删除阶段移除。
+      void id;
+      void agentType;
     },
     setWorktree(id, path) {
       db.prepare('UPDATE tasks SET worktree_path=?, updated_at=? WHERE id=?').run(path ?? null, Date.now(), id);
@@ -466,9 +472,9 @@ function executionsRepo(db: DatabaseSync): ExecutionsRepo {
   return {
     insert(e) {
       db.prepare(
-        `INSERT INTO execution_records(id,task_id,attempt,agent_type,started_at,ended_at,status,summary)
-         VALUES(?,?,?,?,?,?,?,?)`,
-      ).run(e.id, e.taskId, e.attempt, e.agentType, e.startedAt, e.endedAt ?? null, e.status, e.summary ?? null);
+        `INSERT INTO execution_records(id,task_id,attempt,started_at,ended_at,status,summary)
+         VALUES(?,?,?,?,?,?,?)`,
+      ).run(e.id, e.taskId, e.attempt, e.startedAt, e.endedAt ?? null, e.status, e.summary ?? null);
     },
     update(e) {
       db.prepare(

@@ -50,7 +50,7 @@ export function canTransition(
     if (!ctx.hasArtifacts) reasons.push('归档前需有执行产物');
   }
   if (target === 'in_progress' && task.status === 'ready' && !ctx.hasAgentAssigned) {
-    reasons.push('开始执行前需分配 Agent');
+    reasons.push('开始执行前需配置可用 AI 服务');
   }
   if (target === 'ready' && !ctx.hasAcceptance) {
     reasons.push('进入待开发前需有验收标准');

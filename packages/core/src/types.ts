@@ -214,7 +214,11 @@ export interface ExecutionRecord {
   id: string;
   taskId: string;
   attempt: number;
-  agentType: AgentType;
+  /**
+   * @deprecated Pi-only 运行时不再区分 Agent 类型；该字段仅为旧 Renderer 兼容保留，永不填充。
+   * 删除阶段（schema v9 已删列后）连同类型一并移除。
+   */
+  agentType?: AgentType;
   startedAt: number;
   endedAt?: number;
   status: 'running' | 'paused' | 'succeeded' | 'failed' | 'canceled';

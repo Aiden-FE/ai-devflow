@@ -75,7 +75,22 @@ function buildServices() {
   const registry = new AgentRegistry();
   registry.register(new ControllableTestAdapter({ script: () => [{ type: 'done', summary: 'ok', t: 0 }] }));
   for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) registry.register(new FakeAdapter(t));
-  const orchestrator = new Orchestrator(repos, registry, { worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false });
+  // Pi-only 编排器使用单一 AgentRunner；reviewer 与 dev 均产出含 PASS 结论的 done（供审查解析）。
+  const runner: import('@ai-devflow/agents').AgentRunner = {
+    async verifyRuntime() {
+      return { version: 'fake', entry: 'fake' };
+    },
+    async run() {
+      return {
+        events: (async function* () {
+          yield { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 } as import('@ai-devflow/core').AgentEvent;
+        })(),
+        cancel: async () => {},
+        done: async () => ({ exitCode: 0, ok: true }),
+      };
+    },
+  };
+  const orchestrator = new Orchestrator(repos, runner, { worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false });
   const webhooks = new WebhookSender(repos, { maxAttempts: 1, timeoutMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, new NullNotifier(), webhooks, { intervalMs: 999_999_999 });
   return { registry, orchestrator, webhooks, timeoutEngine } satisfies Partial<Services>;
@@ -223,12 +238,10 @@ describe('typed IPC wiring', () => {
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
     repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
     repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'Old', description: '', status: 'ready', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
-    const updated = (await call('tasks', 'update', { id: 't', title: 'New', role: 'reviewer', agentType: 'codex' })) as { title: string; role: string; agentType: string };
+    const updated = (await call('tasks', 'update', { id: 't', title: 'New', role: 'reviewer' })) as { title: string; role: string };
     expect(updated.title).toBe('New');
     expect(repos.tasks.get('t')!.role).toBe('reviewer');
-    expect(repos.tasks.get('t')!.agentType).toBe('codex');
-    // agentType null 清除
-    await call('tasks', 'update', { id: 't', agentType: null });
+    // Pi-only：schema v9 已删除 agent_type 列，任务不再持久化 Agent 类型。
     expect(repos.tasks.get('t')!.agentType).toBeUndefined();
     // 非可编辑状态拒绝
     repos.tasks.updateStatus('t', 'in_progress', now());

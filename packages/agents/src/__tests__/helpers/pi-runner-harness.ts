@@ -98,7 +98,6 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
     router,
     materializer,
     supervisor,
-    runtimeEntry: FAKE_PI_ENTRY,
     sessionsBaseDir,
     projectToolPath: '/usr/bin:/bin',
     attempts,

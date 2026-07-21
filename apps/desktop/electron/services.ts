@@ -1,16 +1,23 @@
-// 装配主进程服务：数据库、Agent 注册表、编排器、超时引擎、Webhook 投递器、通知器、自动更新。
+// 装配主进程服务：数据库、内置 Pi 运行时（Provider 存储 + 路由 + Runner）、编排器、超时引擎、
+// Webhook 投递器、通知器、自动更新。旧 Agent 注册表暂留供尚未移除的 Agent IPC 使用（删除阶段移除）。
 import { app } from 'electron';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import { createDefaultRegistry, type AgentRegistry } from '@ai-devflow/agents';
+import { createDefaultRegistry, type AgentRegistry, type AgentRunner } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
 import { createUpdater, type Updater } from './updater.js';
+import { createPiRuntime, type PiRuntimeServices } from './pi-runtime.js';
+import type { ProviderStore } from './provider-store.js';
 
 export interface Services {
   repos: Repositories;
+  /** @deprecated 仅供尚未移除的 Agent IPC（detect/capabilities）使用；删除阶段移除。 */
   registry: AgentRegistry;
+  runner?: AgentRunner;
+  providerStore?: ProviderStore;
+  piRuntime?: PiRuntimeServices;
   orchestrator: Orchestrator;
   timeoutEngine: TimeoutEngine;
   webhooks: WebhookSender;
@@ -27,10 +34,15 @@ export function createServices(notifier: Notifier): Services {
   const worktreesBaseDir = join(userData, 'worktrees');
   const db = openDatabase(dbPath);
   const repos = createRepositories(db);
-  // 不再无条件绕过权限：权限模式由各角色能力配置决定（requireApproval ? manual : acceptEdits），
-  // 真实权限请求转为 approval_request 由用户处理。详见 adapters/claude-code.ts。
+  // 旧 Agent 注册表暂留（删除阶段移除）；编排器已切换到内置 Pi Runner。
   const registry = createDefaultRegistry();
-  const orchestrator = new Orchestrator(repos, registry, { worktreesBaseDir, maxConcurrent: 2, autoRetry: true });
+  const piRuntime = createPiRuntime(repos, userData);
+  const orchestrator = new Orchestrator(repos, piRuntime.runner, {
+    worktreesBaseDir,
+    maxConcurrent: 2,
+    autoRetry: true,
+    hasProvider: () => piRuntime.providerStore.list().length > 0,
+  });
   const webhooks = new WebhookSender(repos, { maxAttempts: 3, timeoutMs: 10_000, baseDelayMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, notifier, webhooks, { intervalMs: 30_000 });
   const updater = createUpdater();
@@ -38,6 +50,9 @@ export function createServices(notifier: Notifier): Services {
   return {
     repos,
     registry,
+    runner: piRuntime.runner,
+    providerStore: piRuntime.providerStore,
+    piRuntime,
     orchestrator,
     timeoutEngine,
     webhooks,

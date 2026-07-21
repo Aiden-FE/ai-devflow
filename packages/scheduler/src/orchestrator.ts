@@ -1,19 +1,15 @@
 import { EventEmitter } from 'node:events';
 import type {
   AgentEvent,
-  AgentType,
-  AgentCapabilities,
   Checkpoint,
   ExecutionRecord,
   LogEntry,
   Task,
-  TaskRole,
   TaskStatus,
   Project,
   TaskMessage,
   PendingInteraction,
   InteractionKind,
-  GlobalAgentConfig,
   ReviewVerdict,
   RejectTaskInput,
 } from '@ai-devflow/core';
@@ -21,8 +17,6 @@ import {
   canTransition,
   canReject,
   checkTaskDependencies,
-  defaultAgentForRole,
-  resolveRoleConfig,
   now,
   randomId,
   decideRetry,
@@ -30,7 +24,7 @@ import {
   type RetryPolicy,
 } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
-import type { AgentRegistry, AgentRun } from '@ai-devflow/agents';
+import type { AgentRunner, AgentRun } from '@ai-devflow/agents';
 import { createWorktree, removeWorktree, mergeWorktreeBranch, WorktreeError } from './worktree.js';
 import { Semaphore } from './semaphore.js';
 
@@ -42,6 +36,8 @@ export interface OrchestratorOptions {
   autoRetry?: boolean;
   /** 审查不通过后自动返工修复的最大轮数（超过则停在开发中等待人工介入，避免无限循环）。默认 2。 */
   maxReviewRounds?: number;
+  /** 是否已配置可用 AI 服务（提供商）。缺省视为 true（无提供商时 runner.run 会可恢复失败）。 */
+  hasProvider?: () => boolean;
 }
 
 export interface TaskEvent {
@@ -104,18 +100,18 @@ export class Orchestrator extends EventEmitter {
   private retryTimers = new Map<string, NodeJS.Timeout>();
   private retryPolicy: RetryPolicy;
   private autoRetry: boolean;
-  /** 最近一次解析的能力配置（授权恢复合并用）。 */
-  private capsByTask = new Map<string, AgentCapabilities>();
+  private hasProvider: () => boolean;
 
   constructor(
     private repos: Repositories,
-    private registry: AgentRegistry,
+    private runner: AgentRunner,
     private opts: OrchestratorOptions,
   ) {
     super();
     this.sem = new Semaphore(opts.maxConcurrent ?? 2);
     this.retryPolicy = opts.retryPolicy ?? DEFAULT_RETRY_POLICY;
     this.autoRetry = opts.autoRetry ?? true;
+    this.hasProvider = opts.hasProvider ?? (() => true);
   }
 
   /** 启动任务：分派 Agent、创建 worktree、运行流水线。 */
@@ -147,14 +143,7 @@ export class Orchestrator extends EventEmitter {
         if (!dep.ok) throw new Error(`无法启动任务：${dep.reasons.join('; ')}`);
       }
 
-      // 默认适配器：解析并分配首个可用 Agent（角色覆盖 > claude_code > codex > pi）。
-      // 这样“默认（按角色）”的任务也能直接启动，无需手动指定。
-      if (!task.agentType) {
-        const agentType = await this.resolveDefaultAgent(task, project);
-        this.repos.tasks.assignAgent(task.id, agentType);
-        task.agentType = agentType;
-      }
-
+      // Pi-only：无 Agent 选择。是否有可用 AI 服务由 hasProvider() 判定（提供商配置）。
       // 状态门禁：进入 in_progress（审查恢复则回到 testing）
       if (task.status !== 'in_progress') {
         if (init?.resumeToReview) {
@@ -162,7 +151,7 @@ export class Orchestrator extends EventEmitter {
         } else {
           const gate = canTransition(task, 'in_progress', {
             hasAcceptance: true,
-            hasAgentAssigned: !!task.agentType,
+            hasAgentAssigned: this.hasProvider(),
             hasUserAnswer: !!init?.userInput || !!init?.interactionResponse,
             hasArtifacts: false,
           });
@@ -204,24 +193,6 @@ export class Orchestrator extends EventEmitter {
   private async runPipeline(task: Task, project: Project, init: StartInit | undefined, entry: ActivePipeline): Promise<void> {
     const stages = task.stages.length > 0 ? task.stages : [{ id: IMPLICIT_STAGE_ID, name: '执行', role: task.role }];
     const startStage = init?.resumeFrom?.stageIndex ?? task.currentStage ?? 0;
-    const agentType = this.resolveAgentType(task, project);
-    if (!task.agentType) {
-      this.repos.tasks.assignAgent(task.id, agentType);
-      task.agentType = agentType;
-    }
-
-    // 解析能力配置：角色 RoleAgentConfig + 任务显式 agentType 覆盖。
-    let capabilities = this.resolveCapabilities(task, project, agentType);
-    // 授权恢复：把已批准/已拒绝工具并入能力配置（放行 -> allowedTools，拒绝 -> disallowedTools）。
-    if (init?.approvalTool) {
-      const { name, allow } = init.approvalTool;
-      if (allow) {
-        capabilities = { ...capabilities, tools: Array.from(new Set([...(capabilities.tools ?? []), name])) };
-      } else {
-        capabilities = { ...capabilities, disallowedTools: Array.from(new Set([...(capabilities.disallowedTools ?? []), name])) };
-      }
-    }
-    this.capsByTask.set(task.id, capabilities);
 
     // 先创建执行记录：这样 worktree 创建失败等也能落日志并计入尝试次数，
     // 避免 getLatest() 永远 undefined 导致 attempt 不递增、无限重试。
@@ -229,13 +200,12 @@ export class Orchestrator extends EventEmitter {
       id: randomId(),
       taskId: task.id,
       attempt: (this.repos.executions.getLatest(task.id)?.attempt ?? 0) + 1,
-      agentType,
       startedAt: now(),
       status: 'running',
     };
     this.repos.executions.insert(execution);
     entry.executionId = execution.id;
-    this.log(execution, 'info', `启动 Agent ${agentType}（第 ${execution.attempt} 次尝试）`);
+    this.log(execution, 'info', `启动 ${task.role} 角色执行（第 ${execution.attempt} 次尝试）`);
 
     // 启动窗口期被受控停止（如信号量等待期间 pause/cancel）：不创建 worktree，直接收尾。
     if (entry.stopReason) {
@@ -288,14 +258,15 @@ export class Orchestrator extends EventEmitter {
       this.repos.tasks.update(task);
 
       const prompt = this.buildPrompt(task, stage);
-      const run = await this.registry.require(agentType).run({
+      const run = await this.runner.run({
         taskId: task.id,
+        executionId: execution.id,
+        role: task.role,
         prompt,
         cwd: worktreePath!,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
         userInput: i === startStage ? init?.userInput : undefined,
         interactionResponse: i === startStage ? init?.interactionResponse : undefined,
-        capabilities,
       });
       entry.run = run;
 
@@ -421,30 +392,27 @@ export class Orchestrator extends EventEmitter {
    * 返回 undefined 表示审查被受控停止（待沟通/取消），调用方直接收尾。
    */
   private async runReview(task: Task, project: Project, entry: ActivePipeline): Promise<ReviewVerdict | undefined> {
-    const reviewerAgent = await this.resolveReviewerAgent(project);
-    // reviewer 使用「全局配置 + 项目覆盖」解析后的能力配置；审查为只读，不要求人工授权。
-    const capabilities = { ...this.resolveCapabilitiesForRole('reviewer', project, reviewerAgent), requireApproval: false };
     const execution: ExecutionRecord = {
       id: randomId(),
       taskId: task.id,
       attempt: (this.repos.executions.getLatest(task.id)?.attempt ?? 0) + 1,
-      agentType: reviewerAgent,
       startedAt: now(),
       status: 'running',
     };
     this.repos.executions.insert(execution);
     entry.executionId = execution.id;
-    this.log(execution, 'info', `启动审查 Agent ${reviewerAgent}（reviewer，第 ${execution.attempt} 次）`);
+    this.log(execution, 'info', `启动审查执行（reviewer，第 ${execution.attempt} 次）`);
 
     const prompt = this.buildReviewPrompt(task);
     let output = '';
     let errored: string | undefined;
     try {
-      const run = await this.registry.require(reviewerAgent).run({
+      const run = await this.runner.run({
         taskId: task.id,
+        executionId: execution.id,
+        role: 'reviewer',
         prompt,
         cwd: task.worktreePath ?? project.path,
-        capabilities,
       });
       entry.run = run;
       try {
@@ -521,36 +489,10 @@ export class Orchestrator extends EventEmitter {
     ].join('\n');
   }
 
-  /** 解析 reviewer 角色的可用 Agent：项目覆盖 > 全局 > 角色映射，回退到首个可用适配器。 */
-  private async resolveReviewerAgent(project: Project): Promise<AgentType> {
-    const projectCfg = project.settings.roleConfigs?.reviewer;
-    const globalCfg = this.getGlobalAgentConfig().reviewer;
-    const override = projectCfg?.agentType ?? globalCfg?.agentType ?? project.settings.agentRoles?.reviewer;
-    const candidates: AgentType[] = [];
-    // 测试/E2E 逃生舱：AI_DEVFLOW_REVIEW_AGENT 强制指定审查 Agent（如 'test'），避免在自动化里调真实 CLI。
-    const forced = process.env.AI_DEVFLOW_REVIEW_AGENT as AgentType | undefined;
-    if (forced) candidates.push(forced);
-    if (override && !candidates.includes(override)) candidates.push(override);
-    for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) {
-      if (!candidates.includes(t)) candidates.push(t);
-    }
-    for (const t of candidates) {
-      const adapter = this.registry.get(t);
-      if (!adapter) continue;
-      try {
-        const det = await adapter.detect();
-        if (det.available) return t;
-      } catch {
-        // 检测失败则尝试下一个
-      }
-    }
-    throw new Error('没有可用的审查 Agent 桥接器：未检测到 claude/codex/pi。请安装其中之一并重启。');
-  }
-
   /**
    * 验收不通过退回（专用 reject 操作）：原因必填，写入任务消息/审计。
    * - target='ready'：仅改状态到待开发。
-   * - target='in_progress'（默认）：立即把原因作为修复上下文启动执行；无可用 Agent 时抛错（避免“显示成功但未运行”）。
+   * - target='in_progress'（默认）：立即把原因作为修复上下文启动执行。
    */
   async rejectTask(input: RejectTaskInput): Promise<void> {
     const task = this.repos.tasks.get(input.taskId);
@@ -559,7 +501,7 @@ export class Orchestrator extends EventEmitter {
     const reason = (input.reason ?? '').trim();
     const gate = canReject({
       hasAcceptance: true,
-      hasAgentAssigned: !!task.agentType,
+      hasAgentAssigned: this.hasProvider(),
       hasArtifacts: true,
       rejectReason: reason,
     });
@@ -568,13 +510,6 @@ export class Orchestrator extends EventEmitter {
     const target: TaskStatus = input.target === 'ready' ? 'ready' : 'in_progress';
     const project = this.repos.projects.get(task.projectId);
     if (!project) throw new Error(`项目不存在：${task.projectId}`);
-
-    // 退回开发中需立即执行：先确保有可用 Agent（无则抛错，错误对 UI 可见）。
-    if (target === 'in_progress' && !task.agentType) {
-      const agentType = await this.resolveDefaultAgent(task, project);
-      this.repos.tasks.assignAgent(task.id, agentType);
-      task.agentType = agentType;
-    }
 
     const label = target === 'ready' ? '待开发' : '开发中';
     this.recordMessage(task, undefined, { role: 'user', kind: 'text', text: `验收不通过，退回${label}。原因：${reason}` });
@@ -588,31 +523,6 @@ export class Orchestrator extends EventEmitter {
         this.emit('task-error', { taskId: task.id, error: `退回后启动执行失败：${(e as Error).message}` }),
       );
     }
-  }
-
-  /** 读取全局 Agent 能力默认配置（credentials('global_agent_config')，明文 JSON）。 */
-  private getGlobalAgentConfig(): GlobalAgentConfig {
-    const raw = this.repos.credentials.get('global_agent_config');
-    if (!raw) return {};
-    try {
-      return JSON.parse(raw) as GlobalAgentConfig;
-    } catch {
-      return {};
-    }
-  }
-
-  /** 解析某一角色的能力配置（全局 + 项目逐字段合并）。 */
-  private resolveCapabilitiesForRole(role: TaskRole, project: Project, agentType: AgentType): AgentCapabilities {
-    const global = this.getGlobalAgentConfig();
-    const merged = resolveRoleConfig(global[role], project.settings.roleConfigs?.[role]).config;
-    return {
-      agentType,
-      plugins: merged.plugins,
-      skills: merged.skills,
-      tools: merged.tools,
-      disallowedTools: merged.disallowedTools,
-      requireApproval: merged.requireApproval ?? false,
-    };
   }
 
   private async handleEvent(task: Task, execution: ExecutionRecord, ev: AgentEvent, entry?: ActivePipeline): Promise<void> {
@@ -893,7 +803,7 @@ export class Orchestrator extends EventEmitter {
     const task = this.repos.tasks.get(taskId);
     if (task && task.status !== 'archived') {
       // 取消后退回 ready（可重新启动）
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: !!task.agentType, hasArtifacts: false }).ok) {
+      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
         this.transition(task, 'ready');
       }
     }
@@ -906,7 +816,7 @@ export class Orchestrator extends EventEmitter {
     if (!task) throw new Error(`任务不存在：${taskId}`);
     this.repos.tasks.incRetry(taskId);
     task.retryCount += 1;
-    if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: !!task.agentType, hasArtifacts: false }).ok) {
+    if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
       this.transition(task, 'ready');
     }
     await this.start(taskId);
@@ -954,7 +864,7 @@ export class Orchestrator extends EventEmitter {
       this.scheduleRetry(task.id, decision.delayMs, generation);
     } else {
       // 退回 ready 供手动重试
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: !!task.agentType, hasArtifacts: false }).ok) {
+      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
         this.transition(task, 'ready');
       }
       if (latest) this.log(latest, 'error', `已达最大重试次数，任务退回待开发：${err.message}`);
@@ -973,7 +883,7 @@ export class Orchestrator extends EventEmitter {
     // 归档门禁 accepted 由调用方（tasks.accept）显式提供；编排器自身不会自动归档。
     const gate = canTransition(task, target, {
       hasAcceptance: true,
-      hasAgentAssigned: !!task.agentType,
+      hasAgentAssigned: this.hasProvider(),
       hasArtifacts: true,
       hasUserAnswer: false,
       ...ctx,
@@ -986,55 +896,6 @@ export class Orchestrator extends EventEmitter {
     task.status = target;
     task.statusChangedAt = now();
     this.emit('task-status', { taskId: task.id, status: target });
-  }
-
-  private resolveAgentType(task: Task, project: Project): AgentType {
-    if (task.agentType) return task.agentType;
-    const roleConfig = project.settings.roleConfigs?.[task.role];
-    if (roleConfig?.agentType) return roleConfig.agentType;
-    // 全局默认配置（项目未显式覆盖时继承）。
-    const globalConfig = this.getGlobalAgentConfig()[task.role];
-    if (globalConfig?.agentType) return globalConfig.agentType;
-    const roleOverride = project.settings.agentRoles?.[task.role];
-    if (roleOverride) return roleOverride;
-    return defaultAgentForRole(task.role);
-  }
-
-  /**
-   * 解析能力配置：项目显式值 > 全局值 > 系统默认，逐字段合并（undefined=继承，[]=显式空覆盖）。
-   * 任务显式 agentType 优先于角色默认；工具/插件/Skills/授权来自合并后的角色配置。
-   */
-  private resolveCapabilities(task: Task, project: Project, agentType: AgentType): AgentCapabilities {
-    return this.resolveCapabilitiesForRole(task.role, project, agentType);
-  }
-
-  /**
-   * 解析默认 Agent：按“项目角色覆盖 > 全局角色覆盖 > claude_code > codex > pi”顺序检测首个可用适配器。
-   * 不含 'test'（测试适配器需显式指定）。无可用适配器时抛出清晰错误。
-   */
-  private async resolveDefaultAgent(task: Task, project: Project): Promise<AgentType> {
-    const roleConfig = project.settings.roleConfigs?.[task.role];
-    const globalConfig = this.getGlobalAgentConfig()[task.role];
-    const roleOverride =
-      roleConfig?.agentType ?? globalConfig?.agentType ?? project.settings.agentRoles?.[task.role];
-    const candidates: AgentType[] = [];
-    if (roleOverride) candidates.push(roleOverride);
-    for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) {
-      if (!candidates.includes(t)) candidates.push(t);
-    }
-    for (const t of candidates) {
-      const adapter = this.registry.get(t);
-      if (!adapter) continue;
-      try {
-        const det = await adapter.detect();
-        if (det.available) return t;
-      } catch {
-        // 检测失败则尝试下一个
-      }
-    }
-    throw new Error(
-      '没有可用的 Agent 桥接器：未检测到 claude/codex/pi。请安装其中之一并重启，或在创建任务时显式指定“测试适配器”。',
-    );
   }
 
   private buildPrompt(task: Task, stage: { id: string; name: string }): string {
@@ -1058,7 +919,7 @@ export class Orchestrator extends EventEmitter {
       if (latest && latest.status === 'running') {
         this.markExecution(latest, 'failed', '应用重启，子进程已终止');
       }
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: !!task.agentType, hasArtifacts: false }).ok) {
+      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
         this.transition(task, 'ready');
       }
       failed.push(task.id);

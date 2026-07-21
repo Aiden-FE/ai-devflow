@@ -120,8 +120,8 @@ describe('full lifecycle', () => {
     expect(repos.tasks.get('t')!.status).toBe('in_progress');
     expect(repos.tasks.get('t')!.statusChangedAt).toBe(150);
 
-    repos.tasks.assignAgent('t', 'claude_code');
-    expect(repos.tasks.get('t')!.agentType).toBe('claude_code');
+    // Pi-only：schema v9 已删除 agent_type 列，任务不再携带 Agent 类型。
+    expect(repos.tasks.get('t')!.agentType).toBeUndefined();
 
     repos.tasks.updateStatus('t', 'in_review', 200);
     repos.tasks.updateStatus('t', 'archived', 400);
@@ -309,19 +309,18 @@ describe('backlog removal migration (v6)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aidf-backlog-'));
     const path = join(dir, 'test.db');
     try {
-      let d = openDatabase(path);
+      // 构造一个真实的 v5 库（v6 之前），含历史 backlog 数据；随后一次性升级到最新（v9）。
+      let d = openDatabase(path, { maxVersion: 5 });
       let r = createRepositories(d);
       r.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
       r.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
       r.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
-      // 回退到 v5，使 v6/v7 在重开时重跑
-      d.prepare('DELETE FROM schema_version WHERE version >= 6').run();
       // 历史任务：backlog 状态 + paused_from=backlog
       d.prepare("INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,status,role,stages_json,current_stage,status_changed_at,created_at,updated_at,retry_count,paused_from,depends_on_json) VALUES('t','r','i','p','T','','backlog','coder','[]',0,1,1,1,0,'backlog','[]')").run();
       r.notificationRules.insert({ id: 'nb', status: 'backlog', minutes: 5, channels: ['desktop'], enabled: true });
       d.close();
 
-      // 重开 -> v6 迁移生效
+      // 重开 -> v6（backlog 迁移）…v9 一次性生效
       d = openDatabase(path);
       r = createRepositories(d);
       const t = r.tasks.get('t')!;

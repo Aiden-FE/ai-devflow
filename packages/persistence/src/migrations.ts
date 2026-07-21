@@ -1,4 +1,5 @@
 // 版本化迁移。每个迁移是一段幂等 DDL（IF NOT EXISTS），按顺序执行并记录版本号。
+import { PI_ONLY_MIGRATION_V9 } from './pi-only-migration-v9.js';
 
 export interface Migration {
   version: number;
@@ -254,4 +255,8 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_tasks_requirement ON tasks(requirement_id);
     `,
   },
+  // v9：Pi-only 切换。删除 tasks.agent_type / execution_records.agent_type，清理项目设置中的
+  // agentRoles/roleConfigs 与全局 Agent 配置凭证，新增 provider_health / execution_attempts。
+  // 破坏性 DROP COLUMN 由 runMigrations 在事务中执行（openDatabase 先做一致性备份）。
+  PI_ONLY_MIGRATION_V9,
 ];
