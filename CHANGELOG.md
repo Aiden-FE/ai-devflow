@@ -6,6 +6,16 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.1.1
+
+变更范围：[v0.1.0...v0.1.1](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.0...v0.1.1)
+
+### 新功能
+- 品牌资产、桌面端 UI 与调度器优化（b77d7e8）
+
+### 问题修复
+- **release**：修复构件校验漏检（nullglob 把无匹配模式展开为空导致误判通过）+ Linux AppImage 命名为 x86_64 (#5)（aaabdda）
+
 ## v0.1.0
 
 变更范围：[v0.0.3...v0.1.0](https://github.com/Aiden-FE/ai-devflow/compare/v0.0.3...v0.1.0)
