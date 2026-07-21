@@ -13,11 +13,12 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { AgentDetection, NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, AiProviderConfig, ThemeMode, TaskRole, AgentType, Project, RoleAgentConfig, ProjectSettings, AgentCapabilitySupport, GlobalAgentConfig, Locale, TestConnectionResult, UpdateStatus } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind } from '@ai-devflow/core';
+
+const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
+const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
-
-const ROLES: TaskRole[] = ['planner', 'coder', 'reviewer', 'tester'];
 
 export function SettingsPage(): React.ReactElement {
   const t = useT();
@@ -28,12 +29,9 @@ export function SettingsPage(): React.ReactElement {
         <ThemeSection />
         <LanguageSection />
         <UpdateSection />
-        <AgentSection />
-        <GlobalAgentConfigSection />
-        <AgentConfigSection />
+        <ProviderSection />
         <NotificationRulesSection />
         <WebhooksSection />
-        <AiProviderSection />
       </div>
     </div>
   );
@@ -190,311 +188,6 @@ function ThemeSection(): React.ReactElement {
   );
 }
 
-function AgentSection(): React.ReactElement {
-  const t = useT();
-  const { data, loading, error, reload } = useAsync(() => api.agents.detectAll(), []);
-  const [busy, setBusy] = useState(false);
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-1 flex items-center gap-2">
-        <h3 className="m-0 text-sm font-semibold">{t('settings.agents')}</h3>
-        <div className="flex-1" />
-        <Button size="sm" variant="outline" disabled={busy} onClick={async () => { setBusy(true); await reload(); setBusy(false); }}>
-          {busy ? t('settings.agents.detecting') : t('settings.agents.redetect')}
-        </Button>
-      </div>
-      <p className="text-xs text-muted-foreground">{t('settings.agents.hint')}</p>
-      <LoadingOrError loading={loading} error={error} data={data} reload={reload}>
-        {(list) => (
-          <table className="mt-2 w-full text-sm">
-            <thead><tr><th className="text-left text-muted-foreground">{t('settings.agents.col.agent')}</th><th className="text-left text-muted-foreground">{t('settings.agents.col.available')}</th><th className="text-left text-muted-foreground">{t('settings.agents.col.version')}</th><th className="text-left text-muted-foreground">{t('settings.agents.col.note')}</th></tr></thead>
-            <tbody>
-              {list.map((d: AgentDetection) => (
-                <tr key={d.agentType} className="border-t border-border">
-                  <td>{t(`agent.${d.agentType}`)}</td>
-                  <td>{d.available ? <Badge variant="success">{t('common.yes')}</Badge> : <Badge variant="error">{t('common.no')}</Badge>}</td>
-                  <td className="text-xs">{d.version ?? '-'}</td>
-                  <td className="text-xs text-muted-foreground">{d.reason ?? (d.path ? d.path : '')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </LoadingOrError>
-    </div>
-  );
-}
-
-// ---- Agent 能力配置：语义占位符示例 ----
-const PH_TOOLS = 'Bash,Edit,Read';
-const PH_DISALLOWED = 'WebSearch,Notebook';
-const PH_PLUGINS = '/abs/path/to/plugin 或 https://example.com/plugin';
-const PH_SKILLS = 'skill-name';
-
-// ---- 全局 Agent 能力默认配置（item 12）----
-function GlobalAgentConfigSection(): React.ReactElement {
-  const t = useT();
-  const globalQ = useAsync(() => api.settings.getGlobalAgentConfig(), []);
-  const [draft, setDraft] = useState<GlobalAgentConfig>({});
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | undefined>();
-
-  useEffect(() => {
-    if (globalQ.data) { setDraft(globalQ.data); setSaved(false); }
-  }, [globalQ.data]);
-
-  const setRole = (role: TaskRole, patch: Partial<RoleAgentConfig>) => {
-    setDraft((prev) => ({ ...prev, [role]: { ...(prev[role] ?? {}), ...patch } }));
-    setSaved(false);
-  };
-  const save = async () => {
-    setError(undefined);
-    try { await api.settings.setGlobalAgentConfig(draft); setSaved(true); globalQ.reload(); }
-    catch (e) { setError((e as Error).message); }
-  };
-
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <h3 className="m-0 text-sm font-semibold">{t('settings.globalAgent')}</h3>
-      <p className="text-xs text-muted-foreground">{t('settings.globalAgent.hint')}</p>
-      <div className="mt-2 flex flex-col gap-3">
-        {ROLES.map((role) => (
-          <div key={role} className="rounded-md border border-border p-3">
-            <div className="mb-2 flex items-center gap-2">
-              <span className="text-sm font-medium">{t(`role.${role}`)}</span>
-              <div className="flex-1" />
-              <Select value={(draft[role]?.agentType ?? '') as string} onValueChange={(v) => setRole(role, { agentType: (v || undefined) as AgentType | undefined })}>
-                <SelectTrigger className="h-8 w-44"><SelectValue placeholder={t('agent.default')} /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">{t('agent.default')}</SelectItem>
-                  <SelectItem value="claude_code">{t('agent.claude_code')}</SelectItem>
-                  <SelectItem value="codex">{t('agent.codex')}</SelectItem>
-                  <SelectItem value="pi">{t('agent.pi')}</SelectItem>
-                  <SelectItem value="test">{t('agent.test')}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <RoleCapabilityFields cfg={draft[role] ?? {}} onField={(patch) => setRole(role, patch)} />
-          </div>
-        ))}
-        {error && <div className="text-xs text-destructive">{error}</div>}
-        {saved && !error && <div className="text-xs text-ok">{t('settings.agentConfig.saved')}</div>}
-        <div><Button size="sm" onClick={save}>{t('common.save')}</Button></div>
-      </div>
-    </div>
-  );
-}
-
-// ---- 项目 Agent 能力配置（item 12：项目显式值 > 全局值 > 系统默认，逐字段继承）----
-function AgentConfigSection(): React.ReactElement {
-  const t = useT();
-  const projectsQ = useAsync(() => api.projects.list(), []);
-  const capsQ = useAsync(() => api.agents.capabilities(), []);
-  const globalQ = useAsync(() => api.settings.getGlobalAgentConfig(), []);
-  const [projectId, setProjectId] = useState<string | undefined>(undefined);
-  const projects = projectsQ.data ?? [];
-  const activeProjectId = projectId ?? projects[0]?.id;
-  const global = globalQ.data ?? {};
-
-  const settingsQ = useAsync(
-    () => (activeProjectId ? api.settings.getProjectSettings(activeProjectId) : Promise.resolve({} as ProjectSettings)),
-    [activeProjectId],
-  );
-  const [draft, setDraft] = useState<ProjectSettings>({});
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | undefined>();
-
-  useEffect(() => {
-    if (settingsQ.data) {
-      setDraft(settingsQ.data);
-      setSaved(false);
-    }
-  }, [settingsQ.data, activeProjectId]);
-
-  const caps = (capsQ.data ?? {}) as Partial<Record<AgentType, AgentCapabilitySupport>>;
-
-  const setRole = (role: TaskRole, patch: Partial<RoleAgentConfig>) => {
-    setDraft((prev) => ({
-      ...prev,
-      roleConfigs: { ...prev.roleConfigs, [role]: { ...(prev.roleConfigs?.[role] ?? {}), ...patch } },
-    }));
-    setSaved(false);
-  };
-  // 恢复继承：删除该项目角色的覆盖配置（字段回到 undefined=继承全局）。
-  const resetRole = (role: TaskRole) => {
-    setDraft((prev) => {
-      const rc = { ...prev.roleConfigs };
-      delete rc[role];
-      return { ...prev, roleConfigs: rc };
-    });
-    setSaved(false);
-  };
-
-  const save = async () => {
-    if (!activeProjectId) return;
-    setError(undefined);
-    try {
-      await api.settings.updateProjectSettings(activeProjectId, draft);
-      setSaved(true);
-      settingsQ.reload();
-    } catch (e) { setError((e as Error).message); }
-  };
-
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <h3 className="m-0 text-sm font-semibold">{t('settings.agentConfig')}</h3>
-      <p className="text-xs text-muted-foreground">{t('settings.agentConfig.hint')}</p>
-      <LoadingOrError loading={projectsQ.loading} error={projectsQ.error} data={projectsQ.data} reload={projectsQ.reload}>
-        {(projs: Project[]) => (
-          <div className="mt-2 flex flex-col gap-3">
-            <div className="flex flex-col gap-1.5">
-              <Label>{t('settings.agentConfig.project')}</Label>
-              <Select value={activeProjectId ?? ''} onValueChange={setProjectId}>
-                <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {projs.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            {ROLES.map((role) => {
-              const cfg = draft.roleConfigs?.[role] ?? {};
-              const inherited = global[role] ?? {};
-              const overridden = !!draft.roleConfigs?.[role] && Object.values(draft.roleConfigs[role]).some((v) => v !== undefined);
-              const effAgent = (cfg.agentType ?? inherited.agentType ?? 'claude_code') as AgentType;
-              const support = caps[effAgent];
-              return (
-                <div key={role} className="rounded-md border border-border p-3">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-medium">{t(`role.${role}`)}</span>
-                    <Badge variant={overridden ? 'warning' : 'secondary'} className="text-[10px]">
-                      {overridden ? t('settings.agentConfig.overridden') : t('settings.agentConfig.inherited')}
-                    </Badge>
-                    <div className="flex-1" />
-                    {overridden && <Button size="sm" variant="ghost" onClick={() => resetRole(role)}>{t('settings.agentConfig.resetInherit')}</Button>}
-                    <Select value={(cfg.agentType ?? '') as string} onValueChange={(v) => setRole(role, { agentType: (v || undefined) as AgentType | undefined })}>
-                      <SelectTrigger className="h-8 w-44"><SelectValue placeholder={inherited.agentType ? `${t('agent.default')}·${t(`agent.${inherited.agentType}`)}` : t('agent.default')} /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="">{t('agent.default')}</SelectItem>
-                        <SelectItem value="claude_code">{t('agent.claude_code')}</SelectItem>
-                        <SelectItem value="codex">{t('agent.codex')}</SelectItem>
-                        <SelectItem value="pi">{t('agent.pi')}</SelectItem>
-                        <SelectItem value="test">{t('agent.test')}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <RoleCapabilityFields cfg={cfg} support={support} inherited={inherited} onField={(patch) => setRole(role, patch)} />
-                </div>
-              );
-            })}
-            {error && <div className="text-xs text-destructive">{error}</div>}
-            {saved && !error && <div className="text-xs text-ok">{t('settings.agentConfig.saved')}</div>}
-            <div>
-              <Button size="sm" onClick={save}>{t('common.save')}</Button>
-            </div>
-          </div>
-        )}
-      </LoadingOrError>
-    </div>
-  );
-}
-
-/** 角色能力字段编辑器：tools/disallowedTools/plugins/skills + requireApproval。
- *  - support 缺省（全局编辑）时不做适配器 gating；
- *  - inherited 提供时，未覆盖字段以占位符展示继承值，并标注「继承」。 */
-function RoleCapabilityFields({ cfg, support, inherited, onField }: {
-  cfg: RoleAgentConfig;
-  support?: AgentCapabilitySupport;
-  inherited?: RoleAgentConfig;
-  onField: (patch: Partial<RoleAgentConfig>) => void;
-}): React.ReactElement {
-  const t = useT();
-  const inh = (arr?: string[]) => (arr && arr.length ? arr.join(',') : undefined);
-  return (
-    <div className="grid grid-cols-1 gap-2">
-      <CapabilityField
-        label={t('settings.agentConfig.tools')}
-        value={(cfg.tools ?? []).join(',')}
-        placeholder={inh(inherited?.tools) ?? PH_TOOLS}
-        inherited={cfg.tools === undefined && inherited?.tools !== undefined}
-        supported={support ? support.tools : undefined}
-        hint={support && !support.tools ? t('settings.agentConfig.unsupported') : undefined}
-        onChange={(v) => onField({ tools: csvOrUndef(v) })}
-      />
-      <CapabilityField
-        label={t('settings.agentConfig.disallowedTools')}
-        value={(cfg.disallowedTools ?? []).join(',')}
-        placeholder={inh(inherited?.disallowedTools) ?? PH_DISALLOWED}
-        inherited={cfg.disallowedTools === undefined && inherited?.disallowedTools !== undefined}
-        supported={support ? support.tools : undefined}
-        hint={support && !support.tools ? t('settings.agentConfig.unsupported') : undefined}
-        onChange={(v) => onField({ disallowedTools: csvOrUndef(v) })}
-      />
-      <CapabilityField
-        label={t('settings.agentConfig.plugins')}
-        value={(cfg.plugins ?? []).join(',')}
-        placeholder={inh(inherited?.plugins) ?? PH_PLUGINS}
-        inherited={cfg.plugins === undefined && inherited?.plugins !== undefined}
-        supported={support ? support.plugins : undefined}
-        hint={support && !support.plugins ? t('settings.agentConfig.unsupported') : undefined}
-        onChange={(v) => onField({ plugins: csvOrUndef(v) })}
-      />
-      <CapabilityField
-        label={t('settings.agentConfig.skills')}
-        value={(cfg.skills ?? []).join(',')}
-        placeholder={inh(inherited?.skills) ?? PH_SKILLS}
-        inherited={cfg.skills === undefined && inherited?.skills !== undefined}
-        supported={support ? support.skills !== false : undefined}
-        hint={support && support.skills === false ? t('settings.agentConfig.unsupported') : undefined}
-        onChange={(v) => onField({ skills: csvOrUndef(v) })}
-      />
-      <label className={`flex items-center gap-1.5 text-xs ${support && !support.approval ? 'opacity-50' : ''}`}>
-        <Checkbox
-          checked={cfg.requireApproval === true}
-          disabled={!!support && !support.approval}
-          onCheckedChange={(v) => onField({ requireApproval: v === true ? true : undefined })}
-        />
-        {t('settings.agentConfig.requireApproval')}
-        {cfg.requireApproval === undefined && inherited?.requireApproval !== undefined && (
-          <span className="text-muted-foreground">({t('settings.agentConfig.inherited')}: {inherited.requireApproval ? t('common.yes') : t('common.no')})</span>
-        )}
-        {support && !support.approval && <span className="text-muted-foreground">({t('settings.agentConfig.unsupported')})</span>}
-      </label>
-    </div>
-  );
-}
-
-function CapabilityField({ label, value, placeholder, inherited, supported, hint, onChange }: {
-  label: string;
-  value: string;
-  placeholder?: string;
-  inherited?: boolean;
-  supported?: boolean;
-  hint?: string;
-  onChange: (v: string) => void;
-}): React.ReactElement {
-  const t = useT();
-  const disabled = supported === false;
-  return (
-    <div className={`flex flex-col gap-1 ${disabled ? 'opacity-50' : ''}`}>
-      <Label className="text-xs">
-        {label}
-        {inherited && <span className="ml-1 text-muted-foreground">({t('settings.agentConfig.inherited')})</span>}
-        {hint ? <span className="ml-1 text-muted-foreground">({hint})</span> : null}
-      </Label>
-      <Input value={value} placeholder={placeholder} disabled={disabled} onChange={(e) => onChange(e.target.value)} className="h-8 text-xs" />
-    </div>
-  );
-}
-
-function splitCsv(v: string): string[] {
-  return v.split(',').map((s) => s.trim()).filter(Boolean);
-}
-
-/** 空输入 -> undefined（继承），非空 -> 显式数组。避免「打开即保存」把继承值固化为项目值。 */
-function csvOrUndef(v: string): string[] | undefined {
-  const arr = splitCsv(v);
-  return arr.length > 0 ? arr : undefined;
-}
 
 function NotificationRulesSection(): React.ReactElement {
   const t = useT();
@@ -678,90 +371,131 @@ function DeliveriesModal({ webhookId, onClose }: { webhookId: string; onClose: (
   );
 }
 
-function AiProviderSection(): React.ReactElement {
+function ProviderSection(): React.ReactElement {
   const t = useT();
-  const { data, reload } = useAsync(() => api.settings.getAiProvider(), []);
-  const [provider, setProvider] = useState<'anthropic' | 'openai'>('anthropic');
+  const { data, reload } = useAsync(() => api.providers.list(), []);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<ProviderSummary | undefined>();
+  const [kind, setKind] = useState<ProviderKind>('openai_compatible');
+  const [displayName, setDisplayName] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('');
   const [baseURL, setBaseURL] = useState('');
+  const [allowLocal, setAllowLocal] = useState(false);
+  const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState<string | undefined>();
-  const [saved, setSaved] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<TestConnectionResult | undefined>();
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; error?: string }>>({});
 
-  useEffect(() => {
-    if (data) {
-      setProvider(data.provider);
-      setApiKey('');
-      setModel(data.model);
-      setBaseURL(data.baseURL ?? '');
-    }
-  }, [data]);
-
+  const startAdd = () => {
+    setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
+    setBaseURL(''); setAllowLocal(false); setEnabled(true); setError(undefined); setOpen(true);
+  };
+  const startEdit = (p: ProviderSummary) => {
+    setEditing(p); setKind(p.kind); setDisplayName(p.displayName); setApiKey('');
+    setBaseURL(p.baseURL ?? ''); setAllowLocal(false); setEnabled(p.enabled); setError(undefined); setOpen(true);
+  };
   const save = async () => {
     setError(undefined);
     try {
-      const cfg: AiProviderConfig = { provider, apiKey, model, baseURL: baseURL || undefined };
-      await api.settings.setAiProvider(cfg);
-      setApiKey('');
-      setSaved(true);
+      const list = data ?? [];
+      const input: ProviderInput = {
+        id: editing?.id ?? crypto.randomUUID(),
+        kind, displayName, enabled,
+        priority: editing?.priority ?? list.length,
+        authType: 'api_key',
+        apiKey: apiKey || undefined,
+        baseURL: baseURL || undefined,
+        allowInsecureLocal: allowLocal,
+        revision: editing?.revision ?? 1,
+      };
+      await api.providers.save(input);
+      setOpen(false);
       reload();
     } catch (e) { setError((e as Error).message); }
   };
-  const clear = async () => {
-    setError(undefined);
-    try { await api.settings.setAiProvider(undefined); setSaved(true); reload(); } catch (e) { setError((e as Error).message); }
+  const remove = async (id: string) => { await api.providers.remove(id); reload(); };
+  const move = async (index: number, dir: -1 | 1) => {
+    const list = [...(data ?? [])];
+    const j = index + dir;
+    if (j < 0 || j >= list.length) return;
+    const tmp = list[index]!;
+    list[index] = list[j]!;
+    list[j] = tmp;
+    await api.providers.reorder(list.map((p) => p.id));
+    reload();
   };
-  // 测试连接：错误含脱敏后的最终请求地址、HTTP 状态与服务端摘要（不含 API Key）。
-  const test = async () => {
-    setTesting(true); setTestResult(undefined); setError(undefined);
-    try {
-      const r = await api.settings.testAiProvider({ provider, apiKey, model, baseURL: baseURL || undefined });
-      setTestResult(r);
-    } catch (e) { setError((e as Error).message); }
-    finally { setTesting(false); }
+  const test = async (id: string) => {
+    const r = await api.providers.test(id);
+    setTestResults((prev) => ({ ...prev, [id]: { ok: r.ok, error: r.error } }));
   };
 
+  const list = data ?? [];
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <h3 className="m-0 text-sm font-semibold">{t('settings.ai')}</h3>
-      <p className="text-xs text-muted-foreground">{t('settings.ai.hint')}</p>
-      {!data && <p className="mt-2 text-xs text-muted-foreground">{t('settings.ai.unset')}</p>}
-      <div className="mt-2 flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <Label>{t('settings.ai.provider')}</Label>
-          <Select value={provider} onValueChange={(v) => setProvider(v as 'anthropic' | 'openai')}>
-            <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="anthropic">{t('settings.ai.provider.anthropic')}</SelectItem>
-              <SelectItem value="openai">{t('settings.ai.provider.openai')}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="flex flex-col gap-1.5"><Label>{t('settings.ai.apiKey')}</Label><Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={data ? t('settings.ai.apiKey.hint') : ''} /></div>
-        <div className="flex flex-col gap-1.5"><Label>{t('settings.ai.model')}</Label><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={provider === 'anthropic' ? t('settings.ai.model.anthropic.hint') : t('settings.ai.model.openai.hint')} /></div>
-        <div className="flex flex-col gap-1.5">
-          <Label>{t('settings.ai.baseURL')}</Label>
-          <Input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://host 或 https://host/v1" />
-          <span className="text-[11px] text-muted-foreground">{t('settings.ai.baseURL.hint')}</span>
-        </div>
-        {error && <div className="break-words text-xs text-destructive">{error}</div>}
-        {testResult && (
-          <div className={`break-words rounded-md border px-2 py-1.5 text-xs ${testResult.ok ? 'border-ok/40 bg-ok/10 text-ok' : 'border-destructive/40 bg-destructive/10 text-destructive'}`}>
-            <div>{testResult.ok ? t('settings.ai.testOk') : t('settings.ai.testFail')} {testResult.status > 0 ? `(HTTP ${testResult.status})` : ''}</div>
-            {testResult.url && <div className="mt-0.5 opacity-80">{t('settings.ai.testUrl')}: {testResult.url}</div>}
-            {testResult.serverSummary && <div className="mt-0.5 opacity-80">{testResult.serverSummary}</div>}
-            {testResult.error && <div className="mt-0.5">{testResult.error}</div>}
-          </div>
-        )}
-        {saved && !error && <div className="text-xs text-ok">{t('common.ok')}</div>}
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={save}>{t('settings.ai.save')}</Button>
-          <Button variant="outline" disabled={testing} onClick={test}>{testing ? t('settings.ai.testing') : t('settings.ai.test')}</Button>
-          {data && <Button variant="ghost" onClick={clear}>{t('settings.ai.clear')}</Button>}
-        </div>
+      <div className="flex items-center justify-between">
+        <h3 className="m-0 text-sm font-semibold">{t('settings.providers')}</h3>
+        <Button onClick={startAdd}>{t('settings.providers.add')}</Button>
       </div>
+      <p className="text-xs text-muted-foreground">{t('settings.providers.hint')}</p>
+      {list.length === 0 && <p className="mt-2 text-xs text-muted-foreground">{t('settings.providers.empty')}</p>}
+      <div className="mt-2 flex flex-col gap-2">
+        {list.map((p, i) => (
+          <div key={p.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">{p.displayName}</span>
+                <Badge variant="outline">{p.kind}</Badge>
+                <Badge variant="outline">{t(`settings.providers.health.${p.health}`)}</Badge>
+                {p.hasCredential && <Badge variant="outline">{t('settings.providers.apiKey.set')}</Badge>}
+                {!p.enabled && <Badge variant="outline">off</Badge>}
+              </div>
+              {p.baseURL && <span className="text-[11px] text-muted-foreground">{p.baseURL}</span>}
+              {testResults[p.id] && (
+                <span className={`text-[11px] ${testResults[p.id]!.ok ? 'text-ok' : 'text-destructive'}`}>
+                  {testResults[p.id]!.ok ? t('settings.providers.testOk') : `${t('settings.providers.testFail')}${testResults[p.id]!.error ? `: ${testResults[p.id]!.error}` : ''}`}
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              <Button variant="ghost" size="sm" onClick={() => move(i, -1)}>{t('settings.providers.up')}</Button>
+              <Button variant="ghost" size="sm" onClick={() => move(i, 1)}>{t('settings.providers.down')}</Button>
+              <Button variant="ghost" size="sm" onClick={() => test(p.id)}>{t('settings.providers.test')}</Button>
+              <Button variant="ghost" size="sm" onClick={() => startEdit(p)}>{t('common.edit')}</Button>
+              <Button variant="ghost" size="sm" onClick={() => remove(p.id)}>{t('common.delete')}</Button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{editing ? t('settings.providers.edit') : t('settings.providers.add')}</DialogTitle></DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label>{t('settings.providers.kind')}</Label>
+              <Select value={kind} onValueChange={(v) => setKind(v as ProviderKind)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {PROVIDER_KINDS.map((k) => <SelectItem key={k} value={k}>{k}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1.5"><Label>{t('settings.providers.name')}</Label><Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></div>
+            <div className="flex flex-col gap-1.5"><Label>{t('settings.providers.apiKey')}</Label><Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={editing?.hasCredential ? t('settings.providers.apiKey.hint') : ''} /></div>
+            {COMPATIBLE_PROVIDER_KINDS.includes(kind) && (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <Label>{t('settings.providers.baseURL')}</Label>
+                  <Input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://host/v1" />
+                  <span className="text-[11px] text-muted-foreground">{t('settings.providers.baseURL.hint')}</span>
+                </div>
+                <label className="flex items-center gap-2 text-xs"><Checkbox checked={allowLocal} onCheckedChange={(v) => setAllowLocal(v === true)} />{t('settings.providers.local')}</label>
+              </>
+            )}
+            <label className="flex items-center gap-2 text-xs"><Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} />{t('settings.providers.enabled')}</label>
+            {error && <div className="break-words text-xs text-destructive">{error}</div>}
+          </div>
+          <DialogFooter><Button onClick={save}>{t('common.save')}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
