@@ -138,6 +138,11 @@ jobs:
   build:
     needs: prepare
     if: github.ref == 'refs/heads/main'
+    # Windows runner 默认 shell 为 PowerShell；本 job 的 run 步骤均为 bash 语法，
+    # 统一指定 bash（Windows 上用 Git Bash），避免 `if/fi` 等在 pwsh 下解析失败。
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: true
       matrix:
