@@ -6,6 +6,16 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.1.2
+
+变更范围：[v0.1.1...v0.1.2](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.1...v0.1.2)
+
+### 问题修复
+- 修复桌面端自动更新状态并支持未签名 macOS 手动升级（98a748e）
+
+### 其他变更
+- merge remote v0.1.1 release commit（610dd3b）
+
 ## v0.1.1
 
 变更范围：[v0.1.0...v0.1.1](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.0...v0.1.1)
