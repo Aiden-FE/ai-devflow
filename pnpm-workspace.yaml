@@ -1,2 +1,14 @@
 packages:
   - "packages/*"
+  - "apps/*"
+
+onlyBuiltDependencies:
+  - esbuild
+
+dangerouslyAllowAllBuilds: true
+
+# ai-sdk@4 依赖 zod-to-json-schema，但 3.25+ 改为 import "zod/v3"（zod v4 子路径），
+# 与本项目 zod@3.23 不兼容。锁定到 3.23.5（直接 import "zod"）。
+overrides:
+  zod-to-json-schema: 3.23.5
+

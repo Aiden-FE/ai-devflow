@@ -1,11 +1,21 @@
 {
   "name": "ai-devflow",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "private": true,
-  "packageManager": "pnpm@11.11.0",
+  "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "pnpm --recursive --if-present run build",
     "test": "pnpm --recursive --if-present run test",
-    "lint": "pnpm --recursive --if-present run lint"
+    "typecheck": "pnpm --recursive --if-present run typecheck",
+    "lint": "pnpm --recursive --if-present run lint",
+    "dev": "pnpm --filter @ai-devflow/desktop dev",
+    "verify": "pnpm -r typecheck && pnpm -r lint && pnpm -r test",
+    "verify:unit": "pnpm -r --if-present run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
   }
 }

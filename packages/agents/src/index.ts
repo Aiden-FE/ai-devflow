@@ -1,0 +1,12 @@
+export * from './types.js';
+export * from './registry.js';
+export * from './detect.js';
+export { ClaudeCodeAdapter, parseClaudeLine } from './adapters/claude-code.js';
+export { CodexAdapter, parseCodexLine } from './adapters/codex.js';
+export { PiAdapter, type PiAdapterOptions } from './adapters/pi.js';
+export {
+  ControllableTestAdapter,
+  type ControllableTestOptions,
+  type TestEventSpec,
+} from './adapters/test.js';
+export { spawnAgentProcess, type RawLine, type SpawnedProcess } from './process-runner.js';

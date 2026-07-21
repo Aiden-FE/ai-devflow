@@ -5,7 +5,11 @@ node_modules/
 
 dist/
 build/
+out/
 coverage/
+.vite/
+
+*.tsbuildinfo
 
 .env
 .env.*
