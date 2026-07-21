@@ -6,6 +6,16 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.1.0
+
+变更范围：[v0.0.3...v0.1.0](https://github.com/Aiden-FE/ai-devflow/compare/v0.0.3...v0.1.0)
+
+### 新功能
+- v0.1.0 — 测试中泳道与自动审查、依赖 DAG、配置继承、多平台发版等 12 项改造 (#2)（a3886c7）
+
+### 问题修复
+- **desktop**：createAtPath 初始提交在无全局 git 身份的环境（如 CI）确保仓库级回退身份 (#3)（0d542e1）
+
 ## v0.0.3
 
 变更范围：[v0.0.2...v0.0.3](https://github.com/Aiden-FE/ai-devflow/compare/v0.0.2...v0.0.3)
