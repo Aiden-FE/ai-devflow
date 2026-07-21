@@ -206,10 +206,13 @@ jobs:
         run: |
           cd apps/desktop/release
           shopt -s nullglob
+          # 注意：模式必须加引号存入数组，否则 nullglob 会在数组构造时把「无匹配」的模式直接展开为空、
+          # 从数组中消失，导致漏检（误判通过）。引号内保存字面量，循环内再展开glob逐个校验。
+          # Linux x64 的 AppImage 由 electron-builder 命名为 x86_64。
           case "${{ matrix.platform }}" in
-            mac)   need=( *-mac-x64.dmg *-mac-arm64.dmg *-mac-x64.zip *-mac-arm64.zip latest-mac.yml *.blockmap ) ;;
-            win)   need=( *-win-x64.exe latest.yml *.blockmap ) ;;
-            linux) need=( *-linux-x64.AppImage latest-linux.yml ) ;;
+            mac)   need=( '*-mac-x64.dmg' '*-mac-arm64.dmg' '*-mac-x64.zip' '*-mac-arm64.zip' 'latest-mac.yml' '*.blockmap' ) ;;
+            win)   need=( '*-win-x64.exe' 'latest.yml' '*.blockmap' ) ;;
+            linux) need=( '*-linux-x86_64.AppImage' 'latest-linux.yml' ) ;;
           esac
           missing=0
           for pat in "${need[@]}"; do
@@ -255,11 +258,12 @@ jobs:
         run: |
           cd artifacts
           shopt -s nullglob
+          # 模式加引号存入数组（避免 nullglob 在数组构造时把无匹配的模式展开为空而漏检）；循环内再展开校验。
           need=(
-            *-mac-x64.dmg *-mac-arm64.dmg *-mac-x64.zip *-mac-arm64.zip latest-mac.yml
-            *-win-x64.exe latest.yml
-            *-linux-x64.AppImage latest-linux.yml
-            RELEASE_NOTES.md
+            '*-mac-x64.dmg' '*-mac-arm64.dmg' '*-mac-x64.zip' '*-mac-arm64.zip' 'latest-mac.yml'
+            '*-win-x64.exe' 'latest.yml'
+            '*-linux-x86_64.AppImage' 'latest-linux.yml'
+            'RELEASE_NOTES.md'
           )
           missing=0
           for pat in "${need[@]}"; do
