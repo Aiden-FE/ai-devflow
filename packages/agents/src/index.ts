@@ -11,3 +11,11 @@ export {
   type TestEventSpec,
 } from './adapters/test.js';
 export { spawnAgentProcess, type RawLine, type SpawnedProcess } from './process-runner.js';
+export {
+  ProviderRouter,
+  ProviderExecutionError,
+  classifyProviderFailure,
+  type ProviderRoute,
+  type ProviderHealthStore,
+  type ModelChoice,
+} from './provider-router.js';
