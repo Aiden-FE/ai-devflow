@@ -53,3 +53,17 @@ export {
   type AttemptJournalFileChange,
   type ExecutionAttemptStore,
 } from './attempt-journal.js';
+export {
+  PiProcessSupervisor,
+  type SpawnedPi,
+  type SpawnFn,
+  type RawLine as SupervisorRawLine,
+  type ProcessSupervisorOptions,
+} from './process-supervisor.js';
+export {
+  PiRunner,
+  type PiRunnerDeps,
+  type RuntimeLocator,
+  type ProfileMaterializerLike,
+} from './pi-runner.js';
+export { type AgentRunner, type AgentRun, type AgentRunRequest as RunnerAgentRunRequest } from './runner-types.js';

@@ -31,6 +31,10 @@ export interface PiEventTranslator {
   finish(): void;
   hasStructuredResult(): boolean;
   structuredResult(): StructuredResult | undefined;
+  /** Pi 报告的最后一次提供商侧错误（用于故障分类与降级）；无则 undefined。 */
+  lastProviderError(): { status: number; message: string } | undefined;
+  /** 本次尝试是否触发了 ai_devflow_interaction（澄清/确认）——应暂停而非降级。 */
+  hadInteraction(): boolean;
 }
 
 const FILE_TOOLS = new Set(['write', 'edit']);
@@ -85,6 +89,8 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
   const pendingArgs = new Map<string, Record<string, unknown>>();
   let agentEnded = false;
   let result: StructuredResult | undefined;
+  let providerError: { status: number; message: string } | undefined;
+  let interactionOccurred = false;
 
   const t = () => now();
 
@@ -133,6 +139,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
             }
           } else if (name === INTERACTION_TOOL) {
             const input = (args as { kind?: string; title?: string; detail?: string }) ?? {};
+            interactionOccurred = true;
             events.push({ type: 'ask_user', question: redact(input.title ?? '需要确认'), context: redact(input.detail ?? ''), t: t() });
           } else if (FILE_TOOLS.has(name)) {
             const path = typeof args.path === 'string' ? args.path : undefined;
@@ -149,6 +156,13 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
         case 'agent_end':
           agentEnded = true;
           break;
+        case 'error':
+        case 'provider_error': {
+          const status = typeof ev.status === 'number' ? ev.status : 0;
+          const message = typeof ev.message === 'string' ? ev.message : '';
+          providerError = { status, message: redact(message) };
+          break;
+        }
         default:
           // auto_retry_* 或未知事件：诊断，向前兼容，不崩溃。
           break;
@@ -171,6 +185,12 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     },
     structuredResult(): StructuredResult | undefined {
       return result;
+    },
+    lastProviderError(): { status: number; message: string } | undefined {
+      return providerError;
+    },
+    hadInteraction(): boolean {
+      return interactionOccurred;
     },
   };
 }

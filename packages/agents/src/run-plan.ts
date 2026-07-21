@@ -40,6 +40,10 @@ export interface PiRunPlanInput {
   route: ProviderRoute;
   /** 角色工具执行所需的受控 PATH（不参与 Pi 入口解析）。 */
   projectToolPath: string;
+  /** 任务 worktree（execution-policy 据此限定写入范围）。 */
+  worktree?: string;
+  /** 恢复上下文 JSON 路径（checkpoint-context 据此注入；须在 attempt session 内）。 */
+  checkpointPath?: string;
 }
 
 export interface PiRunPlan {
@@ -59,7 +63,8 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
   const profile = ROLE_PROFILES[input.role];
   const name = `${input.executionId}-${input.attemptId}`;
 
-  const args: string[] = ['--mode', 'json', '--no-extensions'];
+  // §6.3：command=process.execPath，args=[absolutePiEntry, ...piArgs]。
+  const args: string[] = [input.runtimeEntry, '--mode', 'json', '--no-extensions'];
   for (const ext of BUILTIN_EXTENSIONS) {
     args.push('--extension', `${input.profileDir}/extensions/${ext}.ts`);
   }
@@ -106,6 +111,8 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
     AI_DEVFLOW_EXECUTION_ID: input.executionId,
     AI_DEVFLOW_ATTEMPT_ID: input.attemptId,
   };
+  if (input.worktree) env.AI_DEVFLOW_WORKTREE = input.worktree;
+  if (input.checkpointPath) env.AI_DEVFLOW_CHECKPOINT_PATH = input.checkpointPath;
   for (const key of [...LOCALE_PASSTHROUGH, ...WINDOWS_PASSTHROUGH]) {
     const value = process.env[key];
     if (value) env[key] = value;
