@@ -1,0 +1,11 @@
+{
+  "defaultProjectTrust": "never",
+  "enableInstallTelemetry": false,
+  "retry": { "enabled": false, "maxRetries": 0, "provider": { "maxRetries": 0 } },
+  "enableSkillCommands": false,
+  "packages": [],
+  "extensions": [],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}

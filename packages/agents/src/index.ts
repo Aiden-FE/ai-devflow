@@ -26,3 +26,18 @@ export {
   type BundledPiLocatorOptions,
   type ExecLike,
 } from './runtime-locator.js';
+export {
+  ROLE_PROFILES,
+  INTERNAL_TOOLS,
+  BUILTIN_EXTENSIONS,
+  ACTIVE_API_KEY_ENV,
+  COMPATIBLE_API,
+  roleToolsArg,
+  isCompatibleKind,
+  buildCompatibleModelsJson,
+  ProfileMaterializer,
+  type RoleProfile,
+  type MaterializeInput,
+} from './profiles.js';
+export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
+export { ProjectInstructionLoader, type LoadedInstructions } from './project-instructions.js';
