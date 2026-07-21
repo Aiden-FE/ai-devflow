@@ -33,8 +33,13 @@ function devKind(): ProviderKind {
   return raw;
 }
 
-function devRoute(routeId: string, providerName: string): ProviderRoute {
-  const kind = devKind();
+function devRoute(routeId: string): ProviderRoute {
+  let kind = devKind();
+  const baseURL = process.env.DEV_API_URL;
+  // 标准协议 + 自定义 Base URL（如 OpenAI/Anthropic 兼容网关）→ 走兼容路径以使用 Base URL 与 models.json。
+  if (baseURL && kind === 'openai') kind = 'openai_compatible';
+  else if (baseURL && kind === 'anthropic') kind = 'anthropic_compatible';
+  const providerName = isCompatibleKind(kind) ? 'ai-devflow-devtest0001' : kind;
   return {
     providerId: 'dev',
     providerKind: kind,
@@ -42,7 +47,7 @@ function devRoute(routeId: string, providerName: string): ProviderRoute {
     routeId,
     model: process.env.DEV_API_DEFAULT_MODEL!,
     thinking: 'medium',
-    baseURL: process.env.DEV_API_URL,
+    baseURL,
     secret: process.env.DEV_API_KEY!,
   };
 }
@@ -50,9 +55,19 @@ function devRoute(routeId: string, providerName: string): ProviderRoute {
 interface RunResult {
   ok: boolean;
   events: AgentEvent[];
+  stderr: string[];
   journal: ReturnType<ReturnType<typeof createPiEventTranslator>['journal']>;
   exitCode: number | null;
   sessionDir: string;
+}
+
+function diagnose(label: string, res: RunResult): void {
+  if (res.ok) return;
+  // 输出已在 runner 层脱敏；此处仅用于定位失败原因。
+  console.error(`[real-pi][${label}] exit=${res.exitCode} events=${res.events.length} stderr=${res.stderr.length}`);
+  for (const ev of res.events.slice(0, 12)) console.error(`  event: ${JSON.stringify(ev).slice(0, 400)}`);
+  for (const line of res.stderr.slice(0, 20)) console.error(`  stderr: ${line.slice(0, 400)}`);
+  console.error(`  journal.toolCalls=${JSON.stringify(res.journal.toolCalls).slice(0, 400)}`);
 }
 
 let locator: BundledPiLocator;
@@ -98,9 +113,13 @@ async function runRealAttempt(opts: {
   const spawned = supervisor.spawn(plan, { cwd: opts.cwd, timeoutMs: ROLE_PROFILES[opts.role].timeoutMs, secrets: [opts.route.secret] });
   const translator = createPiEventTranslator({ executionId: opts.executionId, attemptId: opts.attemptId, routeId: opts.route.routeId, secrets: [opts.route.secret] });
   const events: AgentEvent[] = [];
+  const stderr: string[] = [];
   for await (const line of spawned.lines) {
-    if (line.stream !== 'stdout') continue;
-    for (const ev of translator.push(line.text)) events.push(ev);
+    if (line.stream === 'stdout') {
+      for (const ev of translator.push(line.text)) events.push(ev);
+    } else {
+      stderr.push(line.text);
+    }
   }
   const exit = await spawned.done();
   let ok = false;
@@ -110,7 +129,7 @@ async function runRealAttempt(opts: {
   } catch {
     ok = false;
   }
-  return { ok, events, journal: translator.journal(), exitCode: exit.exitCode, sessionDir };
+  return { ok, events, stderr, journal: translator.journal(), exitCode: exit.exitCode, sessionDir };
 }
 
 function makeGitFixture(): string {
@@ -149,7 +168,7 @@ describe.skipIf(!HAVE_KEY)('real bundled pi provider e2e', () => {
 
   it('runs a minimal coder task through the bundled pi and parses the structured result', async () => {
     const cwd = makeGitFixture();
-    const route = devRoute('dev:coder:primary', isCompatibleKind(devKind()) ? 'ai-devflow-devtest0001' : devKind());
+    const route = devRoute('dev:coder:primary');
     const res = await runRealAttempt({
       role: 'coder',
       prompt: '在 src/app.ts 中新增并导出一个常量 answer = 42，不要改动其它内容。完成后调用 ai_devflow_report_result 上报。',
@@ -158,6 +177,7 @@ describe.skipIf(!HAVE_KEY)('real bundled pi provider e2e', () => {
       executionId: 'exec-coder',
       attemptId: 'attempt-01',
     });
+    diagnose('coder', res);
     expect(res.ok, `coder 任务应成功（exit=${res.exitCode}）`).toBe(true);
     expect(res.events.some((e) => e.type === 'done')).toBe(true);
   }, 300_000);
@@ -172,15 +192,23 @@ describe.skipIf(!HAVE_KEY)('real bundled pi provider e2e', () => {
     };
     const bad = await runRealAttempt({ role: 'coder', prompt: 'noop', cwd, route: badRoute, executionId: 'exec-fo', attemptId: 'attempt-01' });
     expect(bad.ok).toBe(false); // 确定失败
-    // 真实候选成功（降级后到达）
-    const goodRoute = devRoute('dev:coder:primary', isCompatibleKind(devKind()) ? 'ai-devflow-devtest0001' : devKind());
-    const good = await runRealAttempt({ role: 'coder', prompt: '调用 ai_devflow_report_result 上报 summary="ok"。', cwd, route: goodRoute, executionId: 'exec-fo', attemptId: 'attempt-02' });
+    // 真实候选（降级后到达）：给一个可验证的真实任务，agent 实际改动并上报结构化结果。
+    const goodRoute = devRoute('dev:coder:primary');
+    const good = await runRealAttempt({
+      role: 'coder',
+      prompt: '在 src/app.ts 末尾新增并导出一个常量 answer = 42（不改动其它内容）。用 git diff 确认改动后，调用 ai_devflow_report_result 上报（changedFiles 填 src/app.ts）。',
+      cwd,
+      route: goodRoute,
+      executionId: 'exec-fo',
+      attemptId: 'attempt-02',
+    });
+    diagnose('failover-good', good);
     expect(good.ok, '降级到真实供应商后应成功').toBe(true);
   }, 300_000);
 
   it('runs the same role concurrently with isolated config/session dirs', async () => {
     const cwd = makeGitFixture();
-    const route = devRoute('dev:tester:primary', isCompatibleKind(devKind()) ? 'ai-devflow-devtest0001' : devKind());
+    const route = devRoute('dev:tester:primary');
     const [a, b] = await Promise.all([
       runRealAttempt({ role: 'tester', prompt: '调用 ai_devflow_report_result 上报 summary="A"。', cwd, route, executionId: 'exec-conc', attemptId: 'attempt-A' }),
       runRealAttempt({ role: 'tester', prompt: '调用 ai_devflow_report_result 上报 summary="B"。', cwd, route, executionId: 'exec-conc', attemptId: 'attempt-B' }),

@@ -64,7 +64,8 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
   const name = `${input.executionId}-${input.attemptId}`;
 
   // §6.3：command=process.execPath，args=[absolutePiEntry, ...piArgs]。
-  const args: string[] = [input.runtimeEntry, '--mode', 'json', '--no-extensions'];
+  // --print：非交互一次性执行（处理 prompt 后退出），避免 supervised 子进程进入 TUI。
+  const args: string[] = [input.runtimeEntry, '--print', '--mode', 'json', '--no-extensions'];
   for (const ext of BUILTIN_EXTENSIONS) {
     args.push('--extension', `${input.profileDir}/extensions/${ext}.ts`);
   }
@@ -100,7 +101,8 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
     PI_TELEMETRY: '0',
     PI_CODING_AGENT_DIR: input.profileDir,
     PI_CODING_AGENT_SESSION_DIR: input.sessionDir,
-    PI_PACKAGE_DIR: dirname(input.runtimeEntry),
+    // Pi 以 PI_PACKAGE_DIR 为包根再拼接 dist/…；入口为 <pkg>/dist/cli.js，故包根为 dirname(dirname(entry))。
+    PI_PACKAGE_DIR: dirname(dirname(input.runtimeEntry)),
     PATH: input.projectToolPath,
     HOME: input.isolatedHome,
     USERPROFILE: input.isolatedHome,
