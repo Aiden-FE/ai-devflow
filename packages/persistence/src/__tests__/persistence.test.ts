@@ -388,3 +388,43 @@ describe('task messages & pending interactions', () => {
     expect(list.map((x) => x.id)).toEqual(['a', 'b']);
   });
 });
+
+describe('tasks.insertMany (transactional batch) & migration v8', () => {
+  beforeEach(() => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
+  });
+
+  it('schema migrates to v8 (requirement index)', () => {
+    expect(getCurrentVersion(db)).toBeGreaterThanOrEqual(8);
+  });
+
+  it('insertMany persists all tasks with their dependencies', () => {
+    const a = makeTask('a', 'r', 'i', 'p');
+    const b = { ...makeTask('b', 'r', 'i', 'p'), dependsOn: ['a'] };
+    repos.tasks.insertMany([a, b]);
+    expect(repos.tasks.listByRequirement('r').length).toBe(2);
+    expect(repos.tasks.get('b')!.dependsOn).toEqual(['a']);
+  });
+
+  it('insertMany rolls back atomically on failure (no partial DAG)', () => {
+    const a = makeTask('a', 'r', 'i', 'p');
+    repos.tasks.insertMany([a]);
+    // 第二个批次含重复主键 -> 整批回滚，不影响已有数据
+    const dup = makeTask('a', 'r', 'i', 'p'); // 重复 id 'a'
+    const c = makeTask('c', 'r', 'i', 'p');
+    expect(() => repos.tasks.insertMany([c, dup])).toThrow();
+    // 'c' 不应被落库（回滚）
+    expect(repos.tasks.get('c')).toBeUndefined();
+    expect(repos.tasks.listByRequirement('r').length).toBe(1);
+  });
+
+  it('supports the testing status value (backward compatible TEXT column)', () => {
+    const t = { ...makeTask('t', 'r', 'i', 'p'), status: 'testing' as const };
+    repos.tasks.insert(t);
+    expect(repos.tasks.get('t')!.status).toBe('testing');
+    // testing 属于可恢复运行态
+    expect(repos.tasks.listRecoverable().some((x) => x.id === 't')).toBe(true);
+  });
+});

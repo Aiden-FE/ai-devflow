@@ -3,15 +3,29 @@ name: release
 # 手动触发发版：只允许基于 main 发布，输入 semver 版本号。
 # 触发方式：GitHub → Actions → release → Run workflow → 填写 version（如 0.1.0）。
 #
+# 流水线分三段，依赖关系明确，避免多个矩阵任务并发创建同一 GitHub Release：
+#   1. prepare：校验 semver、拒绝重复 tag/release、质量门禁（typecheck+lint+test）、
+#      生成 CHANGELOG/Release Notes、版本号 bump、打 tag 并推送。唯一写 git 的阶段。
+#   2. build（matrix: macOS / Windows / Linux）：checkout 刚推送的 tag，构建应用与安装包，
+#      electron-builder --publish never（不创建 Release），校验本平台预期构件齐全后上传 artifact。
+#      任一预期构件缺失即失败（if-no-files-found: error + 显式校验），不以 ignore 掩盖。
+#   3. publish：汇总三平台 artifact，再次校验完整构件集，最后用 gh release create
+#      统一创建 Release（正文 = 生成的 Release Notes，与仓库 CHANGELOG 对应小节一致）并附全部构件。
+#
 # 必需 Secrets（仓库 Settings → Secrets → Actions）：
-#   - RELEASE_TOKEN: 具备 contents:write 的 fine-grained / PAT，用于 electron-builder 创建 Release 与上传构件。
+#   - RELEASE_TOKEN: 具备 contents:write 的 fine-grained / PAT，用于推送 tag 与创建 Release、上传构件。
 # 可选 Secrets（签名/公证，仅 macOS 正式分发需要；缺失则产出未签名安装包，更新链路仍可用）：
 #   - MAC_CERTS: base64 编码的 .p12 证书（CSC_LINK 内容）
 #   - MAC_CERTS_PASSWORD: .p12 密码
 #   - APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID: 公证凭据
 #
+# 三平台预期构件（publish 会逐一校验）：
+#   - macOS:  ai-devflow-<v>-mac-x64.dmg / -mac-arm64.dmg / -mac-x64.zip / -mac-arm64.zip / latest-mac.yml / *.blockmap
+#   - Windows: ai-devflow-<v>-win-x64.exe（NSIS）/ latest.yml / *.blockmap
+#   - Linux:  ai-devflow-<v>-linux-x64.AppImage / latest-linux.yml
+#
 # 验证流程：
-#   1. 触发后在本仓库 Releases 看到 vX.Y.Z 与 latest-mac.yml / dmg / zip / blockmap。
+#   1. 触发后在本仓库 Releases 看到 vX.Y.Z 与三平台安装包及 latest*.yml / blockmap。
 #   2. 本地安装旧版（package.json version 低于 X.Y.Z），启动后 electron-updater 检查到更新并下载，
 #      点击“立即升级”完成升级（见 docs/architecture.md §11）。
 
@@ -27,10 +41,15 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    # 只允许基于 main 发布
+  # ---------------------------------------------------------------------------
+  # 1. 准备：校验 + 质量门禁 + CHANGELOG + 版本号 bump + 打 tag 推送（唯一写 git 的阶段）
+  # ---------------------------------------------------------------------------
+  prepare:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    outputs:
+      tag: v${{ inputs.version }}
+      version: ${{ inputs.version }}
     steps:
       - name: Validate semver
         run: |
@@ -43,7 +62,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
+          fetch-depth: 0 # 需要完整历史与全部 tag 以生成「上一版本 -> 当前版本」的变更
 
       - name: Reject duplicate tag/release
         env:
@@ -77,31 +96,81 @@ jobs:
           pnpm lint
           pnpm test
 
+      - name: Generate CHANGELOG + Release Notes (prev tag -> current)
+        run: |
+          node scripts/gen-changelog.mjs "${{ inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --out RELEASE_NOTES.md \
+            --update-changelog CHANGELOG.md
+
       - name: Bump version to ${{ inputs.version }}
         run: |
           npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
           npm --prefix apps/desktop version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
 
-      - name: Build desktop (renderer + electron)
-        run: pnpm --filter @ai-devflow/desktop build
-
-      - name: Commit version bump
+      - name: Commit version bump + CHANGELOG
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json apps/desktop/package.json
+          git add package.json apps/desktop/package.json CHANGELOG.md
           git diff --cached --quiet || git commit -m "chore(release): v${{ inputs.version }}"
 
       - name: Tag v${{ inputs.version }}
-        run: |
-          git tag "v${{ inputs.version }}"
+        run: git tag "v${{ inputs.version }}"
 
       - name: Push commit and tag
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           git push origin main
           git push origin "v${{ inputs.version }}"
 
-      - name: Build installers + publish to GitHub Release (macOS)
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2. 各平台打包（matrix）。--publish never：只产出构件与 updater 元数据，不创建 Release。
+  # ---------------------------------------------------------------------------
+  build:
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout tag v${{ inputs.version }}
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop (renderer + electron)
+        run: pnpm --filter @ai-devflow/desktop build
+
+      - name: Build installers + updater metadata (no publish)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           MAC_CERTS: ${{ secrets.MAC_CERTS }}
@@ -110,30 +179,104 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # 构建正式安装包 + blockmap + updater metadata，并上传到刚创建的 tag 对应 Release。
-          # 仅在提供了签名凭据时导出 CSC_*；空值会让 electron-builder 把空路径当证书文件读取而报
-          # “not a file”。无凭据则关闭签名身份自动发现，产出未签名构件，更新链路仍可用。
-          if [ -n "$MAC_CERTS" ]; then
-            export CSC_LINK="$MAC_CERTS"
-            export CSC_KEY_PASSWORD="$MAC_CERTS_PASSWORD"
-          else
-            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          # 仅 macOS 需要签名凭据：提供了才导出 CSC_*，否则关闭签名身份自动发现，产出未签名构件。
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            if [ -n "$MAC_CERTS" ]; then
+              export CSC_LINK="$MAC_CERTS"
+              export CSC_KEY_PASSWORD="$MAC_CERTS_PASSWORD"
+            else
+              export CSC_IDENTITY_AUTO_DISCOVERY=false
+            fi
+            if [ -n "$APPLE_ID" ]; then
+              export APPLE_ID="$APPLE_ID"
+              export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
+              export APPLE_TEAM_ID="$APPLE_TEAM_ID"
+            fi
           fi
-          if [ -n "$APPLE_ID" ]; then
-            export APPLE_ID="$APPLE_ID"
-            export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
-            export APPLE_TEAM_ID="$APPLE_TEAM_ID"
-          fi
-          pnpm --filter @ai-devflow/desktop release
+          # --publish never：构建安装包 + blockmap + latest*.yml，但不创建/上传 Release（统一由 publish 阶段发布）。
+          pnpm --filter @ai-devflow/desktop dist
 
-      - name: Upload workflow artifacts
-        if: always()
+      - name: Verify platform artifacts exist
+        shell: bash
+        run: |
+          cd apps/desktop/release
+          shopt -s nullglob
+          case "${{ matrix.platform }}" in
+            mac)   need=( *-mac-x64.dmg *-mac-arm64.dmg *-mac-x64.zip *-mac-arm64.zip latest-mac.yml *.blockmap ) ;;
+            win)   need=( *-win-x64.exe latest.yml *.blockmap ) ;;
+            linux) need=( *-linux-x64.AppImage latest-linux.yml ) ;;
+          esac
+          missing=0
+          for pat in "${need[@]}"; do
+            files=( $pat )
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "::error::${{ matrix.platform }} 缺失预期构件: $pat"
+              missing=1
+            else
+              echo "OK (${{ matrix.platform }}): $pat -> ${files[*]}"
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Upload platform artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ inputs.version }}
+          name: dist-${{ matrix.platform }}
           path: |
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
             apps/desktop/release/*.yml
             apps/desktop/release/*.blockmap
-          if-no-files-found: ignore
+          if-no-files-found: error # 任一平台构件缺失即失败，绝不静默放过
+
+  # ---------------------------------------------------------------------------
+  # 3. 统一发布：汇总三平台构件并校验齐全后，创建唯一一个 GitHub Release。
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [prepare, build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Verify full cross-platform artifact set
+        shell: bash
+        run: |
+          cd artifacts
+          shopt -s nullglob
+          need=(
+            *-mac-x64.dmg *-mac-arm64.dmg *-mac-x64.zip *-mac-arm64.zip latest-mac.yml
+            *-win-x64.exe latest.yml
+            *-linux-x64.AppImage latest-linux.yml
+            RELEASE_NOTES.md
+          )
+          missing=0
+          for pat in "${need[@]}"; do
+            files=( $pat )
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "::error::发布前缺失预期构件: $pat"
+              missing=1
+            else
+              echo "OK: $pat -> ${files[*]}"
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - name: Create GitHub Release with changelog + attach artifacts
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          cd artifacts
+          # Release 正文 = 生成的 Release Notes（与仓库 CHANGELOG 对应小节一致），面向用户。
+          gh release create "v${{ inputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "v${{ inputs.version }}" \
+            --verify-tag \
+            -F RELEASE_NOTES.md \
+            *.dmg *.zip *.exe *.AppImage *.yml *.blockmap

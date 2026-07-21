@@ -31,9 +31,17 @@ export function canTransition(
   }
 
   // 源状态特定门禁（例如进入 in_review 需要产物）
-  // 从待沟通恢复到 in_review 时不重复要求产物（任务此前已具备）。
-  if (target === 'in_review' && task.status !== 'awaiting_input' && !ctx.hasArtifacts) {
-    reasons.push('进入待验收前需有执行产物');
+  // 进入待验收：需有执行产物；从 testing 进入还需审查通过（拒绝拖拽 / IPC 绕过）。
+  // 从待沟通恢复到 in_review 时不重复要求（任务此前已具备产物并通过审查）。
+  if (target === 'in_review' && task.status !== 'awaiting_input') {
+    if (!ctx.hasArtifacts) reasons.push('进入待验收前需有执行产物');
+    if (task.status === 'testing' && ctx.reviewPassed !== true) {
+      reasons.push('进入待验收前需审查通过（reviewer Agent）');
+    }
+  }
+  // 进入测试中：开发完成后需有执行产物（开发 Agent 已交付）。
+  if (target === 'testing' && !ctx.hasArtifacts) {
+    reasons.push('进入测试中前需有执行产物');
   }
   if (target === 'archived') {
     // 归档（验收通过并归档）：必须显式人工验收 + 有执行产物。
@@ -85,6 +93,17 @@ export function validateTransition(
 export function canReturnToDev(ctx: GateContext): GateResult {
   if (ctx.testFailedWithEvidence !== true) {
     return { ok: false, reasons: ['验收不通过退回开发需附失败证据'] };
+  }
+  return { ok: true, reasons: [] };
+}
+
+/**
+ * 验收不通过退回（专用 reject 门禁）：必须附非空退回原因。
+ * 退回原因将写入任务消息/审计；禁止用无原因的通用 updateStatus 代替。
+ */
+export function canReject(ctx: GateContext): GateResult {
+  if (!ctx.rejectReason || !ctx.rejectReason.trim()) {
+    return { ok: false, reasons: ['验收不通过退回需填写退回原因'] };
   }
   return { ok: true, reasons: [] };
 }

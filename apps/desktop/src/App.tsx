@@ -3,16 +3,14 @@ import { api } from './lib.js';
 import { ProjectsPage } from './pages/Projects.js';
 import { WorkspacePage } from './pages/Workspace.js';
 import { SettingsPage } from './pages/Settings.js';
-import { useLocale, useT } from './i18n/index.js';
-import { Button } from './components/ui/button.js';
-import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, Globe, CircleDot } from 'lucide-react';
-import type { Project, TaskStatus, Locale } from '@ai-devflow/core';
+import { useT } from './i18n/index.js';
+import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot } from 'lucide-react';
+import type { Project, TaskStatus } from '@ai-devflow/core';
 
 type Route = 'projects' | 'workspace' | 'settings';
 
 export function App(): React.ReactElement {
   const t = useT();
-  const { locale, setLocale } = useLocale();
   const [route, setRoute] = useState<Route>('projects');
   const [project, setProject] = useState<Project | undefined>(undefined);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -22,14 +20,14 @@ export function App(): React.ReactElement {
   }, []);
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
-  // 跨项目状态：统计全部任务的 开发中/待沟通/测试中 数量。
+  // 跨项目状态：统计全部任务的 开发中/测试中/待沟通/待验收 数量。
   const [counts, setCounts] = useState<Record<TaskStatus, number>>({
-    backlog: 0, ready: 0, in_progress: 0, awaiting_input: 0, in_review: 0, archived: 0,
+    backlog: 0, ready: 0, in_progress: 0, testing: 0, awaiting_input: 0, in_review: 0, archived: 0,
   });
   const loadCounts = useCallback(() => {
     api.tasks.listAll().then((tasks) => {
       const c: Record<TaskStatus, number> = {
-        backlog: 0, ready: 0, in_progress: 0, awaiting_input: 0, in_review: 0, archived: 0,
+        backlog: 0, ready: 0, in_progress: 0, testing: 0, awaiting_input: 0, in_review: 0, archived: 0,
       };
       for (const task of tasks) c[task.status] = (c[task.status] ?? 0) + 1;
       setCounts(c);
@@ -75,31 +73,11 @@ export function App(): React.ReactElement {
 
         <div className="flex-1" />
 
-        {/* 语言切换：内联按钮组,避免 Portal 定位在 Electron 下越界 */}
-        <div className="flex items-center gap-1">
-          <Globe className="h-4 w-4 text-muted-foreground" />
-          <Button
-            variant={locale === 'zh' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="px-2 text-xs"
-            onClick={() => setLocale('zh' as Locale)}
-          >
-            {t('settings.locale.zh')}
-          </Button>
-          <Button
-            variant={locale === 'en' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="px-2 text-xs"
-            onClick={() => setLocale('en' as Locale)}
-          >
-            {t('settings.locale.en')}
-          </Button>
-        </div>
-
-        {/* 左下角：跨项目状态汇总（替代原"当前项目"标识） */}
+        {/* 左下角：跨项目状态汇总（替代原"当前项目"标识）。语言切换已移至「设置 - 界面语言」。 */}
         <div className="mt-2 rounded-md border border-border bg-secondary/40 p-2.5">
           <div className="mb-1.5 text-xs font-medium text-muted-foreground">{t('status.cross.title')}</div>
           <CrossStat color="var(--color-lane-in_progress)" label={t('status.cross.in_progress')} n={counts.in_progress} />
+          <CrossStat color="var(--color-lane-testing)" label={t('status.cross.testing')} n={counts.testing} />
           <CrossStat color="var(--color-lane-awaiting)" label={t('status.cross.awaiting')} n={counts.awaiting_input} />
           <CrossStat color="var(--color-lane-in_review)" label={t('status.cross.in_review')} n={counts.in_review} />
         </div>

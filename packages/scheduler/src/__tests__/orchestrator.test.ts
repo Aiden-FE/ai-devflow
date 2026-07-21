@@ -21,6 +21,8 @@ function setup(script: (req: AgentRunRequest) => TestEventSpec[]) {
   worktreeDir = mkdtempSync(join(tmpdir(), 'aidf-orch-'));
   const reg = new AgentRegistry();
   reg.register(new ControllableTestAdapter({ script }));
+  // reviewer 角色对应的审查 Agent：开发完成后进入 testing 时由其审查（默认给出 PASS）。
+  reg.register(new AvailableFakeAdapter('codex'));
   orch = new Orchestrator(repos, reg, { worktreesBaseDir: worktreeDir, maxConcurrent: 2, autoRetry: false });
   events = [];
   orch.on('task-event', (e) => events.push(e));
@@ -267,6 +269,7 @@ describe('orchestrator approval flow + capabilities', () => {
         ];
       },
     }));
+    reg.register(new AvailableFakeAdapter('codex')); // reviewer 桩（审查通过）
     const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
     r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
@@ -305,6 +308,7 @@ describe('orchestrator approval flow + capabilities', () => {
         return [{ type: 'approval_request', toolName: 'Bash', toolUseId: 'tu1', description: 'x', t: 0 }];
       },
     }));
+    reg.register(new AvailableFakeAdapter('codex')); // reviewer 桩
     const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
     r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
@@ -323,9 +327,9 @@ describe('orchestrator approval flow + capabilities', () => {
   });
 });
 
-// 可用适配器桩：detect 恒可用，run 产出 done。
+// 可用适配器桩：detect 恒可用，run 产出 done；可指定审查结论（PASS/FAIL），用作 reviewer 桩。
 class AvailableFakeAdapter implements AgentAdapter {
-  constructor(readonly id: import('@ai-devflow/core').AgentType) {}
+  constructor(readonly id: import('@ai-devflow/core').AgentType, private verdict: 'PASS' | 'FAIL' = 'PASS') {}
   async detect() {
     return { agentType: this.id, available: true, version: 'fake' };
   }
@@ -333,13 +337,14 @@ class AvailableFakeAdapter implements AgentAdapter {
     return { tools: true, plugins: true, skills: 'all-or-none', approval: true };
   }
   async run(_req: AgentRunRequest): Promise<AgentRun> {
+    const verdictLine = this.verdict === 'PASS' ? 'REVIEW_VERDICT: PASS' : 'REVIEW_VERDICT: FAIL: 未覆盖验收标准第 2 条';
     return {
       pid: undefined,
       cancel: async () => {},
       done: async () => ({ exitCode: 0, ok: true }),
       events: (async function* () {
         yield { type: 'log', level: 'info', text: 'fake run', t: 0 } as AgentEvent;
-        yield { type: 'done', summary: 'ok', t: 0 } as AgentEvent;
+        yield { type: 'done', summary: `ok\n${verdictLine}`, t: 0 } as AgentEvent;
       })(),
     };
   }
@@ -429,4 +434,130 @@ describe('orchestrator bounded retry (no infinite loop)', () => {
     const logs = repos.logs.listByTask(t.id).map((l) => l.text);
     expect(logs.some((l) => l.includes('worktree'))).toBe(true);
   }, 8000);
+});
+
+describe('orchestrator review (testing lane)', () => {
+  it('dev task passes through testing to in_review on a passing review, persisting review evidence', async () => {
+    setup(() => [{ type: 'log', level: 'info', text: 'dev done', t: 0 }, { type: 'done', summary: 'dev ok', t: 0 }]);
+    const t = makeTask();
+    repos.tasks.insert(t);
+    await orch.start(t.id);
+    const final = repos.tasks.get(t.id)!;
+    expect(final.status).toBe('in_review');
+    // 审查结论持久化到任务对话
+    const msgs = repos.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('审查结论') && m.includes('通过'))).toBe(true);
+    // 审查执行记录摘要标记 review:pass
+    const execs = repos.executions.listByTask(t.id);
+    expect(execs.some((e) => (e.summary ?? '').includes('review:pass'))).toBe(true);
+  });
+
+  it('review failure returns to in_progress with feedback, bounded by maxReviewRounds (no infinite loop)', async () => {
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-reviewfail-'));
+    const reg = new AgentRegistry();
+    reg.register(new ControllableTestAdapter({ script: () => [{ type: 'done', summary: 'dev ok', t: 0 }] }));
+    reg.register(new AvailableFakeAdapter('codex', 'FAIL')); // 审查恒不通过
+    const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false, maxReviewRounds: 2 });
+    r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    const final = r2.tasks.get(t.id)!;
+    // 审查多轮不通过 -> 停在开发中（绝不进入待验收），且有界（retryCount==maxReviewRounds）
+    expect(final.status).toBe('in_progress');
+    expect(final.retryCount).toBe(2);
+    const msgs = r2.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('审查不通过'))).toBe(true);
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('orchestrator rejectTask (验收不通过退回)', () => {
+  beforeEach(() => setup(() => [{ type: 'done', summary: 'dev ok', t: 0 }]));
+
+  it('requires a non-empty reason', async () => {
+    const t = makeTask({ status: 'in_review' });
+    repos.tasks.insert(t);
+    await expect(orch.rejectTask({ taskId: t.id, reason: '  ', target: 'in_progress' })).rejects.toThrow(/退回原因/);
+  });
+
+  it('only applies to in_review tasks', async () => {
+    const t = makeTask({ status: 'ready' });
+    repos.tasks.insert(t);
+    await expect(orch.rejectTask({ taskId: t.id, reason: 'x', target: 'in_progress' })).rejects.toThrow(/仅待验收/);
+  });
+
+  it('reject to ready only changes status (no execution)', async () => {
+    const t = makeTask({ status: 'in_review' });
+    repos.tasks.insert(t);
+    const execBefore = repos.executions.listByTask(t.id).length;
+    await orch.rejectTask({ taskId: t.id, reason: '未覆盖验收标准', target: 'ready' });
+    expect(repos.tasks.get(t.id)!.status).toBe('ready');
+    expect(repos.executions.listByTask(t.id).length).toBe(execBefore); // 未启动执行
+    const msgs = repos.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('验收不通过') && m.includes('未覆盖验收标准'))).toBe(true);
+  });
+
+  it('reject to in_progress records reason and immediately starts execution', async () => {
+    const t = makeTask({ status: 'in_review' });
+    repos.tasks.insert(t);
+    await orch.rejectTask({ taskId: t.id, reason: '回归缺陷', target: 'in_progress' });
+    // 退回原因写入任务消息
+    const msgs = repos.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('验收不通过') && m.includes('回归缺陷'))).toBe(true);
+    // 立即携原因启动执行（异步）：dev -> testing -> 审查通过 -> 回到待验收
+    for (let i = 0; i < 100; i++) {
+      if (repos.tasks.get(t.id)!.status === 'in_review') break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(repos.tasks.get(t.id)!.status).toBe('in_review');
+    // 执行记录确实增加（说明真正运行了，而非“显示成功但未运行”）
+    expect(repos.executions.listByTask(t.id).length).toBeGreaterThan(0);
+  });
+});
+
+describe('orchestrator global agent config inheritance', () => {
+  function setupWithFakes(settings: import('@ai-devflow/core').ProjectSettings) {
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-inherit-'));
+    const reg = new AgentRegistry();
+    reg.register(new AvailableFakeAdapter('claude_code'));
+    reg.register(new AvailableFakeAdapter('codex'));
+    const orch2 = new Orchestrator(r2, reg, { worktreesBaseDir: dir, maxConcurrent: 2, autoRetry: false });
+    r2.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    return { db2, r2, dir, orch2 };
+  }
+
+  it('uses global role agentType when project does not override', async () => {
+    const { db2, r2, dir, orch2 } = setupWithFakes({});
+    // 全局默认：coder -> codex；项目无 roleConfigs
+    r2.credentials.upsert('global_agent_config', JSON.stringify({ coder: { agentType: 'codex' } }));
+    const t = makeTask();
+    t.agentType = undefined;
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    expect(r2.tasks.get(t.id)!.agentType).toBe('codex'); // 继承全局
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('project explicit agentType overrides global', async () => {
+    const { db2, r2, dir, orch2 } = setupWithFakes({ roleConfigs: { coder: { agentType: 'claude_code' } } });
+    r2.credentials.upsert('global_agent_config', JSON.stringify({ coder: { agentType: 'codex' } }));
+    const t = makeTask();
+    t.agentType = undefined;
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    expect(r2.tasks.get(t.id)!.agentType).toBe('claude_code'); // 项目覆盖全局
+    db2.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

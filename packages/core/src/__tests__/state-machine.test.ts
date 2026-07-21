@@ -8,17 +8,27 @@ import {
 } from '../state-machine.js';
 
 describe('state machine', () => {
-  it('allows the happy path backlog -> ... -> archived', () => {
+  it('allows the happy path backlog -> ... -> archived (via testing)', () => {
     expect(isLegalTransition('backlog', 'ready')).toBe(true);
     expect(isLegalTransition('ready', 'in_progress')).toBe(true);
     expect(isLegalTransition('in_progress', 'awaiting_input')).toBe(true);
     expect(isLegalTransition('awaiting_input', 'in_progress')).toBe(true);
-    expect(isLegalTransition('in_progress', 'in_review')).toBe(true);
+    // 开发完成进入测试中，审查通过再进入待验收
+    expect(isLegalTransition('in_progress', 'testing')).toBe(true);
+    expect(isLegalTransition('testing', 'in_review')).toBe(true);
     expect(isLegalTransition('in_review', 'archived')).toBe(true);
   });
 
-  it('allows test-fail return in_review -> in_progress', () => {
+  it('forbids dev tasks from skipping testing (in_progress -/-> in_review)', () => {
+    // 开发任务禁止直接进入待验收，必须经过 testing
+    expect(isLegalTransition('in_progress', 'in_review')).toBe(false);
+  });
+
+  it('allows review-fail return testing -> in_progress and reject in_review -> ready', () => {
+    expect(isLegalTransition('testing', 'in_progress')).toBe(true);
     expect(isLegalTransition('in_review', 'in_progress')).toBe(true);
+    // 验收不通过退回待开发
+    expect(isLegalTransition('in_review', 'ready')).toBe(true);
   });
 
   it('rejects self transitions', () => {
@@ -29,7 +39,8 @@ describe('state machine', () => {
     expect(isLegalTransition('backlog', 'archived')).toBe(false);
     expect(isLegalTransition('backlog', 'in_progress')).toBe(false);
     expect(isLegalTransition('ready', 'archived')).toBe(false);
-    expect(isLegalTransition('in_review', 'ready')).toBe(false);
+    expect(isLegalTransition('ready', 'testing')).toBe(false);
+    expect(isLegalTransition('testing', 'archived')).toBe(false);
     expect(isLegalTransition('archived', 'in_progress')).toBe(false);
     expect(isLegalTransition('archived', 'backlog')).toBe(false);
   });
@@ -45,7 +56,10 @@ describe('state machine', () => {
     expect(legalTargets('backlog')).toEqual(['ready']);
     expect(legalTargets('archived')).toEqual([]);
     expect(legalTargets('in_progress').sort()).toEqual(
-      ['awaiting_input', 'in_review', 'ready'].sort(),
+      ['awaiting_input', 'testing', 'ready'].sort(),
+    );
+    expect(legalTargets('testing').sort()).toEqual(
+      ['in_review', 'in_progress', 'awaiting_input', 'ready'].sort(),
     );
   });
 

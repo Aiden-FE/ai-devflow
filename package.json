@@ -5,12 +5,13 @@
   "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "pnpm --recursive --if-present run build",
-    "test": "pnpm --recursive --if-present run test",
+    "test": "pnpm --recursive --if-present run test && pnpm test:scripts",
+    "test:scripts": "node --test scripts/gen-changelog.test.mjs",
     "typecheck": "pnpm --recursive --if-present run typecheck",
     "lint": "pnpm --recursive --if-present run lint",
     "dev": "pnpm --filter @ai-devflow/desktop dev",
-    "verify": "pnpm -r typecheck && pnpm -r lint && pnpm -r test",
-    "verify:unit": "pnpm -r --if-present run test"
+    "verify": "pnpm -r typecheck && pnpm -r lint && pnpm -r test && pnpm test:scripts",
+    "verify:unit": "pnpm -r --if-present run test && pnpm test:scripts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -244,4 +244,14 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_pending_interactions_pending ON pending_interactions(task_id, status);
     `,
   },
+  {
+    version: 8,
+    description: 'index tasks by requirement (backs DAG sibling lookups & listByRequirement)',
+    sql: `
+      -- 「测试中」(testing) 为 tasks.status TEXT 列的新取值，向后兼容，无需 DDL；
+      -- 既有数据不受影响（不存在历史 testing 行）。此处补充需求维度索引：
+      -- AI 子任务依赖 DAG 与「按需求列子任务」均频繁按 requirement_id 查询兄弟任务。
+      CREATE INDEX IF NOT EXISTS idx_tasks_requirement ON tasks(requirement_id);
+    `,
+  },
 ];

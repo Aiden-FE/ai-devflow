@@ -358,6 +358,8 @@ function requirementsRepo(db: DatabaseSync): RequirementsRepo {
 
 export interface TasksRepo {
   insert(t: Task): void;
+  /** 事务化批量插入（AI 提议批量创建用）：任一失败整体回滚。 */
+  insertMany(tasks: Task[]): void;
   get(id: string): Task | undefined;
   list(): Task[];
   listByIteration(iterationId: string): Task[];
@@ -386,6 +388,12 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
         JSON.stringify(t.dependsOn ?? []),
       );
     },
+    insertMany(tasks) {
+      // 单事务批量插入：依赖图要么全部落库，要么整体回滚（避免半成品 DAG）。
+      tx(db, () => {
+        for (const t of tasks) this.insert(t);
+      });
+    },
     get(id) {
       const r = db.prepare('SELECT * FROM tasks WHERE id=?').get(id) as Record<string, unknown> | undefined;
       return r ? mapTask(r) : undefined;
@@ -406,7 +414,8 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
       return (db.prepare('SELECT * FROM tasks WHERE status=?').all(status) as Record<string, unknown>[]).map(mapTask);
     },
     listRecoverable() {
-      return (db.prepare("SELECT * FROM tasks WHERE status IN ('in_progress','awaiting_input')").all() as Record<string, unknown>[]).map(mapTask);
+      // in_progress（开发中）、testing（测试中/审查中）、awaiting_input（待沟通）均为可恢复的运行态。
+      return (db.prepare("SELECT * FROM tasks WHERE status IN ('in_progress','testing','awaiting_input')").all() as Record<string, unknown>[]).map(mapTask);
     },
     update(t) {
       db.prepare(

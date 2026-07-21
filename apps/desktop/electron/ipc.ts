@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
-import type { AiChatMessage, Task, TaskStatus, ThemeMode } from '@ai-devflow/core';
+import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput } from '@ai-devflow/core';
 import {
   randomId,
   now,
@@ -14,8 +14,10 @@ import {
   canArchiveRequirement,
   validateProjectName,
   validateLocalPath,
+  validateProposalDag,
+  topoSortProposals,
 } from '@ai-devflow/core';
-import { chatStream, proposeTasks, proposeRequirement } from './ai.js';
+import { chatStream, proposeTasks, proposeRequirement, testConnection } from './ai.js';
 
 const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
 
@@ -212,6 +214,47 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     repos.tasks.insert(t);
     return t;
   });
+  // 批量创建（AI 提议）：把草稿 draftId 依赖映射为真实 taskId，并在一个事务内原子落库。
+  ipcMain.handle(channel('tasks', 'createBatch'), (_e, input: { requirementId: string; proposals: AiTaskProposal[] }) => {
+    const req = repos.requirements.get(input.requirementId);
+    if (!req) throw new Error('需求不存在');
+    const iteration = repos.iterations.get(req.iterationId);
+    if (!iteration) throw new Error('迭代不存在');
+    const proposals = input.proposals ?? [];
+    const validation = validateProposalDag(proposals);
+    if (!validation.ok) throw new Error(`任务依赖不合法：${validation.reasons.join('；')}`);
+    // 依赖在前排序，确保被依赖任务先拿到真实 ID。
+    const ordered = topoSortProposals(proposals);
+    const draftToId = new Map<string, string>();
+    const created: Task[] = [];
+    for (const p of ordered) {
+      const id = randomId();
+      draftToId.set(p.draftId, id);
+      const dependsOn = (p.dependsOn ?? [])
+        .map((d) => draftToId.get(d))
+        .filter((x): x is string => !!x);
+      created.push({
+        id,
+        requirementId: input.requirementId,
+        iterationId: req.iterationId,
+        projectId: iteration.projectId,
+        title: p.title,
+        description: p.description,
+        status: 'ready',
+        role: p.role,
+        stages: [{ id: 'impl', name: '实现', role: p.role }],
+        currentStage: 0,
+        statusChangedAt: now(),
+        createdAt: now(),
+        updatedAt: now(),
+        retryCount: 0,
+        dependsOn,
+      });
+    }
+    // 事务化批量插入：任一失败整体回滚，避免落库半成品依赖图。
+    repos.tasks.insertMany(created);
+    return created;
+  });
   ipcMain.handle(channel('tasks', 'update'), (_e, input: UpdateTaskInput) => {
     const t = repos.tasks.get(input.id);
     if (!t) throw new Error('任务不存在');
@@ -263,16 +306,12 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     // 归档后清理 worktree
     await orchestrator.cleanupWorktree(id).catch(() => {});
   });
-  ipcMain.handle(channel('tasks', 'pause'), (_e, id) => {
-    // 手动标记待沟通（暂停，等待澄清）。仅 in_progress/in_review 可暂停。
-    const t = repos.tasks.get(id);
-    if (!t) throw new Error('任务不存在');
-    if (t.status !== 'in_progress' && t.status !== 'in_review') {
-      throw new Error('仅开发中/待验收任务可标记待沟通');
-    }
-    const gate = canTransition(t, 'awaiting_input', { hasAcceptance: true, hasAgentAssigned: true, hasArtifacts: true });
-    if (!gate.ok) throw new Error(`无法暂停：${gate.reasons.join('; ')}`);
-    repos.tasks.updateStatus(id, 'awaiting_input', now());
+  // 验收不通过退回（专用）：原因必填并写入任务消息/审计；target=ready 仅改状态，
+  // target=in_progress（默认）立即携原因启动修复执行。禁止用无原因的通用 updateStatus 代替。
+  ipcMain.handle(channel('tasks', 'reject'), (_e, input: RejectTaskInput) => orchestrator.rejectTask(input));
+  ipcMain.handle(channel('tasks', 'pause'), (_e, id, note?: string) => {
+    // 手动标记待沟通：转 awaiting_input 并创建澄清交互（供用户补充说明后恢复）。
+    return orchestrator.pause(id, note);
   });
   ipcMain.handle(channel('tasks', 'start'), (_e, id) => orchestrator.start(id));
   ipcMain.handle(channel('tasks', 'resume'), (_e, id, answer) => orchestrator.resume(id, answer));
@@ -377,6 +416,27 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       }
     }
     repos.credentials.upsert('ai_provider', encryptSecret(JSON.stringify({ ...cfg, apiKey })));
+  });
+  // 测试连接：用最小请求探测最终地址，返回 HTTP 状态与脱敏后的服务端摘要（绝不记录 API Key）。
+  ipcMain.handle(channel('settings', 'testAiProvider'), async (_e, cfg) => {
+    // apiKey 为空时沿用已存密钥（与 setAiProvider 一致），便于保存后直接测试。
+    let apiKey = cfg?.apiKey;
+    if (!apiKey) {
+      const raw = repos.credentials.get('ai_provider');
+      if (raw) {
+        try { apiKey = (JSON.parse(decryptSecret(raw)) as { apiKey: string }).apiKey ?? ''; } catch { /* ignore */ }
+      }
+    }
+    return testConnection({ ...(cfg ?? {}), apiKey: apiKey ?? '' });
+  });
+  // 全局 Agent 能力默认配置（明文 JSON，非密钥）：项目可按角色/字段覆盖（item 12）。
+  ipcMain.handle(channel('settings', 'getGlobalAgentConfig'), () => {
+    const raw = repos.credentials.get('global_agent_config');
+    if (!raw) return {};
+    try { return JSON.parse(raw); } catch { return {}; }
+  });
+  ipcMain.handle(channel('settings', 'setGlobalAgentConfig'), (_e, config) => {
+    repos.credentials.upsert('global_agent_config', JSON.stringify(config ?? {}));
   });
   ipcMain.handle(channel('settings', 'getProjectSettings'), (_e, projectId) => repos.projects.get(projectId)?.settings ?? {});
   ipcMain.handle(channel('settings', 'updateProjectSettings'), (_e, projectId, settings) => repos.projects.updateSettings(projectId, settings));

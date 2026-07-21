@@ -39,8 +39,11 @@ const env = {
   ...process.env,
   AI_DEVFLOW_USER_DATA: userData,
   // 让“测试适配器”任务产出 done；恢复时产出 done。
-  AI_DEVFLOW_TEST_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'working', t: 0 }, { type: 'done', summary: 'ok', t: 0 }]),
-  AI_DEVFLOW_TEST_RESUME_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'resumed', t: 0 }, { type: 'done', summary: 'ok', t: 0 }]),
+  // done 摘要携带 REVIEW_VERDICT: PASS，使「测试中」阶段的审查 Agent（同样由测试适配器扮演）审查通过。
+  AI_DEVFLOW_TEST_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'working', t: 0 }, { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }]),
+  AI_DEVFLOW_TEST_RESUME_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'resumed', t: 0 }, { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }]),
+  // 强制审查 Agent 使用测试适配器，避免 E2E 调用真实 claude/codex/pi。
+  AI_DEVFLOW_REVIEW_AGENT: 'test',
 };
 
 let failures = 0;
@@ -117,14 +120,21 @@ try {
   await win.locator('[data-lane="in_review"] [data-task-card], [data-lane="archived"] [data-task-card]').first().waitFor({ timeout: 15000 });
   check('任务执行后推进到待验收/归档', true);
 
-  // 8. 语言切换（默认中文 -> English -> 中文）
+  // 8. 界面语言（设置 -> 界面语言）：中文 -> English -> 中文
   await win.keyboard.press('Escape'); // 关闭任务详情侧滑窗
-  await win.getByRole('button', { name: 'English' }).click();
-  await win.getByText('Projects').first().waitFor({ timeout: 3000 });
-  check('切换到 English', await win.getByText('Projects').first().isVisible());
-  await win.getByRole('button', { name: '中文' }).click();
-  await win.getByText('项目').first().waitFor({ timeout: 3000 });
-  check('切换回中文', true);
+  await win.getByRole('button', { name: '设置' }).click();
+  await win.locator('[data-testid="lang-select"]').waitFor({ timeout: 5000 });
+  check('设置页包含界面语言区块', await win.getByText('界面语言').first().isVisible());
+  // 切换到 English（导航文案随之变为 Settings）
+  await win.locator('[data-testid="lang-select"]').click();
+  await win.getByRole('option', { name: 'English' }).click();
+  await win.getByRole('button', { name: 'Settings' }).first().waitFor({ timeout: 3000 });
+  check('切换到 English', await win.getByRole('button', { name: 'Settings' }).first().isVisible());
+  // 切换回中文（导航文案恢复为「设置」）
+  await win.locator('[data-testid="lang-select"]').click();
+  await win.getByRole('option', { name: '中文' }).click();
+  await win.getByRole('button', { name: '设置' }).first().waitFor({ timeout: 3000 });
+  check('切换回中文', await win.getByRole('button', { name: '设置' }).first().isVisible());
 } catch (err) {
   console.error('[e2e] error:', err.message);
   failures++;

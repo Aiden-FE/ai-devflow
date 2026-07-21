@@ -24,6 +24,10 @@ import type {
   TaskMessage,
   PendingInteraction,
   UpdateStatus,
+  InstallUpdateResult,
+  RejectTaskInput,
+  GlobalAgentConfig,
+  TestConnectionResult,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -64,6 +68,12 @@ export interface UpdateTaskInput {
   role?: TaskRole;
   agentType?: AgentType | null;
   dependsOn?: string[] | null;
+}
+
+/** 批量创建任务（AI 提议）：proposals 携带 draftId 与 dependsOn（草稿引用），主进程映射为真实 taskId 并事务化落库。 */
+export interface CreateBatchInput {
+  requirementId: string;
+  proposals: AiTaskProposal[];
 }
 
 /** AI 流式事件（chat 增量/完成/出错）。 */
@@ -125,6 +135,8 @@ export interface DesktopApi {
     listByRequirement(requirementId: string): Promise<Task[]>;
     get(id: string): Promise<Task | undefined>;
     create(input: CreateTaskInput): Promise<Task>;
+    /** 批量创建（AI 提议）：把 dependsOn 的草稿引用映射为真实 taskId，事务化原子落库。 */
+    createBatch(input: CreateBatchInput): Promise<Task[]>;
     /** 编辑任务（仅 ready）。 */
     update(input: UpdateTaskInput): Promise<Task>;
     updateStatus(id: string, target: TaskStatus): Promise<void>;
@@ -133,8 +145,10 @@ export interface DesktopApi {
      * 仅 in_review 且有执行产物时允许；看板拖拽无法绕过（updateStatus 不接受 archived）。
      */
     accept(id: string): Promise<void>;
-    /** 手动标记待沟通（暂停，等待用户澄清）。 */
-    pause(id: string): Promise<void>;
+    /** 验收不通过退回（专用）：原因必填；target=ready 仅改状态，in_progress 立即携原因执行修复。 */
+    reject(input: RejectTaskInput): Promise<void>;
+    /** 手动标记待沟通（暂停，等待用户澄清）；可附暂停说明。 */
+    pause(id: string, note?: string): Promise<void>;
     start(id: string): Promise<void>;
     /** 回答澄清问题后恢复（兼容旧 ask_user 流程）。 */
     resume(id: string, answer: string): Promise<void>;
@@ -184,6 +198,11 @@ export interface DesktopApi {
     getResolvedThemeSync(): 'light' | 'dark';
     getAiProvider(): Promise<AiProviderConfig | undefined>;
     setAiProvider(cfg: AiProviderConfig | undefined): Promise<void>;
+    /** 测试 AI 服务商连通性：返回脱敏后的最终地址、HTTP 状态与服务端摘要（不含 API Key）。 */
+    testAiProvider(cfg: AiProviderConfig): Promise<TestConnectionResult>;
+    /** 全局 Agent 能力默认配置（项目可按角色/字段覆盖）。 */
+    getGlobalAgentConfig(): Promise<GlobalAgentConfig>;
+    setGlobalAgentConfig(config: GlobalAgentConfig): Promise<void>;
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
   };
@@ -191,8 +210,8 @@ export interface DesktopApi {
   updates: {
     /** 手动检查更新。 */
     check(): Promise<void>;
-    /** 下载完成后退出并安装更新。 */
-    installUpdate(): Promise<void>;
+    /** 下载完成后退出并安装更新。返回结果；不可安装时给出可诊断错误（不静默 no-op）。 */
+    installUpdate(): Promise<InstallUpdateResult>;
     /** 当前更新状态。 */
     status(): Promise<UpdateStatus>;
   };
