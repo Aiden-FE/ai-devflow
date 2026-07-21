@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, AgentBadge, StatusBadge, useStream } from '../lib.js';
+import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, StatusBadge, useStream } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { TaskDetail } from './TaskDetail.js';
 import { Button } from '../components/ui/button.js';
@@ -19,7 +19,7 @@ import {
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
 import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2 } from 'lucide-react';
-import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AgentType, AiTaskProposal } from '@ai-devflow/core';
+import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 
 export function WorkspacePage({ project, projects, onSwitchProject }: {
   project?: Project;
@@ -224,7 +224,6 @@ function TaskCard({ task, selected, onSelect }: { task: Task; selected: boolean;
     >
       <div className="break-words font-medium">{task.title}</div>
       <div className="mt-1 flex items-center gap-1.5">
-        <AgentBadge type={task.agentType} />
         {paused && <Badge variant="secondary" className="text-[var(--color-lane-awaiting)]">{t('task.awaitingBadge')}</Badge>}
         {task.retryCount > 0 && <span className="text-muted-foreground">{t('task.retry', { n: task.retryCount })}</span>}
       </div>
@@ -461,11 +460,10 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [role, setRole] = useState<TaskRole>('coder');
-  const [agentType, setAgentType] = useState<AgentType | ''>('');
   const [dependsOn, setDependsOn] = useState<string[]>([]);
   const toggleDep = (id: string) => setDependsOn((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   const submit = async () => {
-    const task = await api.tasks.create({ requirementId, title, description, role, agentType: agentType || undefined, dependsOn: dependsOn.length ? dependsOn : undefined });
+    const task = await api.tasks.create({ requirementId, title, description, role, dependsOn: dependsOn.length ? dependsOn : undefined });
     onCreated(task.id);
   };
   return (
@@ -481,19 +479,6 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
             <SelectItem value="coder">{t('role.coder')}</SelectItem>
             <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
             <SelectItem value="tester">{t('role.tester')}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <Label>{t('task.agent')}</Label>
-        <Select value={agentType} onValueChange={(v) => setAgentType(v as AgentType | '')}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="">{t('agent.default')}</SelectItem>
-            <SelectItem value="claude_code">{t('agent.claude_code')}</SelectItem>
-            <SelectItem value="codex">{t('agent.codex')}</SelectItem>
-            <SelectItem value="pi">{t('agent.pi')}</SelectItem>
-            <SelectItem value="test">{t('agent.test')}</SelectItem>
           </SelectContent>
         </Select>
       </div>

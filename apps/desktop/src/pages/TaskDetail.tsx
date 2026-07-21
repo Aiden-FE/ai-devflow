@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { api, StatusBadge, AgentBadge, fmtTime, useStream, EmptyState } from '../lib.js';
+import { api, StatusBadge, fmtTime, useStream, EmptyState } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
@@ -14,7 +14,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
 import { Pencil, Pause, Play, ChevronDown, ChevronRight, CheckCircle2, ShieldQuestion, MessageCircleQuestion, AlertTriangle, Send, XCircle } from 'lucide-react';
-import type { Task, LogEntry, ExecutionRecord, PendingQuestion, Requirement, TaskRole, AgentType, TaskMessage, PendingInteraction } from '@ai-devflow/core';
+import type { Task, LogEntry, ExecutionRecord, PendingQuestion, Requirement, TaskRole, TaskMessage, PendingInteraction } from '@ai-devflow/core';
 import { Checkbox } from '../components/ui/checkbox.js';
 
 export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => void }): React.ReactElement {
@@ -105,7 +105,6 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
         <div className="flex min-w-0 items-center gap-2">
           <h3 className="m-0 min-w-0 flex-1 break-words text-base font-semibold">{task.title}</h3>
           <StatusBadge status={task.status} />
-          <AgentBadge type={task.agentType} />
           {editable && <Button size="sm" variant="ghost" onClick={() => setEditing(true)}><Pencil className="h-3.5 w-3.5" /> {t('detail.edit')}</Button>}
         </div>
         <p className="mt-1 break-words text-xs text-muted-foreground">{task.description || `(${t('common.empty')})`}</p>
@@ -209,12 +208,11 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
             {execs.length === 0 ? <EmptyState title={t('detail.history.empty')} /> : (
               <div className="mt-1 overflow-x-auto scrollbar-thin">
                 <table className="w-full min-w-[560px] text-xs">
-                  <thead><tr><th className="text-left text-muted-foreground">{t('detail.col.attempt')}</th><th className="text-left text-muted-foreground">{t('detail.col.agent')}</th><th className="text-left text-muted-foreground">{t('detail.col.status')}</th><th className="text-left text-muted-foreground">{t('detail.col.started')}</th><th className="text-left text-muted-foreground">{t('detail.col.ended')}</th><th className="text-left text-muted-foreground">{t('detail.col.summary')}</th></tr></thead>
+                  <thead><tr><th className="text-left text-muted-foreground">{t('detail.col.attempt')}</th><th className="text-left text-muted-foreground">{t('detail.col.status')}</th><th className="text-left text-muted-foreground">{t('detail.col.started')}</th><th className="text-left text-muted-foreground">{t('detail.col.ended')}</th><th className="text-left text-muted-foreground">{t('detail.col.summary')}</th></tr></thead>
                   <tbody>
                     {execs.map((e) => (
                       <tr key={e.id} className="border-t border-border">
                         <td>{e.attempt}</td>
-                        <td>{t(`agent.${e.agentType}`)}</td>
                         <td><Badge variant={e.status === 'succeeded' ? 'success' : e.status === 'failed' ? 'error' : 'warning'}>{e.status}</Badge></td>
                         <td className="whitespace-nowrap">{fmtTime(e.startedAt)}</td>
                         <td className="whitespace-nowrap">{fmtTime(e.endedAt)}</td>
@@ -424,7 +422,6 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
   const [role, setRole] = useState<TaskRole>(task.role);
-  const [agentType, setAgentType] = useState<AgentType | ''>(task.agentType ?? '');
   const [dependsOn, setDependsOn] = useState<string[]>(task.dependsOn ?? []);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
@@ -432,7 +429,7 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
   const save = async () => {
     setBusy(true); setError(undefined);
     try {
-      await api.tasks.update({ id: task.id, title, description, role, agentType: agentType || null, dependsOn });
+      await api.tasks.update({ id: task.id, title, description, role, dependsOn });
       onSaved();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -453,19 +450,6 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
                 <SelectItem value="coder">{t('role.coder')}</SelectItem>
                 <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
                 <SelectItem value="tester">{t('role.tester')}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>{t('task.agent')}</Label>
-            <Select value={agentType} onValueChange={(v) => setAgentType(v as AgentType | '')}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="">{t('agent.default')}</SelectItem>
-                <SelectItem value="claude_code">{t('agent.claude_code')}</SelectItem>
-                <SelectItem value="codex">{t('agent.codex')}</SelectItem>
-                <SelectItem value="pi">{t('agent.pi')}</SelectItem>
-                <SelectItem value="test">{t('agent.test')}</SelectItem>
               </SelectContent>
             </Select>
           </div>

@@ -1,6 +1,6 @@
 // 渲染器共享：API 访问、数据 hook、看板泳道定义、通用状态组件。
 import React, { useEffect, useState } from 'react';
-import type { TaskStatus, AgentEvent, AgentType, Task } from '@ai-devflow/core';
+import type { TaskStatus, AgentEvent, Task } from '@ai-devflow/core';
 import { Badge } from './components/ui/badge.js';
 import { Button } from './components/ui/button.js';
 import { useT } from './i18n/index.js';
@@ -118,12 +118,6 @@ export function StatusBadge({ status }: { status: TaskStatus }): React.ReactElem
             : status === 'in_review' ? 'default'
               : 'outline';
   return <Badge variant={variant}>{t(`status.${status}`)}</Badge>;
-}
-
-export function AgentBadge({ type }: { type?: AgentType }): React.ReactElement {
-  const t = useT();
-  if (!type) return <span className="text-xs text-muted-foreground">{t('agent.unassigned')}</span>;
-  return <Badge variant="outline">{t(`agent.${type}`)}</Badge>;
 }
 
 // 格式化时间戳
