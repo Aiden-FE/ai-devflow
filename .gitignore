@@ -10,6 +10,9 @@ out/
 coverage/
 .vite/
 
+# electron main/preload 构建产物由 CI/release 的 `pnpm desktop build` 生成，不跟踪
+apps/desktop/dist-electron/
+
 # electron-builder buildResources（应用图标）需入库
 !apps/desktop/build/
 !apps/desktop/build/**

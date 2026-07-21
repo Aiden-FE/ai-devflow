@@ -139,3 +139,15 @@ pnpm --filter @ai-devflow/desktop package # 打包（electron-builder --dir）
 - **Codex 真实任务**：Codex CLI 已安装(0.144.1)并登录(ChatGPT)，但执行时 ChatGPT 后端网络不可达，可验证小任务未能在本机完成；桥接器已正确调用真实 CLI 并产出终止事件，附可重复验收步骤（在可访问 chatgpt.com 后端的环境中于受信任 git 仓库内运行 `codex exec --sandbox read-only "Print exactly AI_DEVFLOW_CODEX_OK"`）。
 - **Pi CLI**：本机未安装 `pi`；桥接器如实报告不可用并附安装/验收步骤。检测已能区分「未找到 CLI」与「CLI 找到但 Node 运行时不兼容（如不支持 `??=`）」，并给出 CLI/Node 路径与版本诊断（含多 Node/PATH/shebang 回归测试）。
 - **打包**：三平台发版流水线（macOS/Windows/Linux）已在 `.github/workflows/release.yml` 落地并经 YAML 校验；本机现场执行的是 `build` 产物与 `dev`/`e2e` 运行，完整签名打包（dmg/nsis/AppImage）由 CI 触发。
+
+## 品牌资产
+
+标识为原创矢量重建：右半圆环代表持续流转，左侧尖角代表代码括号「<」，四节点代表智能节点；\n配色以电光蓝/青色为主，紫罗兰作克制点缀。AI 图仅作母稿，未嵌入 PNG。
+
+- 单一矢量源：`apps/desktop/brand/*.svg`
+  - `icon.svg` 容器版（应用图标主源）
+  - `mark.svg` 独立标识、`mark-mono.svg` 单色版
+  - `light.svg` / `dark.svg` 深浅容器版
+  - `lockup.svg` / `lockup-mono.svg` 横版「图标 + ai-devflow」
+- 栅格产物：`apps/desktop/build/icon.png`、`build/icon.icns`、`build/icon.ico`、`build/icons/**`
+- 可重复生成脚本：`node apps/desktop/scripts/gen-brand-assets.mjs`（优先 @resvg/resvg-js，否则回退 macOS `qlmanage` + `sips` + 纯 Node ICO/ICNS）

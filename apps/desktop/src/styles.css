@@ -132,6 +132,19 @@
   }
 }
 
+/*
+ * 修复 Radix ScrollArea 横向撑破：其 Viewport 内层会注入 `min-width:100%;display:table` 的 div，
+ * display:table 的收缩到内容（shrink-to-fit）会让超长字符串/宽表格把整个视口撑宽，破坏内部
+ * min-w-0 / overflow-x-auto 的局部约束。改为 block + min-width:0，使内容宽度受视口约束，
+ * 宽内容只能由各子容器自身的 overflow 局部处理（详情纵向滚动、宽表格局部横向滚动）。
+ */
+@layer base {
+  [data-slot='scroll-area-viewport'] > div {
+    display: block !important;
+    min-width: 0 !important;
+  }
+}
+
 /* 自定义滚动条 */
 @layer utilities {
   .scrollbar-thin {

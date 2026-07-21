@@ -5,6 +5,7 @@ import { WorkspacePage } from './pages/Workspace.js';
 import { SettingsPage } from './pages/Settings.js';
 import { useT } from './i18n/index.js';
 import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot } from 'lucide-react';
+import { BrandMark } from './components/brand-mark.js';
 import type { Project, TaskStatus } from '@ai-devflow/core';
 
 type Route = 'projects' | 'workspace' | 'settings';
@@ -66,7 +67,10 @@ export function App(): React.ReactElement {
   return (
     <div className="grid h-screen grid-cols-[220px_1fr] bg-background text-foreground">
       <aside className="flex flex-col gap-1 overflow-y-auto border-r border-border bg-card p-3">
-        <h1 className="mb-3 px-2 text-base font-semibold">ai-devflow</h1>
+        <div className="mb-3 flex items-center gap-2 px-2">
+          <BrandMark className="h-6 w-6" />
+          <h1 className="m-0 text-base font-semibold">ai-devflow</h1>
+        </div>
         {navItem('projects', <FolderKanban className="h-4 w-4" />, t('nav.projects'))}
         {navItem('workspace', <LayoutDashboard className="h-4 w-4" />, t('nav.workspace'))}
         {navItem('settings', <SettingsIcon className="h-4 w-4" />, t('nav.settings'))}

@@ -249,7 +249,7 @@ interface AgentRun {
 **electron-builder 配置**（`apps/desktop/package.json` `build`）：
 - `appId=com.ai-devflow.desktop`、`productName=ai-devflow`、`asar=true`、构件命名含版本/平台/架构。
 - `publish` 指向 GitHub（`Aiden-FE/ai-devflow`）；mac 产出 `dmg`+`zip`（x64+arm64，更新链路用 zip），
-  win `nsis`（x64），linux `AppImage`（x64）；图标 `build/icon.png`（electron-builder 自动派生 .icns/.ico）。
+  win `nsis`（x64），linux `AppImage`（x64）；图标 `build/icon.icns`（mac）、`build/icon.ico`（win）、`build/icon.png`（linux，1024px 容器版栅格源）。\n  品牌矢量源与生成脚本位于 `apps/desktop/brand/*.svg` 与 `apps/desktop/scripts/gen-brand-assets.mjs`，可重复产出全尺寸 PNG/ICNS/ICO/Linux 图标集。
 - `directories.output=release`，`files` 打包 `dist/`+`dist-electron/`+`package.json`。
 
 **发版工作流**（`.github/workflows/release.yml`，三段多平台流水线，依赖关系明确，避免并发创建同一 Release）：

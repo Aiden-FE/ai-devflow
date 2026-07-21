@@ -120,6 +120,92 @@ try {
   await win.locator('[data-lane="in_review"] [data-task-card], [data-lane="archived"] [data-task-card]').first().waitFor({ timeout: 15000 });
   check('任务执行后推进到待验收/归档', true);
 
+  // 7. 待沟通/恢复流程：暂停 -> 输入区可达 -> 回复 -> 待验收（lane-aware 恢复，待验收暂停不重跑）
+  await dialog().getByRole('button', { name: '标记待沟通' }).click();
+  await win.getByRole('status').first().waitFor({ timeout: 5000 }).catch(() => {});
+  await win.getByText('待沟通', { exact: true }).first().waitFor({ timeout: 5000 });
+  check('暂停后进入待沟通', true);
+  // 输入区可达：滚动详情到底部后，composer 文本框必须落在视口内（不被裁切）
+  const composer = dialog().getByRole('textbox').last();
+  await composer.waitFor({ timeout: 5000 });
+  await win.evaluate(() => {
+    const vp = document.querySelector('[data-slot="scroll-area-viewport"]');
+    if (vp) vp.scrollTop = vp.scrollHeight;
+  });
+  await win.waitForTimeout(150);
+  const cbox = await composer.boundingBox();
+  check('待沟通输入区始终可访问', !!cbox && cbox.y >= 0 && cbox.y + cbox.height <= 840 + 1);
+  await composer.fill('补充说明 e2e');
+  await dialog().getByRole('button', { name: '发送' }).click();
+  await win.locator('[data-lane="in_review"] [data-task-card]').first().waitFor({ timeout: 10000 });
+  check('待沟通回复后恢复到待验收', true);
+
+  // 7b. 宽表格局部横向滚动且不撑破详情/页面
+  await dialog().evaluate((root) => {
+    const btn = [...root.querySelectorAll('button')].find((b) => /展开执行记录/.test(b.textContent || ''));
+    btn?.click();
+  }).catch(async () => { await dialog().getByRole('button', { name: /执行记录/ }).click(); });
+  const wide = await win.evaluate(() => {
+    const tbl = document.querySelector('table');
+    if (!tbl) return { hasTable: false };
+    tbl.style.minWidth = '2000px'; // 强制宽表格，验证局部滚动而非整体撑破
+    const wrap = tbl.closest('[class*="overflow-x-auto"]') || tbl.parentElement;
+    const vp = document.querySelector('[data-slot="scroll-area-viewport"]');
+    return {
+      hasTable: true,
+      wrapScrollable: (wrap?.scrollWidth ?? 0) > (wrap?.clientWidth ?? 0) + 1,
+      docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      vpOverflow: vp ? vp.scrollWidth - vp.clientWidth : 0,
+    };
+  });
+  check('宽表格局部横向滚动', !!wide.hasTable && !!wide.wrapScrollable);
+  check('宽表格未撑破详情/页面', wide.docOverflow <= 2 && wide.vpOverflow <= 2);
+
+  // 7c. 超长文本无撑破：创建超长标题/描述/连续字符串任务，在默认/最小窗口/放大三种尺寸下校验
+  await win.keyboard.press('Escape');
+  // 确保窗口回到默认尺寸，避免 960x640 下创建弹窗过高导致按钮被挤到视口外
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
+  await win.waitForTimeout(200);
+  const longWord = 'x'.repeat(300);
+  const longUrl = 'https://example.com/' + 'a'.repeat(260);
+  await win.getByRole('button', { name: '创建任务' }).click();
+  await dialog().waitFor();
+  await dialog().locator('input').nth(0).fill('Overflow ' + longWord);
+  await dialog().locator('textarea').nth(0).fill('说明 ' + longUrl + ' 末 ' + longWord);
+  await dialog().getByRole('combobox').nth(1).click();
+  await win.getByRole('option', { name: '测试适配器' }).click();
+  await dialog().getByRole('button', { name: '创建', exact: true }).click();
+  await win.locator('[data-lane="ready"] [data-task-card]').filter({ hasText: 'Overflow' }).first().waitFor();
+  await win.locator('[data-lane="ready"] [data-task-card]').filter({ hasText: 'Overflow' }).first().click();
+  await dialog().waitFor();
+  const noBleed = async () => win.evaluate(() => {
+    const vp = document.querySelector('[data-slot="scroll-area-viewport"]');
+    return {
+      docOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      vpOverflow: vp ? vp.scrollWidth - vp.clientWidth : 0,
+    };
+  });
+  const assertNoBleed = async (label) => {
+    await win.waitForTimeout(150);
+    const r = await noBleed();
+    check(`${label} 无页面级横向溢出`, r.docOverflow <= 2);
+    check(`${label} 详情无横向撑破`, r.vpOverflow <= 2);
+  };
+  await assertNoBleed('默认尺寸(640 详情)');
+  // 最小窗口 960x640
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(960, 640); });
+  await assertNoBleed('最小窗口 960x640');
+  // 放大模式（最小窗口下）
+  await dialog().getByRole('button', { name: '放大' }).click();
+  await assertNoBleed('放大模式 @960x640');
+  await dialog().getByRole('button', { name: '还原' }).click();
+  // 放大模式（默认窗口下）
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
+  await dialog().getByRole('button', { name: '放大' }).click();
+  await assertNoBleed('放大模式 @1280x840');
+  await dialog().getByRole('button', { name: '还原' }).click();
+  await win.keyboard.press('Escape');
+
   // 8. 界面语言（设置 -> 界面语言）：中文 -> English -> 中文
   await win.keyboard.press('Escape'); // 关闭任务详情侧滑窗
   await win.getByRole('button', { name: '设置' }).click();

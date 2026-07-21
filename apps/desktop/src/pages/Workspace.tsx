@@ -161,16 +161,16 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
             ? 'w-[calc(100vw-0px)] sm:w-[calc(100vw-220px)] max-w-none sm:max-w-none'
             : 'w-[640px] max-w-[90vw] sm:max-w-[640px]'}
         >
-          <SheetHeader>
+          <SheetHeader className="shrink-0">
             <div className="flex items-center gap-2 pr-8">
-              <SheetTitle className="flex-1">{t('nav.workspace')}</SheetTitle>
+              <SheetTitle className="min-w-0 flex-1 truncate">{t('nav.workspace')}</SheetTitle>
               <Button size="icon-xs" variant="ghost" onClick={() => setZoomed((z) => !z)} title={zoomed ? t('detail.zoom.restore') : t('detail.zoom.expand')}>
                 {zoomed ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </Button>
             </div>
           </SheetHeader>
           {selectedTask && (
-            <ScrollArea className="h-[calc(100vh-80px)]">
+            <ScrollArea className="min-h-0 min-w-0 flex-1">
               <TaskDetail taskId={selectedTask} onChanged={tasksQ.reload} />
             </ScrollArea>
           )}
@@ -222,7 +222,7 @@ function TaskCard({ task, selected, onSelect }: { task: Task; selected: boolean;
       onClick={() => onSelect(task.id)}
       className={`cursor-grab rounded-md border bg-secondary p-2 text-xs transition-colors hover:border-primary/60 ${selected ? 'border-primary' : 'border-border'} ${paused ? 'ring-1 ring-[var(--color-lane-awaiting)]' : ''}`}
     >
-      <div className="font-medium">{task.title}</div>
+      <div className="break-words font-medium">{task.title}</div>
       <div className="mt-1 flex items-center gap-1.5">
         <AgentBadge type={task.agentType} />
         {paused && <Badge variant="secondary" className="text-[var(--color-lane-awaiting)]">{t('task.awaitingBadge')}</Badge>}

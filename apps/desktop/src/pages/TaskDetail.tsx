@@ -122,7 +122,7 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
           {task.status === 'in_review' && <Button size="sm" disabled={busy} onClick={() => setConfirmAccept(true)}><CheckCircle2 className="h-3.5 w-3.5" /> {t('detail.archive')}</Button>}
           {task.status === 'in_review' && <Button size="sm" variant="outline" className="text-destructive" disabled={busy} onClick={() => setRejectOpen(true)}><XCircle className="h-3.5 w-3.5" /> {t('detail.reject')}</Button>}
         </div>
-        <div className="mt-2 grid grid-cols-[100px_1fr] gap-x-3 gap-y-0.5 text-xs">
+        <div className="mt-2 grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
           <span className="text-muted-foreground">{t('detail.retryCount')}</span><span>{task.retryCount}</span>
           <span className="text-muted-foreground">{t('detail.statusChangedAt')}</span><span>{fmtTime(task.statusChangedAt)}</span>
           <span className="text-muted-foreground">{t('detail.createdAt')}</span><span>{fmtTime(task.createdAt)}</span>
@@ -218,7 +218,7 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
                         <td><Badge variant={e.status === 'succeeded' ? 'success' : e.status === 'failed' ? 'error' : 'warning'}>{e.status}</Badge></td>
                         <td className="whitespace-nowrap">{fmtTime(e.startedAt)}</td>
                         <td className="whitespace-nowrap">{fmtTime(e.endedAt)}</td>
-                        <td className="max-w-[240px] break-words text-muted-foreground">{e.summary ?? ''}</td>
+                        <td className="max-w-[240px] break-all text-muted-foreground">{e.summary ?? ''}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -266,14 +266,14 @@ function MessageBubble({ m }: { m: TaskMessage }): React.ReactElement {
   if (m.kind === 'error') {
     return (
       <div className="my-1.5 flex justify-center">
-        <span className="max-w-[90%] break-words rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-destructive">⚠ {m.text} <span className="opacity-60">{time}</span></span>
+        <span className="max-w-[90%] min-w-0 break-all rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-destructive">⚠ {m.text} <span className="opacity-60">{time}</span></span>
       </div>
     );
   }
   if (m.kind === 'status' || m.role === 'system') {
     return (
       <div className="my-1.5 flex justify-center">
-        <span className="max-w-[90%] break-words rounded-md bg-secondary/60 px-2 py-1 text-muted-foreground">{m.text} <span className="opacity-60">{time}</span></span>
+        <span className="max-w-[90%] min-w-0 break-all rounded-md bg-secondary/60 px-2 py-1 text-muted-foreground">{m.text} <span className="opacity-60">{time}</span></span>
       </div>
     );
   }
@@ -282,7 +282,7 @@ function MessageBubble({ m }: { m: TaskMessage }): React.ReactElement {
     return (
       <div className="my-1 min-w-0">
         <div className="flex items-center gap-1.5 text-muted-foreground"><span className="font-mono text-[10px]">{roleLabel}</span><span className="opacity-60">{time}</span></div>
-        <div className={`mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border px-2 py-1 font-mono ${m.isError ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border bg-secondary/40'}`}>{m.toolResult ?? m.text}</div>
+        <div className={`mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border px-2 py-1 font-mono ${m.isError ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border bg-secondary/40'}`}>{m.toolResult ?? m.text}</div>
       </div>
     );
   }
@@ -318,7 +318,7 @@ function ToolCallBubble({ m, time, roleLabel }: { m: TaskMessage; time: string; 
         <span className="ml-auto opacity-60">{time}</span>
       </button>
       {open && m.toolInput && (
-        <div className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-secondary/40 px-2 py-1 font-mono">{m.toolInput}</div>
+        <div className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-secondary/40 px-2 py-1 font-mono">{m.toolInput}</div>
       )}
     </div>
   );
@@ -340,7 +340,7 @@ function Composer({ interaction, legacyPending, busy, onResolve, onResume }: {
     return (
       <div className="mt-2 rounded-md border border-warn/40 bg-warn/10 p-2">
         <div className="flex items-center gap-1.5 text-xs font-medium text-warn"><ShieldQuestion className="h-3.5 w-3.5" /> {interaction!.title}</div>
-        {interaction!.detail && <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-1.5 font-mono text-[11px]">{interaction!.detail}</div>}
+        {interaction!.detail && <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded bg-background/60 p-1.5 font-mono text-[11px]">{interaction!.detail}</div>}
         <div className="mt-2 flex justify-end gap-2">
           <Button size="sm" variant="outline" className="text-destructive" disabled={busy} onClick={() => onResolve('deny')}>{t('detail.interaction.deny')}</Button>
           <Button size="sm" disabled={busy} onClick={() => onResolve('allow')}>{t('detail.interaction.approve')}</Button>
