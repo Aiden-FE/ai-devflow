@@ -41,3 +41,15 @@ export {
 } from './profiles.js';
 export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
 export { ProjectInstructionLoader, type LoadedInstructions } from './project-instructions.js';
+export {
+  createPiEventTranslator,
+  type PiEventTranslator,
+  type PiEventTranslatorOptions,
+  type StructuredResult,
+} from './json-events.js';
+export {
+  type AttemptJournal,
+  type AttemptJournalToolCall,
+  type AttemptJournalFileChange,
+  type ExecutionAttemptStore,
+} from './attempt-journal.js';

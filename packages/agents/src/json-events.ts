@@ -1,0 +1,183 @@
+// Pi JSONL 事件桥接（设计 §11）与尝试日志（设计 §10）。
+//
+// 解析 Pi `--mode json` 的 JSON Lines 流（非 stdout 正则），映射为 AgentEvent 并维护 AttemptJournal。
+// 未知事件按向前兼容原则记为诊断，不崩溃；缺少必需事件或 schema 非法属 protocol failure。
+// 完成条件：Pi 正常结束（agent_end）∧ 收到合法 ai_devflow_report_result。出口前 redact 活跃路线密钥。
+import type { AgentEvent } from '@ai-devflow/core';
+import { now, redactText } from '@ai-devflow/core';
+import type { AttemptJournal } from './attempt-journal.js';
+
+export interface PiEventTranslatorOptions {
+  executionId: string;
+  attemptId: string;
+  routeId?: string;
+  /** 需在输出/日志/ journal 中脱敏的活跃/备用路线密钥。 */
+  secrets?: string[];
+}
+
+export interface StructuredResult {
+  summary: string;
+  verification: string[];
+  changedFiles: string[];
+  unresolved: string[];
+}
+
+export interface PiEventTranslator {
+  /** 推入一行 JSONL，返回本行映射出的 AgentEvent（可能为空）。 */
+  push(line: string): AgentEvent[];
+  /** 当前尝试日志快照。 */
+  journal(): AttemptJournal;
+  /** 流结束：把未闭合工具标为 uncertain；agent_end 后缺少合法结构化结果则抛错（protocol failure）。 */
+  finish(): void;
+  hasStructuredResult(): boolean;
+  structuredResult(): StructuredResult | undefined;
+}
+
+const FILE_TOOLS = new Set(['write', 'edit']);
+const INTERACTION_TOOL = 'ai_devflow_interaction';
+const REPORT_TOOL = 'ai_devflow_report_result';
+
+function makeRedactor(secrets: string[]): (text: string) => string {
+  return (text: string): string => {
+    let out = text;
+    for (const s of secrets) {
+      if (s) out = out.split(s).join('***');
+    }
+    return redactText(out);
+  };
+}
+
+function extractStructuredResult(result: unknown): StructuredResult | undefined {
+  const r = result as { details?: { aiDevflowResult?: unknown }; content?: Array<{ text?: string }> } | undefined;
+  const candidate = (r?.details?.aiDevflowResult ?? r?.details) as StructuredResult | undefined;
+  if (candidate && typeof candidate.summary === 'string') return normalize(candidate);
+  const text = r?.content?.[0]?.text;
+  if (typeof text === 'string') {
+    try {
+      const parsed = JSON.parse(text) as { aiDevflowResult?: StructuredResult };
+      if (parsed?.aiDevflowResult && typeof parsed.aiDevflowResult.summary === 'string') return normalize(parsed.aiDevflowResult);
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
+function normalize(r: StructuredResult): StructuredResult {
+  return {
+    summary: r.summary,
+    verification: Array.isArray(r.verification) ? r.verification : [],
+    changedFiles: Array.isArray(r.changedFiles) ? r.changedFiles : [],
+    unresolved: Array.isArray(r.unresolved) ? r.unresolved : [],
+  };
+}
+
+export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEventTranslator {
+  const redact = makeRedactor(opts.secrets ?? []);
+  const journal: AttemptJournal = {
+    executionId: opts.executionId,
+    attemptId: opts.attemptId,
+    routeId: opts.routeId ?? '',
+    mutationsObserved: false,
+    toolCalls: [],
+    changedFiles: [],
+  };
+  const pendingArgs = new Map<string, Record<string, unknown>>();
+  let agentEnded = false;
+  let result: StructuredResult | undefined;
+
+  const t = () => now();
+
+  return {
+    push(line: string): AgentEvent[] {
+      const events: AgentEvent[] = [];
+      let ev: Record<string, unknown>;
+      try {
+        ev = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        // 非法行：protocol 诊断，不崩溃。
+        return events;
+      }
+      const type = ev.type as string | undefined;
+      switch (type) {
+        case 'session':
+          // 记录 Pi session 元数据（不暴露内部路径）。
+          break;
+        case 'message_update': {
+          const delta = typeof ev.delta === 'string' ? ev.delta : '';
+          if (delta) events.push({ type: 'log', level: 'info', text: redact(delta), t: t() });
+          break;
+        }
+        case 'tool_execution_start': {
+          const id = String(ev.toolCallId ?? '');
+          const name = String(ev.toolName ?? '');
+          journal.toolCalls.push({ id, name, state: 'started', summary: redact(shortSummary(name, ev.args)) });
+          if (ev.args && typeof ev.args === 'object') pendingArgs.set(id, ev.args as Record<string, unknown>);
+          break;
+        }
+        case 'tool_execution_update':
+          // 仅更新可折叠工具消息，不判定完成。
+          break;
+        case 'tool_execution_end': {
+          const id = String(ev.toolCallId ?? '');
+          const name = String(ev.toolName ?? '');
+          const isError = ev.isError === true;
+          const call = journal.toolCalls.find((c) => c.id === id);
+          if (call) call.state = isError ? 'failed' : 'completed';
+          const args = pendingArgs.get(id) ?? {};
+          if (name === REPORT_TOOL) {
+            const structured = extractStructuredResult(ev.result);
+            if (structured) {
+              result = structured;
+              events.push({ type: 'done', summary: redact(structured.summary), t: t() });
+            }
+          } else if (name === INTERACTION_TOOL) {
+            const input = (args as { kind?: string; title?: string; detail?: string }) ?? {};
+            events.push({ type: 'ask_user', question: redact(input.title ?? '需要确认'), context: redact(input.detail ?? ''), t: t() });
+          } else if (FILE_TOOLS.has(name)) {
+            const path = typeof args.path === 'string' ? args.path : undefined;
+            if (path) {
+              journal.changedFiles.push({ path, action: 'modify' });
+              journal.mutationsObserved = true;
+              events.push({ type: 'file_change', path, action: 'modify', t: t() });
+            }
+          } else if (name === 'bash') {
+            journal.mutationsObserved = true;
+          }
+          break;
+        }
+        case 'agent_end':
+          agentEnded = true;
+          break;
+        default:
+          // auto_retry_* 或未知事件：诊断，向前兼容，不崩溃。
+          break;
+      }
+      return events;
+    },
+    journal(): AttemptJournal {
+      return journal;
+    },
+    finish(): void {
+      for (const call of journal.toolCalls) {
+        if (call.state === 'started') call.state = 'uncertain';
+      }
+      if (agentEnded && !result) {
+        throw new Error('protocol failure：Pi 已结束但缺少有效的结构化结果（ai_devflow_report_result）');
+      }
+    },
+    hasStructuredResult(): boolean {
+      return result !== undefined;
+    },
+    structuredResult(): StructuredResult | undefined {
+      return result;
+    },
+  };
+}
+
+function shortSummary(name: string, args: unknown): string {
+  const a = (args ?? {}) as Record<string, unknown>;
+  if (name === 'bash' && typeof a.command === 'string') return `bash: ${a.command}`;
+  if (typeof a.path === 'string') return `${name}: ${a.path}`;
+  return name;
+}
