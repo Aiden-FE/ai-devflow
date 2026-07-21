@@ -28,6 +28,10 @@ import type {
   RejectTaskInput,
   GlobalAgentConfig,
   TestConnectionResult,
+  ProviderSummary,
+  ProviderInput,
+  ProviderTestResult,
+  ProviderHealthSummary,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -205,6 +209,19 @@ export interface DesktopApi {
     setGlobalAgentConfig(config: GlobalAgentConfig): Promise<void>;
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
+  };
+  // ---- AI 服务商（有序提供商列表，Pi-only） ----
+  providers: {
+    /** 脱敏摘要列表（hasCredential 布尔；不含模型/密钥/credentialRef）。 */
+    list(): Promise<ProviderSummary[]>;
+    /** 保存（新增/更新）。apiKey 仅替换或清除（空=沿用），不回显。 */
+    save(input: ProviderInput): Promise<ProviderSummary>;
+    remove(id: string): Promise<void>;
+    /** 按完整 id 列表重排序。 */
+    reorder(ids: string[]): Promise<void>;
+    /** 测试连接：经 ProviderRouter 解析该提供商可用路线。 */
+    test(id: string): Promise<ProviderTestResult>;
+    health(): Promise<ProviderHealthSummary[]>;
   };
   // ---- 自动更新（Part 6，仅 app.isPackaged 时可用） ----
   updates: {

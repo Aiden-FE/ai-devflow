@@ -459,6 +459,43 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     e.returnValue = resolvedTheme(readThemeMode());
   });
 
+  // ---- AI 服务商（有序提供商列表，Pi-only；脱敏契约，不暴露模型/密钥/credentialRef） ----
+  const providerStore = services.providerStore;
+  const piRouter = services.piRuntime?.router;
+  const healthView = (providerId: string): 'available' | 'untested' | 'cooldown' | 'configuration_error' => {
+    const hs = repos.providerHealth.listByProvider(providerId);
+    if (hs.length === 0) return 'untested';
+    const nowMs = Date.now();
+    if (hs.some((h) => h.state === 'open' && (h.cooldownUntil === undefined || h.cooldownUntil > nowMs))) return 'cooldown';
+    if (hs.some((h) => h.lastFailureKind === 'authentication')) return 'configuration_error';
+    return 'available';
+  };
+  ipcMain.handle(channel('providers', 'list'), () =>
+    (providerStore?.list() ?? []).map((p) => ({ ...p, health: healthView(p.id) })),
+  );
+  ipcMain.handle(channel('providers', 'save'), (_e, input) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    const summary = providerStore.save(input);
+    return { ...summary, health: healthView(summary.id) };
+  });
+  ipcMain.handle(channel('providers', 'remove'), (_e, id: string) => {
+    providerStore?.remove(id);
+  });
+  ipcMain.handle(channel('providers', 'reorder'), (_e, ids: string[]) => {
+    providerStore?.reorder(ids);
+  });
+  ipcMain.handle(channel('providers', 'health'), () =>
+    (providerStore?.listConfigs() ?? []).map((p) => ({ providerId: p.id, status: healthView(p.id) })),
+  );
+  // 测试连接：经 ProviderRouter 解析该提供商的可用路线（校验启用/密钥/熔断状态）。
+  ipcMain.handle(channel('providers', 'test'), (_e, id: string) => {
+    if (!piRouter) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };
+    const routes = piRouter.routesFor('task_chat');
+    return routes.some((r) => r.providerId === id)
+      ? { ok: true, providerId: id, status: 200 }
+      : { ok: false, providerId: id, status: 0, error: '无可用路线（检查启用状态与 API Key）' };
+  });
+
   // ---- 自动更新 ----
   ipcMain.handle(channel('updates', 'check'), () => updater.check());
   ipcMain.handle(channel('updates', 'installUpdate'), () => updater.installUpdate());

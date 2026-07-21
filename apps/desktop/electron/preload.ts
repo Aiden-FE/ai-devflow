@@ -102,6 +102,14 @@ const api: DesktopApi = {
     getProjectSettings: (projectId) => invoke('settings', 'getProjectSettings')(projectId),
     updateProjectSettings: (projectId, settings) => invoke('settings', 'updateProjectSettings')(projectId, settings),
   },
+  providers: {
+    list: () => invoke('providers', 'list')(),
+    save: (input) => invoke('providers', 'save')(input),
+    remove: (id) => invoke('providers', 'remove')(id),
+    reorder: (ids) => invoke('providers', 'reorder')(ids),
+    test: (id) => invoke('providers', 'test')(id),
+    health: () => invoke('providers', 'health')(),
+  },
   updates: {
     check: () => invoke('updates', 'check')(),
     installUpdate: () => invoke('updates', 'installUpdate')(),
