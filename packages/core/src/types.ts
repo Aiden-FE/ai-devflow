@@ -554,9 +554,15 @@ export interface UpdateStatus {
   error?: string;
 }
 
-/** 「立即升级」安装结果：不允许静默 no-op，失败时返回可诊断信息。 */
+/** 「立即升级」安装结果：不允许静默 no-op，失败时返回可诊断信息。
+ * - install-started：已请求原生安装器，应用即将退出并安装（仅自动安装平台）。
+ * - manual-download：当前为未签名 macOS，已打开 GitHub Releases 请用户手动下载安装。
+ */
 export interface InstallUpdateResult {
   ok: boolean;
+  action?: 'install-started' | 'manual-download';
+  /** manual-download 时携带的当前系统架构，用于 UI 提示用户下载对应架构包。 */
+  arch?: 'x64' | 'arm64' | string;
   /** 失败/不可安装时的可诊断信息（含当前状态）。 */
   error?: string;
 }

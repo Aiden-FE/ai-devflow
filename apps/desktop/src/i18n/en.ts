@@ -321,4 +321,5 @@ export const en: Record<string, string> = {
   'update.error': 'Update failed: {msg}',
   'update.idle': 'Click "Check for updates" to see if a new version is available',
   'update.title': 'App update',
+  'update.manualDownload': 'The current macOS app is unsigned and cannot install updates automatically. GitHub Releases has been opened; please download the {arch} build and install it manually.',
 };

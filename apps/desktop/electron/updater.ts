@@ -10,7 +10,15 @@
 //   下载完成后点击「立即升级」会进入 installing 状态并真正调用 quitAndInstall（打包环境退出并安装重启）。
 // - createUpdater 支持注入 autoUpdater 加载器与 quitAndInstall 副作用，便于对状态机与事件做单元测试
 //   （开发环境 no-op 不再作为唯一验收依据）。
-import { app } from 'electron';
+//
+// 关键修复（未签名 macOS 无法自动安装）：
+// - Squirrel.Mac 要求应用已代码签名；未签名应用调用 quitAndInstall 会静默失败或无限等待。
+// - 在 darwin + app.isPackaged 时检测当前 .app bundle 签名；未签名/检测异常时改为打开 GitHub Releases
+//   手动下载，不进入 installing，保持 downloaded 状态允许再次点击。
+// - 安装请求发起后增加可注入超时；异步 error 或超时时从 installing 回到可恢复 error，并清理计时器。
+import { app, shell } from 'electron';
+import { execFile } from 'node:child_process';
+import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import type { UpdateStatus, UpdateState, UpdateProgress, InstallUpdateResult } from '@ai-devflow/core';
 
@@ -19,6 +27,9 @@ import type { UpdateStatus, UpdateState, UpdateProgress, InstallUpdateResult } f
 declare const require: NodeRequire | undefined;
 const _require: NodeRequire =
   typeof require !== 'undefined' ? require : createRequire(import.meta.url);
+
+/** 未签名 macOS 应用的固定手动下载地址（主进程常量，Renderer 无法传入任意 URL）。 */
+export const MANUAL_DOWNLOAD_URL = 'https://github.com/Aiden-FE/ai-devflow/releases/latest';
 
 /** electron-updater autoUpdater 的最小结构（便于注入测试桩）。 */
 export interface AutoUpdaterLike {
@@ -29,7 +40,7 @@ export interface AutoUpdaterLike {
   quitAndInstall(): void;
 }
 
-/** createUpdater 可注入依赖（测试用；生产缺省走 electron / electron-updater）。 */
+/** createUpdater 可注入依赖（测试用；生产缺省走 electron / electron-updater / codesign / shell）。 */
 export interface UpdaterDeps {
   isPackaged?: boolean;
   currentVersion?: string;
@@ -39,6 +50,16 @@ export interface UpdaterDeps {
   quitAndInstall?: (au: AutoUpdaterLike) => void;
   /** 启动后延迟检查更新的毫秒数（测试可调小/调大）。默认 3000。 */
   startDelayMs?: number;
+  /** 当前平台；缺省 process.platform。 */
+  platform?: NodeJS.Platform;
+  /** 当前可执行文件路径；缺省 process.execPath，仅用于 macOS 签名检测推导 .app bundle。 */
+  execPath?: string;
+  /** macOS 代码签名检测器；缺省用 /usr/bin/codesign 检测当前完整 .app bundle。 */
+  checkSignature?: (appPath: string) => Promise<boolean>;
+  /** 手动下载时打开外部浏览器；缺省 shell.openExternal。 */
+  openExternal?: (url: string) => Promise<void>;
+  /** 调用 quitAndInstall 后等待应用退出的超时（毫秒）。默认 60000。 */
+  installTimeoutMs?: number;
 }
 
 export interface Updater {
@@ -46,7 +67,7 @@ export interface Updater {
   start(onStatus: (s: UpdateStatus) => void): void;
   /** 手动检查更新。 */
   check(): Promise<void>;
-  /** 下载完成后退出并安装。返回结果；不可安装时给出可诊断错误（不静默 no-op）。 */
+  /** 下载完成后退出并安装，或未签名 macOS 时打开 GitHub Releases。返回结果；不可安装时给出可诊断错误（不静默 no-op）。 */
   installUpdate(): Promise<InstallUpdateResult>;
   /** 当前更新状态。 */
   status(): UpdateStatus;
@@ -64,6 +85,31 @@ function noopUpdater(currentVersion: string): Updater {
   };
 }
 
+/** 从 process.execPath 安全推导 .app bundle 根路径；找不到时返回 undefined。 */
+function deriveAppBundlePath(execPath: string): string | undefined {
+  let dir = execPath;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    if (dir.endsWith('.app')) return dir;
+    dir = parent;
+  }
+  return undefined;
+}
+
+/** 默认 macOS 签名检测：使用参数数组调用 /usr/bin/codesign，退出码 0 视为已签名。 */
+async function defaultCheckSignature(appPath: string): Promise<boolean> {
+  if (process.platform !== 'darwin' || !appPath) return false;
+  return new Promise((resolve) => {
+    execFile(
+      '/usr/bin/codesign',
+      ['--verify', '--deep', '--strict', '--verbose=2', appPath],
+      (err) => resolve(err === null),
+    );
+  });
+}
+
 /**
  * 创建自动更新器。未打包时返回 no-op（开发/E2E 不受影响）。
  * electron-updater 在打包后才可用（读取 resources/app-update.yml）。
@@ -73,19 +119,35 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
   const isPackaged = deps.isPackaged ?? app.isPackaged;
   if (!isPackaged) return noopUpdater(currentVersion);
 
+  const platform = deps.platform ?? process.platform;
+  const startDelayMs = deps.startDelayMs ?? 3000;
+  const installTimeoutMs = deps.installTimeoutMs ?? 60_000;
+
   let state: UpdateState = 'idle';
   let version: string | undefined;
   let progress: UpdateProgress | undefined;
   let error: string | undefined;
   let onStatusCb: ((s: UpdateStatus) => void) | undefined;
   let autoUpdater: AutoUpdaterLike | undefined;
+  let installTimer: ReturnType<typeof setTimeout> | undefined;
 
   const emit = () => onStatusCb?.({ state, version, currentVersion, progress, error });
+
+  const clearInstallTimer = () => {
+    if (installTimer) {
+      clearTimeout(installTimer);
+      installTimer = undefined;
+    }
+  };
 
   const load = deps.loadAutoUpdater ?? (() => {
     const mod = _require('electron-updater') as { autoUpdater: AutoUpdaterLike };
     return mod.autoUpdater;
   });
+
+  const doQuitInstall = deps.quitAndInstall ?? ((au: AutoUpdaterLike) => au.quitAndInstall());
+  const doOpenExternal = deps.openExternal ?? ((url: string) => shell.openExternal(url));
+  const checkSignature = deps.checkSignature ?? defaultCheckSignature;
 
   try {
     autoUpdater = load();
@@ -106,6 +168,8 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
       state = 'downloaded'; version = (info as { version?: string })?.version ?? version; emit();
     });
     autoUpdater.on('error', (e: unknown) => {
+      // 安装过程中收到异步错误时清理计时器，避免超时覆盖具体错误。
+      clearInstallTimer();
       // 更新失败不得影响应用：仅记录错误状态。
       state = 'error'; error = (e as Error)?.message ?? String(e); emit();
     });
@@ -113,9 +177,6 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
     // electron-updater 不可用 -> 降级为 no-op，应用照常运行。
     return noopUpdater(currentVersion);
   }
-
-  const doQuitInstall = deps.quitAndInstall ?? ((au: AutoUpdaterLike) => au.quitAndInstall());
-  const startDelayMs = deps.startDelayMs ?? 3000;
 
   return {
     start(onStatus) {
@@ -135,6 +196,7 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
       }
     },
     async installUpdate(): Promise<InstallUpdateResult> {
+      clearInstallTimer();
       if (!autoUpdater) {
         state = 'error'; error = '更新模块不可用，无法安装。'; emit();
         return { ok: false, error };
@@ -145,10 +207,38 @@ export function createUpdater(deps: UpdaterDeps = {}): Updater {
         state = 'error'; error = msg; emit();
         return { ok: false, error: msg };
       }
+
+      // macOS 打包环境：未签名应用无法自动安装，引导用户手动下载。
+      if (platform === 'darwin') {
+        const appPath = deriveAppBundlePath(deps.execPath ?? process.execPath);
+        const signed = await checkSignature(appPath ?? '').catch(() => false);
+        if (!signed) {
+          try {
+            await doOpenExternal(MANUAL_DOWNLOAD_URL);
+            // 保持 downloaded 状态，允许用户再次点击。
+            return { ok: true, action: 'manual-download', arch: process.arch };
+          } catch (e) {
+            const msg = `打开 GitHub Releases 失败：${(e as Error)?.message ?? String(e)}`;
+            state = 'error'; error = msg; emit();
+            return { ok: false, error: msg };
+          }
+        }
+      }
+
+      // 自动安装路径（已签名 macOS / Windows / Linux）。
       state = 'installing'; error = undefined; emit();
       try {
-        doQuitInstall(autoUpdater); // 打包环境：退出并安装，随后重启
-        return { ok: true };
+        doQuitInstall(autoUpdater); // 打包环境：请求退出并安装，随后重启
+        installTimer = setTimeout(() => {
+          installTimer = undefined;
+          if (state === 'installing') {
+            state = 'error';
+            error = `安装超时：应用未在 ${installTimeoutMs}ms 内退出，可能安装器未正常运行。请检查更新包或稍后重试。`;
+            emit();
+          }
+        }, installTimeoutMs);
+        installTimer.unref?.();
+        return { ok: true, action: 'install-started' };
       } catch (e) {
         state = 'error'; error = `安装失败：${(e as Error)?.message ?? String(e)}`; emit();
         return { ok: false, error };

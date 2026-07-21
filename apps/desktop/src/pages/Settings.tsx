@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { api, useAsync, LoadingOrError, fmtTime } from '../lib.js';
 import { useT, useLocale } from '../i18n/index.js';
 import { useTheme } from '../theme.js';
@@ -13,7 +13,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { AgentDetection, NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, AiProviderConfig, ThemeMode, TaskRole, AgentType, Project, RoleAgentConfig, ProjectSettings, AgentCapabilitySupport, GlobalAgentConfig, Locale, TestConnectionResult } from '@ai-devflow/core';
+import type { AgentDetection, NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, AiProviderConfig, ThemeMode, TaskRole, AgentType, Project, RoleAgentConfig, ProjectSettings, AgentCapabilitySupport, GlobalAgentConfig, Locale, TestConnectionResult, UpdateStatus } from '@ai-devflow/core';
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
 
@@ -42,68 +42,97 @@ export function SettingsPage(): React.ReactElement {
 // ---- 应用更新（Part 6） ----
 function UpdateSection(): React.ReactElement {
   const t = useT();
-  const { data, error, reload } = useAsync(() => api.updates.status(), []);
+  const [status, setStatus] = useState<UpdateStatus | undefined>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
-  const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | undefined>();
+  const [manualDownload, setManualDownload] = useState<{ arch?: string } | undefined>();
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.updates.status());
+      setError(undefined);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // 直接消费事件流中的 update-status，避免依赖不稳定的 reload 回调导致重订或漏事件。
+  useEffect(() => {
     const unsub = api.events.subscribe((ev) => {
-      if (ev.kind === 'update-status') reload();
+      if (ev.kind === 'update-status') refresh();
     });
     return unsub;
-  }, [reload]);
+  }, [refresh]);
 
   const check = async () => {
-    setBusy(true); setInstallError(undefined);
-    try { await api.updates.check(); await reload(); }
+    setBusy(true); setInstallError(undefined); setManualDownload(undefined);
+    try { await api.updates.check(); await refresh(); }
     finally { setBusy(false); }
   };
 
   // 立即升级：处理中状态可见；失败进入 error 并展示可诊断信息（绝不静默 no-op）。
+  // 未签名 macOS 返回 manual-download，保持 downloaded 状态并提示用户去 GitHub Releases 手动下载。
   const install = async () => {
-    setInstalling(true); setInstallError(undefined);
+    setBusy(true); setInstallError(undefined); setManualDownload(undefined);
     try {
       const r = await api.updates.installUpdate();
-      if (!r.ok) setInstallError(r.error ?? t('update.installFailed'));
-      await reload();
+      if (!r.ok) {
+        setInstallError(r.error ?? t('update.installFailed'));
+      } else if (r.action === 'manual-download') {
+        setManualDownload({ arch: r.arch });
+      }
+      await refresh();
     } catch (e) {
       setInstallError((e as Error).message);
     } finally {
-      setInstalling(false);
+      setBusy(false);
     }
   };
 
-  const status = data ?? { state: 'idle' as const, currentVersion: '' };
-  const state = status.state;
-  const isInstalling = installing || state === 'installing';
+  if (loading) return <div className="rounded-lg border border-border bg-card p-4"><h3 className="m-0 text-sm font-semibold">{t('update.title')}</h3><div className="mt-2 text-xs text-muted-foreground">{t('common.loading')}</div></div>;
+
+  const state = status?.state ?? 'idle';
+  const isInstalling = state === 'installing';
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
       <h3 className="m-0 text-sm font-semibold">{t('update.title')}</h3>
       <div className="mt-2 flex items-center gap-2">
-        <Badge variant="outline">{t('settings.agents.col.version')}: {status.currentVersion || '-'}</Badge>
-        {status.version && <Badge variant="success">→ {status.version}</Badge>}
+        <Badge variant="outline">{t('settings.agents.col.version')}: {status?.currentVersion || '-'}</Badge>
+        {status?.version && <Badge variant="success">→ {status.version}</Badge>}
       </div>
       <div className="mt-2 text-xs text-muted-foreground">
         {state === 'idle' && t('update.idle')}
         {state === 'checking' && t('update.checking')}
-        {state === 'available' && t('update.available', { v: status.version ?? '' })}
-        {state === 'downloading' && t('update.downloading', { p: Math.round(status.progress?.percent ?? 0) })}
-        {state === 'downloaded' && t('update.downloaded', { v: status.version ?? '' })}
+        {state === 'available' && t('update.available', { v: status?.version ?? '' })}
+        {state === 'downloading' && t('update.downloading', { p: Math.round(status?.progress?.percent ?? 0) })}
+        {state === 'downloaded' && t('update.downloaded', { v: status?.version ?? '' })}
         {state === 'installing' && t('update.installing')}
         {state === 'no-update' && t('update.noUpdate')}
-        {state === 'error' && t('update.error', { msg: status.error ?? '' })}
+        {state === 'error' && t('update.error', { msg: status?.error ?? '' })}
       </div>
       {state === 'downloading' && (
         <div className="mt-2 h-1.5 w-full overflow-hidden rounded bg-secondary">
-          <div className="h-full bg-primary transition-all" style={{ width: `${status.progress?.percent ?? 0}%` }} />
+          <div className="h-full bg-primary transition-all" style={{ width: `${status?.progress?.percent ?? 0}%` }} />
         </div>
       )}
       {(installError || error) && <div className="mt-2 break-words rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">{installError ?? error}</div>}
+      {manualDownload && (
+        <div className="mt-2 break-words rounded-md border border-ok/40 bg-ok/10 px-2 py-1.5 text-xs text-ok">
+          {t('update.manualDownload', { arch: manualDownload.arch ?? '' })}
+        </div>
+      )}
       <div className="mt-3 flex gap-2">
         {state === 'downloaded' ? (
-          <Button size="sm" disabled={isInstalling} onClick={install}>
+          <Button size="sm" disabled={busy || isInstalling} onClick={install}>
             {isInstalling ? t('update.installing') : t('update.installNow')}
           </Button>
         ) : (

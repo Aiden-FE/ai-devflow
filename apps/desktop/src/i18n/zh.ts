@@ -321,4 +321,5 @@ export const zh: Record<string, string> = {
   'update.error': '更新失败：{msg}',
   'update.idle': '点击“检查更新”查看是否有新版本',
   'update.title': '应用更新',
+  'update.manualDownload': '当前 macOS 应用未签名，无法自动安装更新。已打开 GitHub Releases，请下载 {arch} 架构的新版并手动安装。',
 };

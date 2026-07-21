@@ -238,10 +238,16 @@ interface AgentRun {
 - 状态经类型化 IPC `updates.status()/check()/installUpdate()` 暴露，并通过 `update-status`
   事件流转发 Renderer：`idle/checking/available/downloading/downloaded/installing/error/no-update`，
   downloading 时附带进度。
-- 下载完成在设置页提示当前/新版本，仅保留「立即升级」（已移除「稍后」）。点击后进入 `installing`
-  状态并真正 `quitAndInstall()`（打包环境退出并安装重启）。
-- `installUpdate()` 返回 `InstallUpdateResult`：不可安装（如未下载完成）时进入可见 `error` 状态并
-  返回可诊断信息，**绝不静默 no-op**（修复 v0.0.2 静默下载 v0.0.3 后点「立即升级」无反应）。
+- 下载完成在设置页提示当前/新版本，仅保留「立即升级」（已移除「稍后」）。
+- `installUpdate()` 返回 `InstallUpdateResult`：
+  - Windows / Linux / 已签名 macOS：调用 `quitAndInstall()`，进入 `installing` 状态，返回
+    `action='install-started'`（仅表示安装请求已发起，不保证成功）。
+  - 未签名 macOS：不调用 `quitAndInstall()`，由主进程打开固定 GitHub Releases URL，返回
+    `action='manual-download'`，保持 `downloaded` 状态允许再次点击。
+  - 不可安装（如未下载完成）或打开浏览器失败时进入可见 `error` 状态并返回可诊断信息，**绝不静默 no-op**。
+- `installing` 语义为“已请求原生安装器，等待应用退出”。调用 `quitAndInstall()` 后启动可注入超时；
+  若应用未退出且未收到错误，超时后回到可恢复的 `error`，避免 UI 永久停留在“正在安装并重启…”。
+  updater 异步 error 也会清理计时器并进入 `error`。
 - `createUpdater(deps)` 支持注入 `loadAutoUpdater`/`quitAndInstall`/`startDelayMs`，便于对状态机与
   事件做单元测试（开发环境 no-op 不再作为唯一验收依据）。
 - 更新失败、无更新、校验失败仅记录错误状态，绝不抛出影响应用。
@@ -273,12 +279,14 @@ interface AgentRun {
 
 **Secrets**（仓库 Settings → Secrets → Actions）：
 - 必需：`RELEASE_TOKEN`（contents:write，供推送 Tag、创建 Release 与上传构件）。
-- 可选（mac 正式签名/公证；缺失则 `CSC_IDENTITY_AUTO_DISCOVERY=false` 产出未签名构件，更新链路仍可用）：
+- 可选（mac 正式签名/公证；缺失则 `CSC_IDENTITY_AUTO_DISCOVERY=false` 产出未签名构件）：
   `MAC_CERTS`（base64 .p12）、`MAC_CERTS_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`。
+  未签名 macOS 只能检测、下载更新，无法自动安装；从该版本升级到首个签名版本需要手动安装。
 
 **验证流程**：触发发版后，Releases 出现 `vX.Y.Z` 与三平台安装包及 `latest-mac.yml`/`latest.yml`/`latest-linux.yml`/blockmap；
-本地安装低于该版本的旧包，启动后 `electron-updater` 检测到更新并下载，点击「立即升级」完成升级。
+本地安装低于该版本的旧包，启动后 `electron-updater` 检测到更新并下载。
+- Windows / Linux / 已签名 macOS：点击「立即升级」后自动退出并安装。
+- 未签名 macOS：点击「立即升级」后主进程打开 GitHub Releases，用户需下载对应架构包并手动安装。
 
 **仍受签名环境限制**：本机/CI 无 Apple 开发者证书时，mac 构件为未签名（首次打开需绕过 Gatekeeper），
-无法做完整公证；更新链路（zip + latest-mac.yml + electron-updater）功能完整。GitHub Release
-的实际创建依赖仓库存在且 `RELEASE_TOKEN` 具备写权限。
+无法做完整公证；未签名 macOS 不能自动安装，需手动下载并替换应用。GitHub Release 的实际创建依赖仓库存在且 `RELEASE_TOKEN` 具备写权限。
