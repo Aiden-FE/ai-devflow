@@ -104,16 +104,25 @@ jobs:
       - name: Build installers + publish to GitHub Release (macOS)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          CSC_LINK: ${{ secrets.MAC_CERTS }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+          MAC_CERTS: ${{ secrets.MAC_CERTS }}
+          MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           # 构建正式安装包 + blockmap + updater metadata，并上传到刚创建的 tag 对应 Release。
-          # 无签名凭据时产出未签名构件（CSC_IDENTITY_AUTO_DISCOVERY=false 跳过自动发现），更新链路仍可用。
-          if [ -z "$CSC_LINK" ]; then
+          # 仅在提供了签名凭据时导出 CSC_*；空值会让 electron-builder 把空路径当证书文件读取而报
+          # “not a file”。无凭据则关闭签名身份自动发现，产出未签名构件，更新链路仍可用。
+          if [ -n "$MAC_CERTS" ]; then
+            export CSC_LINK="$MAC_CERTS"
+            export CSC_KEY_PASSWORD="$MAC_CERTS_PASSWORD"
+          else
             export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+          if [ -n "$APPLE_ID" ]; then
+            export APPLE_ID="$APPLE_ID"
+            export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
+            export APPLE_TEAM_ID="$APPLE_TEAM_ID"
           fi
           pnpm --filter @ai-devflow/desktop release
 
