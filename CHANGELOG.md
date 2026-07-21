@@ -14,6 +14,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - v0.1.0 — 测试中泳道与自动审查、依赖 DAG、配置继承、多平台发版等 12 项改造 (#2)（a3886c7）
 
 ### 问题修复
+- **release**：build job 统一使用 bash shell（修复 Windows 上 PowerShell 解析 bash 语法失败） (#4)（ffad85a）
 - **desktop**：createAtPath 初始提交在无全局 git 身份的环境（如 CI）确保仓库级回退身份 (#3)（0d542e1）
 
 ## v0.0.3
