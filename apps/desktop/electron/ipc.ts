@@ -424,6 +424,21 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('providers', 'health'), () =>
     (providerStore?.listConfigs() ?? []).map((p) => ({ providerId: p.id, status: healthView(p.id) })),
   );
+  const migrationStatus = () => {
+    const state = services.initializationStatus?.credentialMigration;
+    return { state: state === 'needs_reentry' || state === 'failed' ? state : 'ready' } as const;
+  };
+  ipcMain.handle(channel('providers', 'migrationStatus'), migrationStatus);
+  ipcMain.handle(channel('providers', 'completeReentry'), (_e, input) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    if (migrationStatus().state === 'ready') throw new Error('当前没有待完成的旧配置迁移');
+    const summary = providerStore.completeLegacyReentry(input);
+    services.initializationStatus = {
+      credentialMigration: 'migrated',
+      runtime: services.initializationStatus?.runtime ?? 'unavailable',
+    };
+    return { ...summary, health: healthView(summary.id) };
+  });
   // 测试连接：经 ProviderRouter 解析该提供商的可用路线并做一次最小 Pi 探测。
   ipcMain.handle(channel('providers', 'test'), (_e, id: string) => {
     if (!services.piAi) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };

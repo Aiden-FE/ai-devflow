@@ -27,6 +27,7 @@ import type {
   ProviderInput,
   ProviderTestResult,
   ProviderHealthSummary,
+  ProviderMigrationStatus,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -201,6 +202,10 @@ export interface DesktopApi {
     /** 测试连接：经 ProviderRouter 解析该提供商可用路线。 */
     test(id: string): Promise<ProviderTestResult>;
     health(): Promise<ProviderHealthSummary[]>;
+    /** Sanitized legacy migration state; contains no provider payload or credential detail. */
+    migrationStatus(): Promise<ProviderMigrationStatus>;
+    /** Atomically replaces an unreadable legacy record with an explicitly re-entered provider. */
+    completeReentry(input: ProviderInput): Promise<ProviderSummary>;
   };
   // ---- 自动更新（Part 6，仅 app.isPackaged 时可用） ----
   updates: {

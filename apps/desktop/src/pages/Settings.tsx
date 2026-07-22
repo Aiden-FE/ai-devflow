@@ -13,7 +13,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ProviderMigrationStatus } from '@ai-devflow/core';
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
@@ -371,9 +371,30 @@ function DeliveriesModal({ webhookId, onClose }: { webhookId: string; onClose: (
   );
 }
 
+export function ProviderMigrationNotice({
+  state,
+  onReenter,
+  message = 'Provider migration requires attention.',
+  actionLabel = 'Re-enter provider',
+}: {
+  state: ProviderMigrationStatus['state'];
+  onReenter(): void;
+  message?: string;
+  actionLabel?: string;
+}): React.ReactElement | null {
+  if (state === 'ready') return null;
+  return (
+    <div data-migration-state={state} className="mt-2 flex items-center justify-between gap-3 rounded-md border border-warn/40 bg-warn/10 px-3 py-2">
+      <span className="text-xs text-warn">{message}</span>
+      <Button data-testid="provider-migration-reentry" size="sm" variant="outline" onClick={onReenter}>{actionLabel}</Button>
+    </div>
+  );
+}
+
 function ProviderSection(): React.ReactElement {
   const t = useT();
   const { data, reload } = useAsync(() => api.providers.list(), []);
+  const { data: migration, reload: reloadMigration } = useAsync(() => api.providers.migrationStatus(), []);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<ProviderSummary | undefined>();
   const [kind, setKind] = useState<ProviderKind>('openai_compatible');
@@ -384,12 +405,20 @@ function ProviderSection(): React.ReactElement {
   const [enabled, setEnabled] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; error?: string }>>({});
+  const [reentry, setReentry] = useState(false);
 
   const startAdd = () => {
+    setReentry(false);
+    setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
+    setBaseURL(''); setAllowLocal(false); setEnabled(true); setError(undefined); setOpen(true);
+  };
+  const startReentry = () => {
+    setReentry(true);
     setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
     setBaseURL(''); setAllowLocal(false); setEnabled(true); setError(undefined); setOpen(true);
   };
   const startEdit = (p: ProviderSummary) => {
+    setReentry(false);
     setEditing(p); setKind(p.kind); setDisplayName(p.displayName); setApiKey('');
     setBaseURL(p.baseURL ?? ''); setAllowLocal(false); setEnabled(p.enabled); setError(undefined); setOpen(true);
   };
@@ -407,9 +436,11 @@ function ProviderSection(): React.ReactElement {
         allowInsecureLocal: allowLocal,
         revision: editing?.revision ?? 1,
       };
-      await api.providers.save(input);
+      if (reentry) await api.providers.completeReentry(input);
+      else await api.providers.save(input);
       setOpen(false);
       reload();
+      reloadMigration();
     } catch (e) { setError((e as Error).message); }
   };
   const remove = async (id: string) => { await api.providers.remove(id); reload(); };
@@ -436,6 +467,12 @@ function ProviderSection(): React.ReactElement {
         <Button onClick={startAdd}>{t('settings.providers.add')}</Button>
       </div>
       <p className="text-xs text-muted-foreground">{t('settings.providers.hint')}</p>
+      <ProviderMigrationNotice
+        state={migration?.state ?? 'ready'}
+        onReenter={startReentry}
+        message={t(`settings.providers.migration.${migration?.state ?? 'ready'}`)}
+        actionLabel={t('settings.providers.migration.action')}
+      />
       {list.length === 0 && <p className="mt-2 text-xs text-muted-foreground">{t('settings.providers.empty')}</p>}
       <div className="mt-2 flex flex-col gap-2">
         {list.map((p, i) => (
@@ -467,7 +504,7 @@ function ProviderSection(): React.ReactElement {
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{editing ? t('settings.providers.edit') : t('settings.providers.add')}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{reentry ? t('settings.providers.migration.action') : editing ? t('settings.providers.edit') : t('settings.providers.add')}</DialogTitle></DialogHeader>
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
               <Label>{t('settings.providers.kind')}</Label>

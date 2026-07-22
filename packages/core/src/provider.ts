@@ -88,6 +88,11 @@ export interface ProviderHealthSummary {
   lastFailureKind?: FailureKind;
 }
 
+/** Sanitized startup migration state exposed to the Renderer; never carries legacy payload details. */
+export interface ProviderMigrationStatus {
+  state: 'ready' | 'needs_reentry' | 'failed';
+}
+
 /** 「测试连接」结果（经 ProviderRouter 与真实隐藏模型最小调用）。 */
 export interface ProviderTestResult {
   ok: boolean;

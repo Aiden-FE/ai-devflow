@@ -46,11 +46,50 @@ describe('ProviderStore', () => {
       provider: 'anthropic', apiKey: 'legacy', baseURL: 'https://api.anthropic.com', model: 'ignored',
     })));
     harness.store.migrateLegacy();
-    expect(harness.store.list()).toEqual([expect.objectContaining({ kind: 'anthropic', priority: 0 })]);
+    expect(harness.store.list()).toEqual([expect.objectContaining({ kind: 'anthropic', priority: 0, baseURL: undefined })]);
     expect(harness.store.resolveSecret(harness.store.listConfigs()[0]!.id)).toBe('legacy');
     expect(harness.credentials.get('ai_provider')).toBeUndefined();
     harness.store.migrateLegacy();
     expect(harness.store.list()).toHaveLength(1);
+  });
+
+  it('migrates a custom legacy URL as compatible and reindexes it before existing providers', () => {
+    const harness = makeProviderStoreHarness();
+    harness.store.save({ id: 'a', kind: 'google', displayName: 'A', enabled: true, priority: 0, authType: 'api_key', apiKey: 'a', revision: 1 });
+    harness.store.save({ id: 'b', kind: 'deepseek', displayName: 'B', enabled: true, priority: 1, authType: 'api_key', apiKey: 'b', revision: 1 });
+    harness.credentials.upsert('ai_provider', harness.encrypt(JSON.stringify({
+      provider: 'openai', apiKey: 'legacy', baseURL: 'https://gateway.example/v1', model: 'discarded',
+    })));
+
+    expect(harness.store.migrateLegacy()).toBe('migrated');
+    const configs = harness.store.listConfigs();
+    expect(configs.map((provider) => provider.priority)).toEqual([0, 1, 2]);
+    expect(configs.map((provider) => provider.id).slice(1)).toEqual(['a', 'b']);
+    expect(configs[0]).toEqual(expect.objectContaining({
+      kind: 'openai_compatible',
+      baseURL: 'https://gateway.example/v1',
+      priority: 0,
+    }));
+  });
+
+  it('completes legacy re-entry atomically and promotes the replacement provider', () => {
+    const harness = makeProviderStoreHarness();
+    harness.store.save({ id: 'existing', kind: 'google', displayName: 'Existing', enabled: true, priority: 0, authType: 'api_key', apiKey: 'existing', revision: 1 });
+    harness.credentials.upsert('ai_provider', 'enc:undecryptable');
+
+    const replacement = harness.store.completeLegacyReentry({
+      id: 'replacement', kind: 'anthropic_compatible', displayName: 'Replacement', enabled: true,
+      priority: 99, authType: 'api_key', apiKey: 'new-secret', baseURL: 'https://gateway.example', revision: 1,
+    });
+
+    expect(replacement).toEqual(expect.objectContaining({ id: 'replacement', priority: 0, hasCredential: true }));
+    expect(harness.store.list().map((provider) => [provider.id, provider.priority])).toEqual([
+      ['replacement', 0],
+      ['existing', 1],
+    ]);
+    expect(harness.credentials.get('ai_provider')).toBeUndefined();
+    expect(harness.credentials.get('provider-migration:v1')).toBeDefined();
+    expect(harness.store.resolveSecret('replacement')).toBe('new-secret');
   });
 
   it('leaves an undecryptable legacy config in place without a marker', () => {

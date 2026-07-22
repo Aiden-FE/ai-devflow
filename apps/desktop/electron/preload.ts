@@ -99,6 +99,8 @@ const api: DesktopApi = {
     reorder: (ids) => invoke('providers', 'reorder')(ids),
     test: (id) => invoke('providers', 'test')(id),
     health: () => invoke('providers', 'health')(),
+    migrationStatus: () => invoke('providers', 'migrationStatus')(),
+    completeReentry: (input) => invoke('providers', 'completeReentry')(input),
   },
   updates: {
     check: () => invoke('updates', 'check')(),

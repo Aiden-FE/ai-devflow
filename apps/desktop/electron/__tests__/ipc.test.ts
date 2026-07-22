@@ -234,6 +234,23 @@ describe('typed IPC wiring', () => {
     expect(health.find((provider) => provider.providerId === 'auth-broken')?.status).toBe('configuration_error');
   });
 
+  it('providers expose sanitized migration state and complete credential re-entry', async () => {
+    services.initializationStatus = { credentialMigration: 'needs_reentry', runtime: 'ready' };
+    expect(await call('providers', 'migrationStatus')).toEqual({ state: 'needs_reentry' });
+    expect(JSON.stringify(await call('providers', 'migrationStatus'))).not.toContain('credential');
+
+    const saved = await call('providers', 'completeReentry', {
+      id: 'replacement', kind: 'openai_compatible', displayName: 'Replacement', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'replacement-secret', baseURL: 'https://gateway.example/v1', revision: 1,
+    }) as Record<string, unknown>;
+    expect(saved).toEqual(expect.objectContaining({ id: 'replacement', hasCredential: true }));
+    expect(JSON.stringify(saved)).not.toContain('replacement-secret');
+    expect(await call('providers', 'migrationStatus')).toEqual({ state: 'ready' });
+
+    services.initializationStatus = { credentialMigration: 'failed', runtime: 'ready' };
+    expect(await call('providers', 'migrationStatus')).toEqual({ state: 'failed' });
+  });
+
   it('requirements.archive gates on all subtasks archived', async () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });

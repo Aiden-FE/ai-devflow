@@ -37,6 +37,26 @@ interface LegacyAiProvider {
   model?: string;
 }
 
+const LEGACY_DEFAULT_BASE_URLS: Record<LegacyAiProvider['provider'], Set<string>> = {
+  openai: new Set(['https://api.openai.com', 'https://api.openai.com/v1']),
+  anthropic: new Set(['https://api.anthropic.com', 'https://api.anthropic.com/v1', 'https://api.anthropic.com/v1/messages']),
+};
+
+function normalizedLegacyBaseURL(value: string | undefined): string | undefined {
+  if (!value?.trim()) return undefined;
+  return value.trim().replace(/\/+$/, '');
+}
+
+function legacyAllowsLocalHTTP(baseURL: string | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    const url = new URL(baseURL);
+    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export class ProviderStore {
   constructor(
     private credentials: ProviderCredentialSink,
@@ -163,6 +183,26 @@ export class ProviderStore {
     }
   }
 
+  /** Replace an unreadable legacy record with an explicitly re-entered provider in one transaction. */
+  completeLegacyReentry(input: ProviderInput): ProviderSummary {
+    const { config, secret } = normalizeProviderInput(input);
+    if (!secret) throw new Error('重新录入需要新的 API Key');
+    const existing = this.listConfigs()
+      .filter((provider) => provider.id !== config.id)
+      .sort((a, b) => a.priority - b.priority);
+    const reordered = [{ ...config, priority: 0, revision: Math.max(config.revision, 1) }, ...existing]
+      .map((provider, priority) => ({ ...provider, priority }));
+    this.credentials.transaction(() => {
+      this.writeConfigs(reordered);
+      this.credentials.upsert(secretKey(config.id), this.crypto.encrypt(secret));
+      this.credentials.upsert(MIGRATION_MARKER, this.crypto.encrypt(`reentered:${config.id}`));
+      this.credentials.delete(LEGACY_KEY);
+    });
+    const saved = this.list().find((provider) => provider.id === config.id);
+    if (!saved) throw new Error('重新录入提供商失败');
+    return saved;
+  }
+
   /**
    * 幂等迁移旧单提供商配置（credentials('ai_provider')）为新列表第一项；丢弃旧 model（由内置
    * workload map 接管）。仅在新记录落盘后写 marker 并于同一事务删除旧 key。无法解密时保留旧密文、
@@ -180,21 +220,24 @@ export class ProviderStore {
       return 'needs_reentry';
     }
     const id = randomUUID();
-    const kind = legacy.provider === 'openai' ? 'openai' : 'anthropic';
-    const config: ProviderConfig = {
+    const baseKind = legacy.provider === 'openai' ? 'openai' : 'anthropic';
+    const legacyBaseURL = normalizedLegacyBaseURL(legacy.baseURL);
+    const customURL = legacyBaseURL !== undefined && !LEGACY_DEFAULT_BASE_URLS[legacy.provider].has(legacyBaseURL);
+    const kind = customURL ? `${baseKind}_compatible` as const : baseKind;
+    const { config } = normalizeProviderInput({
       id,
       kind,
-      displayName: kind === 'openai' ? 'OpenAI' : 'Anthropic',
+      displayName: baseKind === 'openai' ? 'OpenAI' : 'Anthropic',
       enabled: true,
       priority: 0,
       authType: 'api_key',
-      credentialRef: secretKey(id),
-      baseURL: legacy.baseURL,
+      baseURL: customURL ? legacyBaseURL : undefined,
+      allowInsecureLocal: legacyAllowsLocalHTTP(legacyBaseURL),
       revision: 1,
-    };
+    });
     this.credentials.transaction(() => {
-      const configs = this.listConfigs();
-      this.writeConfigs([...configs, config]);
+      const configs = this.listConfigs().sort((a, b) => a.priority - b.priority);
+      this.writeConfigs([config, ...configs].map((provider, priority) => ({ ...provider, priority })));
       if (legacy.apiKey) this.credentials.upsert(secretKey(id), this.crypto.encrypt(legacy.apiKey));
       this.credentials.upsert(MIGRATION_MARKER, this.crypto.encrypt(`migrated:${id}`));
       this.credentials.delete(LEGACY_KEY);
