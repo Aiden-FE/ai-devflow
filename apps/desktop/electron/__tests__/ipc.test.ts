@@ -214,6 +214,26 @@ describe('typed IPC wiring', () => {
     expect(await call('providers', 'list')).toEqual([saved]);
   });
 
+  it('providers health reports indefinite authentication failure as configuration_error', async () => {
+    await call('providers', 'save', {
+      id: 'auth-broken', kind: 'openai', displayName: 'Auth broken', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'test-key', revision: 1,
+    });
+    repos.providerHealth.upsert({
+      providerId: 'auth-broken',
+      routeId: 'auth-broken:coder:primary',
+      state: 'open',
+      consecutiveFailures: 1,
+      lastFailureKind: 'authentication',
+      updatedAt: Date.now(),
+    });
+
+    const listed = await call('providers', 'list') as Array<{ id: string; health: string }>;
+    expect(listed.find((provider) => provider.id === 'auth-broken')?.health).toBe('configuration_error');
+    const health = await call('providers', 'health') as Array<{ providerId: string; status: string }>;
+    expect(health.find((provider) => provider.providerId === 'auth-broken')?.status).toBe('configuration_error');
+  });
+
   it('requirements.archive gates on all subtasks archived', async () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });

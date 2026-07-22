@@ -403,8 +403,8 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     const hs = repos.providerHealth.listByProvider(providerId);
     if (hs.length === 0) return 'untested';
     const nowMs = Date.now();
-    if (hs.some((h) => h.state === 'open' && (h.cooldownUntil === undefined || h.cooldownUntil > nowMs))) return 'cooldown';
     if (hs.some((h) => h.lastFailureKind === 'authentication')) return 'configuration_error';
+    if (hs.some((h) => h.state === 'open' && (h.cooldownUntil === undefined || h.cooldownUntil > nowMs))) return 'cooldown';
     return 'available';
   };
   ipcMain.handle(channel('providers', 'list'), () =>
