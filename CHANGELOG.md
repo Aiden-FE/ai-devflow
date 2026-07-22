@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- only normalize absolute symlinks on Windows（7a69452）
 - normalize absolute symlinks in staged Pi runtime for Windows（1f68f11）
 - set explicit executableName for deterministic Linux executable（a733176）
 - harden execution policy, env safety and Pi interaction protocol（b918a92）
@@ -42,6 +43,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
 
 ### 其他变更
+- add diagnostic model list to pi-catalog-gate on failure（d191230）
 - print expected/actual symlink target on verify mismatch（46c155f）
 - add directory listing diagnostics to verify-packaged-pi on missing executable（202e9af）
 - harden real Pi secret and planner gates（43c7876）
