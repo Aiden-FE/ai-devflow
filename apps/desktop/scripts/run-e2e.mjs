@@ -290,6 +290,28 @@ function assertPackaged(name, condition) {
   console.log(`  ✓ ${name}`);
 }
 
+function profileContentDigest(root) {
+  const hash = createHash('sha256');
+  const visit = (relativePath) => {
+    const absolute = relativePath ? join(root, relativePath) : root;
+    for (const entry of readdirSync(absolute, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!relativePath && entry.name === '.complete') continue;
+      const child = relativePath ? join(relativePath, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        hash.update(`d:${child}\0`);
+        visit(child);
+      } else if (entry.isFile()) {
+        hash.update(`f:${child}\0`);
+        hash.update(readFileSync(join(root, child)));
+      } else {
+        throw new Error(`角色快照包含不支持的文件类型：${child}`);
+      }
+    }
+  };
+  visit('');
+  return hash.digest('hex');
+}
+
 async function runPackagedIsolation(releaseRoot) {
   const appInfo = findHostUnpackedApp(releaseRoot);
   console.log(`[e2e:packaged] 主机应用 ${appInfo.dir} (${appInfo.platform}/${appInfo.arch})`);
@@ -427,24 +449,39 @@ async function runPackagedIsolation(releaseRoot) {
         const system = join(profileDir, 'SYSTEM.md');
         const models = join(profileDir, 'models.json');
         if (existsSync(complete) && existsSync(system) && existsSync(models)) {
-          roleSnapshots.set(role, { profileDir, digest, complete: readFileSync(complete, 'utf8'), system: readFileSync(system, 'utf8') });
+          roleSnapshots.set(role, {
+            profileDir,
+            digest,
+            marker: JSON.parse(readFileSync(complete, 'utf8')),
+            contentDigest: profileContentDigest(profileDir),
+            system: readFileSync(system, 'utf8'),
+          });
         }
       }
     }
-    assertPackaged('四角色使用四个独立内容寻址配置快照', roles.every((role) => roleSnapshots.has(role))
+    assertPackaged('四角色使用四个独立不可变内容寻址源快照', roles.every((role) => roleSnapshots.has(role))
       && new Set([...roleSnapshots.values()].map((item) => item.profileDir)).size === 4
       && new Set([...roleSnapshots.values()].map((item) => item.digest)).size === 4
-      && [...roleSnapshots.entries()].every(([role, item]) => item.complete === item.digest && item.system.includes(`**${role}**`)));
+      && [...roleSnapshots.entries()].every(([role, item]) => item.marker.digest === item.digest
+        && item.marker.contentDigest === item.contentDigest
+        && item.system.includes(`**${role}**`)));
 
     const executionIds = result.flatMap((item) => item.executions.map((execution) => execution.id));
     const sessionRoots = executionIds.map((executionId) => join(userData, 'pi-runtime', 'sessions', executionId));
     const concurrentSessionRoots = result
       .filter((item) => item.label.startsWith('concurrent-coder-'))
       .flatMap((item) => item.executions.map((execution) => join(userData, 'pi-runtime', 'sessions', execution.id)));
+    const attemptRoots = sessionRoots.flatMap((sessionRoot) => readdirSync(sessionRoot)
+      .filter((name) => name.includes('-attempt-'))
+      .map((name) => join(sessionRoot, name)));
+    const configRoots = attemptRoots.map((attemptRoot) => join(attemptRoot, 'config'));
     assertPackaged('每次任务与审查执行均使用独立 session 位置', executionIds.length === 12
       && new Set(executionIds).size === 12
       && new Set(sessionRoots.map((path) => realpathSync(path))).size === 12
       && sessionRoots.every((path) => readdirSync(path).some((name) => name.includes('-attempt-'))));
+    assertPackaged('每次 Pi 尝试均使用独立可写配置副本', configRoots.length === 12
+      && configRoots.every((path) => isDirectory(path))
+      && new Set(configRoots.map((path) => realpathSync(path))).size === 12);
     assertPackaged('并发 coder 复用同一不可变角色快照但任务/审查 session 完全隔离', concurrentSessionRoots.length === 4
       && new Set(concurrentSessionRoots.map((path) => realpathSync(path))).size === concurrentSessionRoots.length
       && roleSnapshots.has('coder'));
