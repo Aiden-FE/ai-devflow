@@ -91,6 +91,17 @@ switch (scenario) {
     process.exit(0);
     break;
 
+  case 'interaction-then-hang':
+    emit({ type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction', args: { kind: 'clarification', title: 'need input', detail: 'please clarify' } });
+    emit({ type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false, result: { details: { aiDevflowInteraction: { kind: 'clarification', title: 'need input', detail: 'please clarify' } } } });
+    // Simulate a Pi that keeps running after the interaction tool result landed (does NOT emit agent_end,
+    // does NOT exit). The runner must actively terminate the process group (design §7.4). The safety
+    // self-exit at 10s with code 99 only fires if the runner fails to cancel -- a correct runner kills
+    // the process via signal before this timer, so observing a signal exit proves active termination.
+    setInterval(() => {}, 60_000);
+    setTimeout(() => process.exit(99), 10_000);
+    break;
+
   case 'task-result-failure':
     emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pnpm test' } });
     emit({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: true, result: { content: [{ type: 'text', text: 'test failed' }] } });

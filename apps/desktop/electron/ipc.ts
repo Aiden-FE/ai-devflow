@@ -285,6 +285,9 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     const req = repos.requirements.get(t.requirementId);
     const hasExec = repos.executions.listByTask(id).length > 0;
     const hasCp = !!repos.checkpoints.getLatest(id);
+    // 状态迁移门禁的 hasAgentAssigned 仅判定「是否配置过提供商」（任意 provider 存在），
+    // 语义不同于编排器的 hasUsableProvider（启用+有凭证+runtime ready，用于禁止开始新 AI 操作）。
+    // 此处为状态迁移（非启动 AI），仅需确认曾配置提供商；真正启动 AI 时由 orchestrator.start 再做 hasUsableProvider 校验。
     const gate = canTransition(t, target, {
       hasAcceptance: !!req?.acceptance,
       hasAgentAssigned: services.providerStore ? services.providerStore.list().length > 0 : true,
@@ -300,6 +303,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (!t) throw new Error('任务不存在');
     if (t.status !== 'in_review') throw new Error('仅待验收任务可验收归档');
     const hasExec = repos.executions.listByTask(id).length > 0;
+    // 同 updateStatus：hasAgentAssigned 仅判定「是否配置过提供商」，非 hasUsableProvider（见上）。
     const gate = canTransition(t, 'archived', {
       hasAcceptance: true,
       hasAgentAssigned: services.providerStore ? services.providerStore.list().length > 0 : true,

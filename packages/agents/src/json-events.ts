@@ -13,6 +13,8 @@ export interface PiEventTranslatorOptions {
   routeId?: string;
   /** 需在输出/日志/ journal 中脱敏的活跃/备用路线密钥。 */
   secrets?: string[];
+  /** 本次尝试恢复自的检查点 ID（写入 journal.lastCheckpointId，设计 §10）；无则不写。 */
+  lastCheckpointId?: string;
 }
 
 export interface StructuredResult {
@@ -35,11 +37,15 @@ export interface PiEventTranslator {
   lastProviderError(): { status: number; message: string } | undefined;
   /** 本次尝试是否触发了 ai_devflow_interaction（澄清/确认）——应暂停而非降级。 */
   hadInteraction(): boolean;
+  /** 向前兼容诊断（设计 §11）：未知事件与 auto_retry_*（配置违例）的有上限脱敏缓冲。 */
+  diagnostics(): readonly string[];
 }
 
 const FILE_TOOLS = new Set(['write', 'edit']);
 const INTERACTION_TOOL = 'ai_devflow_interaction';
 const REPORT_TOOL = 'ai_devflow_report_result';
+/** 向前兼容诊断缓冲上限（设计 §11：有上限，防止失控输出耗尽内存）。 */
+const MAX_DIAGNOSTICS = 64;
 
 function makeRedactor(secrets: string[]): (text: string) => string {
   return (text: string): string => {
@@ -107,8 +113,10 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     mutationsObserved: false,
     toolCalls: [],
     changedFiles: [],
+    lastCheckpointId: opts.lastCheckpointId,
   };
   const pendingArgs = new Map<string, Record<string, unknown>>();
+  const diagnostics: string[] = [];
   let agentEnded = false;
   let result: StructuredResult | undefined;
   let providerError: { status: number; message: string } | undefined;
@@ -201,9 +209,16 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
           providerError = { status, message: redact(message) };
           break;
         }
-        default:
-          // auto_retry_* 或未知事件：诊断，向前兼容，不崩溃。
+        default: {
+          // auto_retry_* 或未知事件：诊断，向前兼容，不崩溃（设计 §11）。
+          // auto_retry_* 在 Pi 自身 retry 关闭的配置下不应出现，记为配置违例；其余未知事件记为 debug 诊断。
+          const eventType = typeof type === 'string' && type.length > 0 ? type : '<unknown>';
+          if (diagnostics.length < MAX_DIAGNOSTICS) {
+            const tag = eventType.startsWith('auto_retry_') ? 'config-violation' : 'unknown-event';
+            diagnostics.push(redact(`[${tag}] ${eventType}`));
+          }
           break;
+        }
       }
       return events;
     },
@@ -246,6 +261,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     },
     hadInteraction(): boolean {
       return interactionOccurred;
+    },
+    diagnostics(): readonly string[] {
+      return diagnostics;
     },
   };
 }

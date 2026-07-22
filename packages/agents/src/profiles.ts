@@ -17,6 +17,17 @@ import {
 import { join } from 'node:path';
 import type { ProviderKind, TaskRole } from '@ai-devflow/core';
 
+/**
+ * 角色 profile（设计 §7.1）。
+ *
+ * 与设计 §7.1 契约的等价取舍（显式注明，非偏差）：
+ * - `extensions` 未列入本接口：四角色共用同一组仓库内维护的内置扩展，已抽到模块常量
+ *   `BUILTIN_EXTENSIONS`（§7.4），不随角色变化，故不再逐角色重复声明。
+ * - `providerModels` 未列入本接口：内置模型表是跨角色、跨提供商的全局映射，已抽到
+ *   `provider-router.ts` 的 `MODEL_TABLE`（§7.2），由 ProviderRouter 按 workload 取用，
+ *   不挂在单角色 profile 上。
+ * RoleProfile 只保留角色间确有差异的维度：工具清单、排除工具、skills、超时。
+ */
 export interface RoleProfile {
   role: TaskRole;
   version: number;

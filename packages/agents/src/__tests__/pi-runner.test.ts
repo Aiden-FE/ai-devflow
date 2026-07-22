@@ -145,6 +145,23 @@ it('stops without failover on an interaction and surfaces ask_user', async () =>
   expect(result.ok).toBe(true);
 });
 
+it('actively terminates the Pi process group after an interaction tool ends (§7.4)', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'interaction-then-hang' });
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'hang', role: 'coder', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+  expect(events).toContainEqual(expect.objectContaining({ type: 'ask_user' }));
+  const result = await run.done();
+  expect(result.ok).toBe(true);
+  expect(harness.spawnedCommands).toHaveLength(1);
+  // Fake Pi hangs after the interaction tool and self-exits with code 99 only at 10s.
+  // A signal exit proves the runner actively terminated the process group instead of waiting.
+  const exit = harness.spawnExits[0]!;
+  expect(exit.signal).toMatch(/SIGTERM|SIGKILL/);
+  expect(exit.code).not.toBe(99);
+}, 15_000);
+
 it('fails a reviewer latch-blocked interaction terminal without pausing', async () => {
   const harness = createPiRunnerHarness({ scenario: 'reviewer-latch-blocked-interaction' });
   const run = await harness.runner.run({

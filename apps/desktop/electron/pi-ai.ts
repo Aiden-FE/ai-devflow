@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
-import { validateProposalDag } from '@ai-devflow/core';
+import { redactText, validateProposalDag } from '@ai-devflow/core';
 import { z } from 'zod';
 import type {
   PiProcessSupervisor,
@@ -390,7 +390,8 @@ async function testConnectionWithRouter(
     await executeText('task_chat', [{ role: 'user', content: 'ping' }], undefined, { onlyProviderId: providerId });
     return { ok: true, providerId, status: 200 };
   } catch (err) {
-    const message = (err as Error).message || String(err);
+    // §8.2：保存、测试、运行和错误记录都使用统一脱敏函数；错误消息可能含 URL/状态/密钥形态片段。
+    const message = redactText((err as Error).message || String(err));
     return { ok: false, providerId, status: 0, error: message };
   }
 }

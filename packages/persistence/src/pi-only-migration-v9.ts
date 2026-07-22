@@ -4,9 +4,10 @@
 // 用 JSON 函数从项目设置移除 agentRoles/roleConfigs、删除 credentials.global_agent_config，
 // 并新建 provider_health 与 execution_attempts 表。
 //
-// 关键顺序：本模块在 Task 2 实现但**保持未注册**（不在 MIGRATIONS 中、openDatabase 不调用）。
-// 它在 Task 9 与调度器切换同一个提交里原子启用，确保删除旧列时 orchestrator/repositories
-// 已不再引用它们——每一阶段保持类型检查与测试通过（设计 §18）。
+// 注册状态：v9 已注册进 MIGRATIONS（migrations.ts）并随 openDatabase() 应用，当前已生效。
+// 应用前先做一致性备份（§12.3，VACUUM INTO）与 SQLite 版本自检（DROP COLUMN 需 ≥ 3.35），
+// 失败回滚且保留备份；重复应用会因列已删除而抛错。删除旧列时 orchestrator/repositories 已不再
+// 引用它们——每一阶段保持类型检查与测试通过（设计 §18）。
 import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from './db.js';

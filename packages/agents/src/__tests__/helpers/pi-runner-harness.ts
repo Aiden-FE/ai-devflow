@@ -25,6 +25,7 @@ export type FakeScenario =
   | 'runtime-crash'
   | 'protocol-corruption'
   | 'interaction'
+  | 'interaction-then-hang'
   | 'task-result-failure'
   | 'missing-verification'
   | 'report-without-end'
@@ -32,6 +33,11 @@ export type FakeScenario =
   | 'provider-error-then-report'
   | 'interaction-then-report'
   | 'reviewer-latch-blocked-interaction';
+
+export interface SpawnExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
 
 export interface PiRunnerHarness {
   runner: AgentRunner;
@@ -45,6 +51,8 @@ export interface PiRunnerHarness {
     sessionDir?: string;
     executionId?: string;
   }>;
+  /** 每次子进程的退出码/信号（按 spawn 顺序）；用于断言主动终止等行为。 */
+  spawnExits: SpawnExit[];
   sleeps: number[];
   attemptIds: string[];
   attemptCollisions: string[];
@@ -55,6 +63,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   const cwd = mkdtempSync(join(tmpdir(), 'pi-runner-cwd-'));
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
   const spawnedCommands: PiRunnerHarness['spawnedCommands'] = [];
+  const spawnExits: SpawnExit[] = [];
   const sleeps: number[] = [];
   const attemptIds: string[] = [];
   const attemptCollisions: string[] = [];
@@ -120,12 +129,16 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
       sessionDir: opts.env.PI_CODING_AGENT_SESSION_DIR,
       executionId: opts.env.AI_DEVFLOW_EXECUTION_ID,
     });
-    return nodeSpawn(command, args, {
+    const child = nodeSpawn(command, args, {
       cwd: opts.cwd,
       env: { ...opts.env, AI_DEVFLOW_FAKE_SCENARIO: input.scenario },
       detached: opts.detached,
       stdio: opts.stdio,
     });
+    const exit: SpawnExit = { code: null, signal: null };
+    child.once('exit', (code, signal) => { exit.code = code; exit.signal = signal; });
+    spawnExits.push(exit);
+    return child;
   };
 
   const supervisor = new PiProcessSupervisor({ spawnFn });
@@ -141,5 +154,5 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
     attempts,
   });
 
-  return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, sleeps, attemptIds, attemptCollisions, materializedProfiles };
+  return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, spawnExits, sleeps, attemptIds, attemptCollisions, materializedProfiles };
 }

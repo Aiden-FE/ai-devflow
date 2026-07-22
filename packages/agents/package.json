@@ -15,8 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit",
-    "verify:real": "AI_DEVFLOW_REAL=1 vitest run src/__tests__/real-agents.test.ts"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@ai-devflow/core": "workspace:*"

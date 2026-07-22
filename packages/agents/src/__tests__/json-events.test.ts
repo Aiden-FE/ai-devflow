@@ -137,6 +137,25 @@ describe('createPiEventTranslator', () => {
   it('records unknown event types as debug diagnostics without crashing', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     expect(() => translator.push(JSON.stringify({ type: 'some_future_event', x: 1 }))).not.toThrow();
+    expect(translator.diagnostics()).toContainEqual(expect.stringContaining('unknown-event'));
+    expect(translator.diagnostics()[0]).toContain('some_future_event');
+  });
+
+  it('records auto_retry_* events as a configuration violation diagnostic', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    expect(() => translator.push(JSON.stringify({ type: 'auto_retry_scheduled' }))).not.toThrow();
+    expect(translator.diagnostics()).toContainEqual(expect.stringContaining('config-violation'));
+    expect(translator.diagnostics()[0]).toContain('auto_retry_scheduled');
+  });
+
+  it('seeds the journal lastCheckpointId from the resume checkpoint (§10)', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1', lastCheckpointId: 'cp-42' });
+    expect(translator.journal().lastCheckpointId).toBe('cp-42');
+  });
+
+  it('leaves lastCheckpointId unset when no resume checkpoint is provided', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    expect(translator.journal().lastCheckpointId).toBeUndefined();
   });
 
   it('fails closed at finish after malformed stdout JSON', () => {

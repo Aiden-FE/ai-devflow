@@ -152,6 +152,30 @@ describe('orchestrator cancel', () => {
   });
 });
 
+describe('orchestrator shutdown (app quit, §15)', () => {
+  beforeEach(() => setup(() => [
+    { type: 'log', level: 'info', text: 'a', t: 0, delayMs: 5 },
+    { type: 'done', summary: 'ok', t: 0, delayMs: 2000 },
+  ]));
+
+  it('shutdown cancels active runs (terminates Pi process group) and seals executions', async () => {
+    const t = makeTask();
+    repos.tasks.insert(t);
+    const p = orch.start(t.id);
+    await new Promise((r) => setTimeout(r, 20));
+    // shutdown 等价于对每个活跃任务调用 cancel()：终止 Pi 进程组并封存 journal。
+    await orch.shutdown();
+    await p.catch(() => {});
+    const final = repos.tasks.get(t.id)!;
+    expect(final.status).toBe('ready');
+    expect(repos.executions.getLatest(t.id)!.status).toBe('canceled');
+  });
+
+  it('shutdown is a safe no-op when no tasks are active', async () => {
+    await expect(orch.shutdown()).resolves.toBeUndefined();
+  });
+});
+
 describe('orchestrator failure + retry', () => {
   beforeEach(() => setup(() => [
     { type: 'error', message: 'boom', recoverable: true, t: 0 },

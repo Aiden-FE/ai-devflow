@@ -72,6 +72,15 @@ describe('PiAiService', () => {
     expect(r.error).toMatch(/offline/);
   });
 
+  it('redacts secret-shaped error messages in test connection failures (§8.2)', async () => {
+    const secret = 'sk-ant-api03-1234567890abcdefgh';
+    const service = createPiAiService(makeFakeExecutor({ error: new Error(`auth failed for key ${secret}`) }));
+    const r = await service.testConnection('p1');
+    expect(r.ok).toBe(false);
+    expect(r.error).not.toContain(secret);
+    expect(r.error).toContain('sk-***');
+  });
+
   it('reports test connection success when executor returns', async () => {
     const service = createPiAiService(makeFakeExecutor({ texts: ['pong'] }));
     const r = await service.testConnection('p1');

@@ -17,6 +17,7 @@ const isDev = !app.isPackaged && process.env.AI_DEVFLOW_DEV === '1';
 let mainWindow: BrowserWindow | undefined;
 let services: Services | undefined;
 let pendingDeepLinkTaskId: string | undefined;
+let isQuitting = false;
 
 /** 读取持久化主题模式（默认 system）。 */
 function readThemeMode(svc: Services): ThemeMode {
@@ -166,4 +167,15 @@ app.on('open-url', (event, url) => {
   event.preventDefault();
   const parsed = parseDeepLink(url);
   if (parsed?.taskId) handleDeepLink(parsed.taskId);
+});
+
+// 应用退出前先终止活跃 Pi 进程组并封存 journal（设计 §15），再退出；孤儿进程由下次启动清理。
+// preventDefault 一次以等待异步 shutdown 完成，再次 quit 时 isQuitting 已置位故放行。
+app.on('before-quit', (event) => {
+  if (isQuitting || !services) return;
+  isQuitting = true;
+  event.preventDefault();
+  void services.orchestrator.shutdown().catch(() => undefined).finally(() => {
+    app.quit();
+  });
 });

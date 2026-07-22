@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   BundledPiLocator,
+  buildControlledPath,
   buildProbeEnv,
   cleanupOrphanPiProcesses,
   PiProcessSupervisor,
@@ -147,7 +148,7 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
     materializer,
     supervisor,
     sessionsBaseDir,
-    projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
+    projectToolPath: buildControlledPath(),
     instructionLoader: new ProjectInstructionLoader(),
     attempts: repos.executionAttempts,
   });

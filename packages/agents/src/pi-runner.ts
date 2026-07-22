@@ -202,6 +202,7 @@ export class PiRunner implements AgentRunner {
       attemptId,
       routeId: route.routeId,
       secrets: [route.secret],
+      lastCheckpointId: resumeCheckpoint?.id,
     });
 
     this.deps.attempts?.create({
@@ -215,12 +216,20 @@ export class PiRunner implements AgentRunner {
       startedAt: Date.now(),
     });
 
+    let interactionTerminated = false;
     for await (const line of spawned.lines) {
       if (line.stream !== 'stdout') continue; // stderr 已在 supervisor 脱敏入诊断缓冲
       const events = translator.push(line.text);
       for (const ev of events) queue.push(ev);
       const journal = translator.journal();
       this.deps.attempts?.updateJournal(attemptId, JSON.stringify(journal), journal.mutationsObserved);
+      // §7.4：ai_devflow_interaction 工具结果落入 JSONL 后，supervisor 主动终止本次 Pi 进程组，
+      // 把任务交还 awaiting_input 流程。不等待 Pi 自行结束（非契约行为，版本变化后可能 hang 到超时）。
+      if (!interactionTerminated && translator.hadInteraction()) {
+        interactionTerminated = true;
+        await spawned.cancel();
+        break;
+      }
     }
 
     const exitInfo = await spawned.done();
@@ -252,7 +261,9 @@ export class PiRunner implements AgentRunner {
 
     // 澄清/确认：暂停而非降级（§9.4 interaction）。orchestrator 已收到 ask_user 事件并转 awaiting_input。
     if (hadInteraction) {
-      if (!finishError && !translator.hasStructuredResult() && !pe && exitInfo.exitCode === 0) {
+      // interaction 是暂停终态：protocol 已由 finish() 校验（interactionOccurred 且无 result）。
+      // §7.4 主动终止进程组后退出码不再为 0，故此处不依赖 exitCode，只校验无 protocol 失败/结果/提供商错误。
+      if (!finishError && !translator.hasStructuredResult() && !pe) {
         this.deps.attempts?.finish(attemptId, 'canceled', Date.now());
         return { ok: true, journal };
       }

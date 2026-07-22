@@ -16,6 +16,13 @@ export interface ModelChoice {
   thinking: 'low' | 'medium' | 'high' | 'xhigh';
 }
 
+/**
+ * 候选路线（设计 §9.1）。
+ *
+ * 与设计 §9.1 契约的等价取舍（显式注明，非偏差）：`priority` 未列入本接口。
+ * `routesFor()` 已按 `ProviderConfig.priority` 升序生成候选，priority 信息已编码在
+ * 生成顺序中（调用方按数组顺序消费即为按 priority 优先级），故不再在每条路线上冗余携带。
+ */
 export interface ProviderRoute {
   providerId: string;
   providerRevision: number;

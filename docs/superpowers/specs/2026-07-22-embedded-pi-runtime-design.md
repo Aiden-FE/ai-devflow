@@ -219,6 +219,7 @@ interface ModelChoice {
 Pi 启动遵循“关闭发现，再显式加载”：
 
 ```text
+--print
 --mode json
 --no-extensions
 --extension <absolute-builtin-extension> ...
@@ -237,6 +238,8 @@ Pi 启动遵循“关闭发现，再显式加载”：
 --name <execution-id-attempt-id>
 <initial-message>
 ```
+
+`--print` 强制非交互一次性执行：处理完初始 message 后即退出，避免 supervised 子进程进入 TUI。这是 supervised JSON 执行所必需的开关，入口已用绝对路径（§6.3），`--print` 不参与入口解析。
 
 四套内置 `settings.json` 都必须设置 `retry.enabled: false`。提供商重试和退避只由 `ProviderRouter` 控制，不能同时启用 Pi 内部自动 retry。
 
@@ -493,10 +496,14 @@ interface ProviderSummary {
   displayName: string;
   enabled: boolean;
   priority: number;
+  authType: AuthType;
+  revision: number;
   hasCredential: boolean;
   baseURL?: string;
   health: 'available' | 'untested' | 'cooldown' | 'configuration_error';
 }
+
+`authType`（首版恒为 `api_key`，非敏感）与 `revision`（配置修订号，非敏感）随摘要返回：编辑现有提供商时需回传 `revision` 以保留版本并触发旧健康状态清除，`authType` 用于 UI 一致显示鉴权方式。两者均不含密文/明文。
 
 providers.list(): Promise<ProviderSummary[]>;
 providers.save(input: ProviderInput): Promise<ProviderSummary>;

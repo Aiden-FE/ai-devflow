@@ -55,9 +55,24 @@ export interface PiRunPlan {
   modelsJson?: string;
 }
 
-/** 非敏感的 locale/平台变量白名单透传（不含密钥、NODE_*、PI_*、供应商 key）。 */
+/**
+ * 非敏感的 locale/平台变量白名单透传（不含密钥、NODE_*、PI_*、供应商 key）。
+ * 设计 §14：locale、证书与代理白名单显式具名透传；其余继承变量一律剥离。
+ */
 const LOCALE_PASSTHROUGH = ['LANG', 'LC_ALL', 'LC_CTYPE'];
 const WINDOWS_PASSTHROUGH = ['SystemRoot', 'ComSpec', 'PATHEXT'];
+/** 证书（自签/企业 CA）与代理白名单（设计 §14），仅这些具名变量，不做通配。 */
+const CERT_PROXY_PASSTHROUGH = [
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+];
 
 export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
   const profile = ROLE_PROFILES[input.role];
@@ -65,6 +80,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
 
   // §6.3：command=process.execPath，args=[absolutePiEntry, ...piArgs]。
   // --print：非交互一次性执行（处理 prompt 后退出），避免 supervised 子进程进入 TUI。
+  // 该开关已纳入设计 §7.5 参数契约（非交互 JSON 执行所需），与 §7.5 列表一致，非偏差。
   const args: string[] = [input.runtimeEntry, '--print', '--mode', 'json', '--no-extensions'];
   for (const ext of BUILTIN_EXTENSIONS) {
     args.push('--extension', `${input.profileDir}/extensions/${ext}.ts`);
@@ -115,7 +131,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
   };
   if (input.worktree) env.AI_DEVFLOW_WORKTREE = input.worktree;
   if (input.checkpointPath) env.AI_DEVFLOW_CHECKPOINT_PATH = input.checkpointPath;
-  for (const key of [...LOCALE_PASSTHROUGH, ...WINDOWS_PASSTHROUGH]) {
+  for (const key of [...LOCALE_PASSTHROUGH, ...WINDOWS_PASSTHROUGH, ...CERT_PROXY_PASSTHROUGH]) {
     const value = process.env[key];
     if (value) env[key] = value;
   }

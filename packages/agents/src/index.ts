@@ -30,6 +30,7 @@ export {
   type MaterializeInput,
 } from './profiles.js';
 export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
+export { buildControlledPath } from './env-safety.js';
 export { ProjectInstructionLoader, type LoadedInstructions } from './project-instructions.js';
 export {
   createPiEventTranslator,

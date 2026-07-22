@@ -34,6 +34,7 @@ import {
   ProjectInstructionLoader,
   ProviderRouter,
   RawSecretDetector,
+  buildControlledPath,
   isCompatibleKind,
   type ExecutionAttemptStore,
   type PiRunPlan,
@@ -289,7 +290,7 @@ function makeRunner(name: string, providers: ProviderConfig[]): PiRunner {
     materializer: new ProfileMaterializer(ASSETS_ROOT, join(root, 'profiles')),
     supervisor: new CapturingSupervisor(join(root, 'streams'), captures, rawLeakState),
     sessionsBaseDir: join(root, 'sessions'),
-    projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
+    projectToolPath: buildControlledPath(),
     instructionLoader: new ProjectInstructionLoader(),
     attempts,
   });

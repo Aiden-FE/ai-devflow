@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TaskRole } from '@ai-devflow/core';
 import type { ProviderRoute } from '../provider-router.js';
 import { buildPiRunPlan, type PiRunPlanInput } from '../run-plan.js';
@@ -99,6 +99,30 @@ describe('buildPiRunPlan', () => {
   it('omits --exclude-tools when a role has no exclusions', () => {
     const plan = buildPiRunPlan(makeRunPlanFixture({ role: 'coder', executionId: 'e1', attemptId: 'a1' }));
     expect(plan.args).not.toContain('--exclude-tools');
+  });
+
+  it('passes through whitelisted cert/proxy env vars and strips inherited vars (§14)', () => {
+    vi.stubEnv('SSL_CERT_FILE', '/etc/ssl/cert.pem');
+    vi.stubEnv('SSL_CERT_DIR', '/etc/ssl/certs');
+    vi.stubEnv('NODE_EXTRA_CA_CERTS', '/etc/extra-ca.pem');
+    vi.stubEnv('HTTPS_PROXY', 'http://proxy:8080');
+    vi.stubEnv('NO_PROXY', 'localhost,127.0.0.1');
+    vi.stubEnv('http_proxy', 'http://proxy:8080');
+    try {
+      const plan = buildPiRunPlan(makeRunPlanFixture({ role: 'coder', executionId: 'e1', attemptId: 'a1' }));
+      expect(plan.env.SSL_CERT_FILE).toBe('/etc/ssl/cert.pem');
+      expect(plan.env.SSL_CERT_DIR).toBe('/etc/ssl/certs');
+      expect(plan.env.NODE_EXTRA_CA_CERTS).toBe('/etc/extra-ca.pem');
+      expect(plan.env.HTTPS_PROXY).toBe('http://proxy:8080');
+      expect(plan.env.NO_PROXY).toBe('localhost,127.0.0.1');
+      expect(plan.env.http_proxy).toBe('http://proxy:8080');
+      // 继承的非白名单变量仍被剥离
+      expect(plan.env.NODE_OPTIONS).toBeUndefined();
+      expect(plan.env.NODE_PATH).toBeUndefined();
+      expect(plan.env.DEV_API_KEY).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

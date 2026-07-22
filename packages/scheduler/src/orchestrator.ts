@@ -838,6 +838,15 @@ export class Orchestrator extends EventEmitter {
     this.emit('task-canceled', { taskId });
   }
 
+  /**
+   * 应用退出前受控停止所有活跃任务（设计 §15）：终止 Pi 进程组并封存 journal，
+   * 把任务稳定退回 ready，供下次启动 recover() 处理。幂等、best-effort（单个任务异常不阻塞其余）。
+   */
+  async shutdown(): Promise<void> {
+    const taskIds = [...this.active.keys()];
+    await Promise.all(taskIds.map((id) => this.cancel(id).catch(() => undefined)));
+  }
+
   /** 显式重试。 */
   async retry(taskId: string): Promise<void> {
     const task = this.repos.tasks.get(taskId);

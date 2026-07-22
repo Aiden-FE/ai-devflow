@@ -4,7 +4,7 @@ import { app } from 'electron';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
 import type { ProviderSummary } from '@ai-devflow/core';
-import { PiProcessSupervisor, type AgentRunner } from '@ai-devflow/agents';
+import { PiProcessSupervisor, buildControlledPath, type AgentRunner } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
@@ -98,7 +98,7 @@ export function createServices(notifier: Notifier): Services {
       router: piRuntime.router,
       supervisor: new PiProcessSupervisor(),
       sessionsBaseDir: join(userData, 'pi-runtime', 'sessions'),
-      projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
+      projectToolPath: buildControlledPath(),
     }),
   );
   let services: Services | undefined;
