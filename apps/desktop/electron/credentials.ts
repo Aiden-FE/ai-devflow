@@ -24,22 +24,13 @@ export function decryptSecret(stored: string): string {
 }
 
 /**
- * 安全存储后端是否真正加密：不可用或 Linux 选用 'basic_text'（明文落盘）均视为不安全。
- * getSelectedStorageBackend 在部分 Electron/平台可能不存在，做可选调用。
- */
-function secureBackendAvailable(): boolean {
-  if (!safeStorage.isEncryptionAvailable()) return false;
-  const backend = (safeStorage as unknown as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend?.();
-  if (backend === 'basic_text') return false;
-  return true;
-}
-
-/**
  * 严格加密 Provider API Key：安全存储不可用（或 Linux basic_text 明文后端）时抛错，绝不写明文。
  * 与 encryptSecret 不同——后者会退回 base64 占位；Provider 密钥不允许任何明文落盘。
  */
 export function encryptProviderSecret(plain: string): string {
-  if (!secureBackendAvailable()) throw new Error('安全存储不可用');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('安全存储不可用：isEncryptionAvailable=false');
+  const backend = (safeStorage as unknown as { getSelectedStorageBackend?: () => string }).getSelectedStorageBackend?.();
+  if (backend === 'basic_text') throw new Error(`安全存储不可用：backend=${backend}（缺少 libsecret 或 D-Bus 会话）`);
   return 'enc:' + safeStorage.encryptString(plain).toString('base64');
 }
 

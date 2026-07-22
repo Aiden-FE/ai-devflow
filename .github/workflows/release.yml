@@ -182,7 +182,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y dbus-x11 gnome-keyring xvfb
+          sudo apt-get install -y dbus-x11 gnome-keyring xvfb libsecret-1-0
+          echo "=== libsecret status ==="
+          dpkg -l | grep -E "libsecret|gnome-keyring" || echo "(none found)"
+          echo "=== DBus session ==="
+          echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<unset>}"
 
       - name: Build desktop (renderer + electron + bundled Pi)
         run: pnpm --filter @ai-devflow/desktop build
@@ -206,7 +210,11 @@ jobs:
             set -euo pipefail
             export XDG_CURRENT_DESKTOP=GNOME
             eval "$(gnome-keyring-daemon --start --components=secrets)"
+            echo "=== Keyring env ==="
+            echo "GNOME_KEYRING_CONTROL=${GNOME_KEYRING_CONTROL:-<unset>}"
             printf "%s" "ai-devflow-smoke" | gnome-keyring-daemon --unlock >/dev/null
+            echo "=== DBUS before xvfb ==="
+            echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<unset>}"
             xvfb-run -a node apps/desktop/scripts/run-e2e.mjs --packaged apps/desktop/release
           '
 
