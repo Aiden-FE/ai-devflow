@@ -67,6 +67,19 @@ describe('ProviderRouter', () => {
     expect(coder[0]?.model).toBe('my-default');
   });
 
+  it('applies per-role default thinking levels for user-configured models', () => {
+    const harness = makeRouterHarness(['p1']);
+    harness.providers[0]!.defaultModel = 'my-default';
+    expect(harness.router.routesFor('planner')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('coder')[0]?.thinking).toBe('xhigh');
+    expect(harness.router.routesFor('reviewer')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('tester')[0]?.thinking).toBe('medium');
+    expect(harness.router.routesFor('task_chat')[0]?.thinking).toBe('medium');
+    expect(harness.router.routesFor('requirement_chat')[0]?.thinking).toBe('medium');
+    expect(harness.router.routesFor('task_proposal')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('requirement_proposal')[0]?.thinking).toBe('high');
+  });
+
   it('skips provider when no model can be resolved for workload', () => {
     const harness = makeRouterHarness(['p1']);
     harness.providers[0]!.defaultModel = undefined;

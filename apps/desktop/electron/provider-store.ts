@@ -103,6 +103,8 @@ export class ProviderStore {
       priority: c.priority,
       authType: c.authType,
       baseURL: c.baseURL,
+      defaultModel: c.defaultModel,
+      workloadModels: c.workloadModels,
       revision: c.revision,
       hasCredential: this.credentials.get(secretKey(c.id)) !== undefined,
       health: hasModelConfig(c) ? 'untested' : 'configuration_error',

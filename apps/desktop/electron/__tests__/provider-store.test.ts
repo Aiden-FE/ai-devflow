@@ -207,4 +207,17 @@ describe('ProviderStore', () => {
     expect(harness.store.list()[0]!.revision).toBe(2);
     expect(harness.cleared).toContain('p1');
   });
+
+  it('round-trips defaultModel and workloadModels through list()', () => {
+    const harness = makeProviderStoreHarness();
+    harness.store.save({
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+      defaultModel: 'gpt-default',
+      workloadModels: { coder: 'coder-model', chat: 'chat-model' },
+    });
+    const summaries = harness.store.list();
+    expect(summaries[0]!.defaultModel).toBe('gpt-default');
+    expect(summaries[0]!.workloadModels).toEqual({ coder: 'coder-model', chat: 'chat-model' });
+  });
 });

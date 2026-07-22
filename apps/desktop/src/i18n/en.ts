@@ -268,6 +268,7 @@ export const en: Record<string, string> = {
   'settings.providers.model.refresh': 'Refresh models',
   'settings.providers.model.refreshing': 'Refreshing…',
   'settings.providers.model.empty': 'No models available',
+  'settings.providers.model.refreshError': 'Failed to refresh models',
   'settings.providers.model.required': 'Please configure a default model or all workload models',
   'settings.providers.migration.ready': '',
   'settings.providers.migration.needs_reentry': 'The legacy provider credential could not be read. Re-enter it to finish migration.',

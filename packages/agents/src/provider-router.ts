@@ -103,8 +103,15 @@ export function resolveModelFor(provider: ProviderConfig, workload: Workload): s
   return provider.workloadModels?.[role] ?? provider.defaultModel;
 }
 
-/** 用户配置模型不携带 thinking 等级；解析路径统一回落到 medium（modelRouteFor 缝可显式覆盖）。 */
-const DEFAULT_THINKING: ModelChoice['thinking'] = 'medium';
+/** 用户配置模型不携带 thinking 等级；按角色回落到默认等级（modelRouteFor 缝可显式覆盖）。 */
+const DEFAULT_THINKING_BY_ROLE: Record<ModelRoleKey, ModelChoice['thinking']> = {
+  planner: 'high',
+  coder: 'xhigh',
+  reviewer: 'high',
+  tester: 'medium',
+  chat: 'medium',
+  proposal: 'high',
+};
 
 function providerNameFor(provider: ProviderConfig): string {
   const base = COMPATIBLE_BASE[provider.kind];
@@ -195,7 +202,7 @@ export class ProviderRouter {
         thinking = seam.primary.thinking;
       } else {
         model = resolveModelFor(provider, workload);
-        thinking = DEFAULT_THINKING;
+        thinking = DEFAULT_THINKING_BY_ROLE[workloadRoleKey(workload)];
       }
       if (model === undefined) continue;
       const providerName = providerNameFor(provider);

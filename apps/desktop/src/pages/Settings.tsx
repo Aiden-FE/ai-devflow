@@ -478,10 +478,13 @@ function ProviderSection(): React.ReactElement {
   const refreshModels = async () => {
     if (!COMPATIBLE_PROVIDER_KINDS.includes(kind)) return;
     setModelLoading(true);
+    setError(undefined);
     try {
       const models = await api.providers.listModels(editing?.id ?? '');
       setAvailableModels(models.map((m) => m.id));
       setModelRefreshed(true);
+    } catch (e) {
+      setError(t('settings.providers.model.refreshError') + (e instanceof Error ? `: ${e.message}` : ''));
     } finally {
       setModelLoading(false);
     }

@@ -84,4 +84,14 @@ describe('normalizeProviderInput', () => {
     expect(result.config.defaultModel).toBeUndefined();
     expect(result.config.workloadModels).toBeDefined();
   });
+
+  it('does not throw when both defaultModel and workloadModels are absent', () => {
+    // No-model detection happens at the health layer, not normalization.
+    const result = normalizeProviderInput({
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'secret', revision: 1,
+    });
+    expect(result.config.defaultModel).toBeUndefined();
+    expect(result.config.workloadModels).toBeUndefined();
+  });
 });

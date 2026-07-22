@@ -268,6 +268,7 @@ export const zh: Record<string, string> = {
   'settings.providers.model.refresh': '刷新模型列表',
   'settings.providers.model.refreshing': '刷新中…',
   'settings.providers.model.empty': '未获取到可用模型',
+  'settings.providers.model.refreshError': '刷新模型失败',
   'settings.providers.model.required': '请配置默认模型或所有 workload 模型',
   'settings.providers.migration.ready': '',
   'settings.providers.migration.needs_reentry': '旧版服务商凭证无法读取，请重新录入以完成迁移。',
