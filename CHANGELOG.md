@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- accept Windows absolute paths in validateLocalPath; keep E2E non-blocking for release（0c7799a）
 - remove non-deterministic openrouter/openai models from gate; add post-packaging symlink normalization for Windows（bad553b）
 - remove non-deterministic openrouter/gpt-5.6-sol from catalog gate; set fail-fast false in smoke matrix（1075202）
 - start xvfb before gnome-keyring for E2E on Linux CI（a8d32d3）
@@ -47,6 +48,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
 
 ### 其他变更
+- make E2E steps non-blocking for release (Pi verification already gates)（1153851）
 - add diagnostic model list to pi-catalog-gate on failure（d191230）
 - print expected/actual symlink target on verify mismatch（46c155f）
 - add directory listing diagnostics to verify-packaged-pi on missing executable（202e9af）
