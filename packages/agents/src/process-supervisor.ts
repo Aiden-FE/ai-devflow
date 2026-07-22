@@ -18,6 +18,49 @@ export interface SpawnedPi {
   pid?: number;
 }
 
+export type RawOutputObserver = (stream: RawLine['stream'], chunk: Buffer) => void;
+
+export interface SpawnPiOptions {
+  cwd: string;
+  timeoutMs: number;
+  secrets?: string[];
+  /** Receives child bytes before UTF-8 decoding, line framing, redaction, or persistence. */
+  onRawOutput?: RawOutputObserver;
+}
+
+/** Streaming exact-secret detector. It exposes only a boolean and never stores complete output. */
+export class RawSecretDetector {
+  private readonly needles: Buffer[];
+  private readonly maxTailBytes: number;
+  private readonly tails = new Map<RawLine['stream'], Buffer>();
+  private found = false;
+
+  constructor(secrets: string[]) {
+    this.needles = secrets.filter(Boolean).map((secret) => Buffer.from(secret, 'utf8'));
+    this.maxTailBytes = Math.max(0, ...this.needles.map((needle) => needle.byteLength - 1));
+  }
+
+  get detected(): boolean {
+    return this.found;
+  }
+
+  observe(stream: RawLine['stream'], chunk: Buffer): void {
+    if (this.found || this.needles.length === 0 || chunk.byteLength === 0) return;
+    const previous = this.tails.get(stream);
+    const combined = previous?.byteLength ? Buffer.concat([previous, chunk]) : chunk;
+    if (this.needles.some((needle) => combined.includes(needle))) {
+      this.found = true;
+      this.tails.clear();
+      return;
+    }
+    if (this.maxTailBytes > 0) {
+      const start = Math.max(0, combined.byteLength - this.maxTailBytes);
+      // Copy only the bounded suffix; a subarray would retain the entire raw chunk's backing store.
+      this.tails.set(stream, Buffer.from(combined.subarray(start)));
+    }
+  }
+}
+
 export type SpawnFn = (
   command: string,
   args: string[],
@@ -45,7 +88,7 @@ export class PiProcessSupervisor {
     this.systemRoot = opts.systemRoot ?? process.env.SystemRoot ?? 'C:\\Windows';
   }
 
-  spawn(plan: PiRunPlan, opts: { cwd: string; timeoutMs: number; secrets?: string[] }): SpawnedPi {
+  spawn(plan: PiRunPlan, opts: SpawnPiOptions): SpawnedPi {
     const secrets = opts.secrets ?? [];
     const detached = this.platform !== 'win32';
     const child = this.spawnFn(plan.command, plan.args, {
@@ -143,7 +186,11 @@ export class PiProcessSupervisor {
     };
     const pump = async (stream: NodeJS.ReadableStream | null, kind: RawLine['stream']): Promise<void> => {
       try {
-        for await (const raw of lineStream(stream, overflow)) {
+        for await (const raw of lineStream(
+          stream,
+          overflow,
+          (chunk) => opts.onRawOutput?.(kind, chunk),
+        )) {
           if (kind === 'stdout') {
             push({ stream: kind, text: raw });
           } else if (stderrBytes < STDERR_LIMIT) {
@@ -207,6 +254,7 @@ function makeLineRedactor(secrets: string[]): (text: string) => string {
 async function* lineStream(
   stream: NodeJS.ReadableStream | null,
   onOverflow: () => void,
+  onRawChunk?: (chunk: Buffer) => void,
 ): AsyncIterable<string> {
   if (!stream) return;
   const decoder = new StringDecoder('utf8');
@@ -218,7 +266,9 @@ async function* lineStream(
     }
   };
   for await (const chunk of stream as unknown as AsyncIterable<Buffer | string>) {
-    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk);
+    onRawChunk?.(bytes);
+    buffer += decoder.write(bytes);
     let newline: number;
     while ((newline = buffer.indexOf('\n')) >= 0) {
       const line = buffer.slice(0, newline).replace(/\r$/, '');

@@ -5,7 +5,12 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { PiProcessSupervisor, type RawLine, type SpawnFn } from '../process-supervisor.js';
+import {
+  PiProcessSupervisor,
+  RawSecretDetector,
+  type RawLine,
+  type SpawnFn,
+} from '../process-supervisor.js';
 import { ORPHAN_MARKER } from '../orphan-processes.js';
 import type { PiRunPlan } from '../run-plan.js';
 
@@ -108,6 +113,30 @@ describe('PiProcessSupervisor framing', () => {
     expect(JSON.stringify(result)).not.toContain('exact-secret');
     expect(JSON.stringify(result)).not.toContain('abcdefghijklmnop');
     expect(result[0]?.text).toContain('***');
+  });
+
+  it('detects a secret split across raw chunks before stderr redaction', async () => {
+    const child = new FakeChild();
+    const detector = new RawSecretDetector(['exact-secret']);
+    const supervisor = new PiProcessSupervisor({
+      spawnFn: () => child as unknown as ChildProcess,
+    });
+    const spawned = supervisor.spawn(PLAN, {
+      cwd: '/tmp',
+      timeoutMs: 30_000,
+      secrets: ['exact-secret'],
+      onRawOutput: (stream, chunk) => detector.observe(stream, chunk),
+    });
+    const lines = collect(spawned.lines);
+    child.stdout.end();
+    child.stderr.write('prefix exact-');
+    child.stderr.end('secret suffix\n');
+    child.emit('exit', 0, null);
+    child.emit('close', 0, null);
+
+    const result = await lines;
+    expect(detector.detected).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('exact-secret');
   });
 
   it('captures child spawn errors and rejects done without an unhandled error event', async () => {

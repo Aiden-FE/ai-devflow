@@ -45,8 +45,11 @@ export {
 } from './attempt-journal.js';
 export {
   PiProcessSupervisor,
+  RawSecretDetector,
   type SpawnedPi,
   type SpawnFn,
+  type SpawnPiOptions,
+  type RawOutputObserver,
   type RawLine as SupervisorRawLine,
   type ProcessSupervisorOptions,
 } from './process-supervisor.js';

@@ -33,6 +33,7 @@ import {
   ProfileMaterializer,
   ProjectInstructionLoader,
   ProviderRouter,
+  RawSecretDetector,
   isCompatibleKind,
   type ExecutionAttemptStore,
   type PiRunPlan,
@@ -66,6 +67,10 @@ interface RunResult {
   events: AgentEvent[];
   ok: boolean;
   exitCode: number | null;
+}
+
+interface RawLeakState {
+  detected: boolean;
 }
 
 class ArtifactAttemptStore implements ExecutionAttemptStore {
@@ -140,6 +145,7 @@ class CapturingSupervisor extends PiProcessSupervisor {
   constructor(
     private captureRoot: string,
     private captures: SpawnCapture[],
+    private rawLeakState: RawLeakState,
   ) {
     super();
     mkdirSync(captureRoot, { recursive: true });
@@ -149,7 +155,17 @@ class CapturingSupervisor extends PiProcessSupervisor {
     plan: PiRunPlan,
     opts: Parameters<PiProcessSupervisor['spawn']>[1],
   ): SpawnedPi {
-    const spawned = super.spawn(plan, opts);
+    const exactSecrets = opts.secrets ?? [];
+    const detector = new RawSecretDetector(exactSecrets);
+    const existingObserver = opts.onRawOutput;
+    const spawned = super.spawn(plan, {
+      ...opts,
+      onRawOutput: (stream, chunk) => {
+        existingObserver?.(stream, chunk);
+        detector.observe(stream, chunk);
+        if (detector.detected) this.rawLeakState.detected = true;
+      },
+    });
     const executionId = plan.env.AI_DEVFLOW_EXECUTION_ID ?? 'unknown';
     const attemptId = plan.env.AI_DEVFLOW_ATTEMPT_ID ?? 'unknown';
     const safeName = `${executionId}-${attemptId}`.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -161,7 +177,6 @@ class CapturingSupervisor extends PiProcessSupervisor {
       configDir: plan.env.PI_CODING_AGENT_DIR ?? '',
       sessionDir: plan.env.PI_CODING_AGENT_SESSION_DIR ?? '',
     });
-    const exactSecrets = opts.secrets ?? [];
     const safe = (text: string): string => {
       let value = text;
       for (const secret of exactSecrets) if (secret) value = value.split(secret).join('***');
@@ -186,6 +201,7 @@ class CapturingSupervisor extends PiProcessSupervisor {
 let locator: BundledPiLocator;
 let attempts: ArtifactAttemptStore;
 const captures: SpawnCapture[] = [];
+const rawLeakState: RawLeakState = { detected: false };
 
 function devKind(): ProviderKind {
   const raw = (process.env.DEV_API_TYPE ?? '').trim() as ProviderKind;
@@ -230,6 +246,7 @@ async function closedLoopbackBaseURL(): Promise<string> {
 function makeGitFixture(name: string): string {
   const dir = join(ARTIFACT_ROOT, 'fixtures', name);
   mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(dir, 'docs'), { recursive: true });
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   execFileSync('git', ['config', 'user.email', 'real-pi@example.invalid'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Real Pi Gate'], { cwd: dir });
@@ -270,7 +287,7 @@ function makeRunner(name: string, providers: ProviderConfig[]): PiRunner {
     locator,
     router,
     materializer: new ProfileMaterializer(ASSETS_ROOT, join(root, 'profiles')),
-    supervisor: new CapturingSupervisor(join(root, 'streams'), captures),
+    supervisor: new CapturingSupervisor(join(root, 'streams'), captures, rawLeakState),
     sessionsBaseDir: join(root, 'sessions'),
     projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
     instructionLoader: new ProjectInstructionLoader(),
@@ -319,6 +336,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
 
   afterAll(() => {
     attempts?.close();
+    expect(rawLeakState.detected, 'raw child output must not contain the provider secret').toBe(false);
     // Deliberately retain every artifact until scripts/run-real-pi-test.mjs finishes scanning.
   });
 
@@ -326,10 +344,15 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const cwd = makeGitFixture('all-roles');
     const runner = makeRunner('all-roles', [provider('real-all-roles', 0)]);
 
-    expectSuccessful(await execute(runner, {
+    const planner = await execute(runner, {
       taskId: 'role-planner', executionId: 'role-planner', role: 'planner', cwd,
-      prompt: 'Read README.md without modifying files. Then call ai_devflow_report_result exactly once with a concise plan, a non-empty verification array, changedFiles=[], and unresolved=[].',
-    }), 'planner');
+      prompt: 'Use the write tool to create docs/planner-output.md with exactly this one line: Authorized planner documentation. Do not modify any other file. Then call ai_devflow_report_result exactly once with a concise plan, a non-empty verification array, changedFiles=["docs/planner-output.md"], and unresolved=[].',
+    });
+    expectSuccessful(planner, 'planner');
+    expect(readFileSync(join(cwd, 'docs', 'planner-output.md'), 'utf8').trim())
+      .toBe('Authorized planner documentation.');
+    expect(execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd, encoding: 'utf8' }).trim())
+      .toBe('?? docs/planner-output.md');
 
     expectSuccessful(await execute(runner, {
       taskId: 'role-coder', executionId: 'role-coder', role: 'coder', cwd,
