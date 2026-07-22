@@ -18,11 +18,14 @@ export interface ModelChoice {
 
 export interface ProviderRoute {
   providerId: string;
+  providerRevision: number;
   providerKind: ProviderKind;
   /** 传给 Pi 的 provider 名（标准提供商为 catalog 名；兼容网关为生成的 ai-devflow-<hash>）。 */
   providerName: string;
   routeId: string;
   model: string;
+  /** 当前 workload 在该提供商下的完整 primary/fallback 模型集合。 */
+  models: string[];
   thinking: ModelChoice['thinking'];
   baseURL?: string;
   secret: string;
@@ -200,6 +203,8 @@ export class ProviderRouter {
       const modelRoute = base ? MODEL_TABLE[base][roleKey] : undefined;
       if (!modelRoute) continue;
       const providerName = providerNameFor(provider);
+      const models = [modelRoute.primary.model, modelRoute.fallback?.model]
+        .filter((model): model is string => model !== undefined);
       const tiers: Array<['primary' | 'fallback', ModelChoice | undefined]> = [
         ['primary', modelRoute.primary],
         ['fallback', modelRoute.fallback],
@@ -214,10 +219,12 @@ export class ProviderRouter {
         candidates.push({
           route: {
             providerId: provider.id,
+            providerRevision: provider.revision,
             providerKind: provider.kind,
             providerName,
             routeId,
             model: choice.model,
+            models,
             thinking: choice.thinking,
             baseURL: provider.baseURL,
             secret,

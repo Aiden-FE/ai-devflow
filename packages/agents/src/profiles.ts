@@ -4,7 +4,16 @@
 // 工具/技能/超时表；用户不能覆盖。ProfileMaterializer 把只读内置资源复制到内容寻址快照目录
 // （provider/应用配置变化 → 新快照 → 原子切换；已有进程继续用旧快照，避免并发写与配置漂移）。
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { ProviderKind, TaskRole } from '@ai-devflow/core';
 
@@ -127,9 +136,12 @@ export class ProfileMaterializer {
     const key = JSON.stringify({
       role: input.role,
       profileVersion: profile.version,
+      providerId: input.providerId,
       providerKind: input.providerKind,
+      providerName: input.providerName,
       providerRevision: input.providerRevision,
       baseURL: input.baseURL ?? null,
+      models: [...new Set(input.models)].sort(),
     });
     return createHash('sha256').update(key).digest('hex').slice(0, 16);
   }
@@ -137,21 +149,92 @@ export class ProfileMaterializer {
   materialize(input: MaterializeInput): { profileDir: string; digest: string } {
     const digest = this.digest(input);
     const profileDir = join(this.baseDir, 'profiles', digest, input.role);
-    if (existsSync(join(profileDir, '.complete'))) return { profileDir, digest };
+    if (validateSnapshot(profileDir, digest)) return { profileDir, digest };
     const tmp = `${profileDir}.tmp-${randomBytes(4).toString('hex')}`;
     mkdirSync(join(this.baseDir, 'profiles', digest), { recursive: true });
-    cpSync(join(this.assetsRoot, input.role), tmp, { recursive: true });
-    const extDir = join(tmp, 'extensions');
-    mkdirSync(extDir, { recursive: true });
-    for (const ext of BUILTIN_EXTENSIONS) {
-      const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
-      if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
+    try {
+      cpSync(join(this.assetsRoot, input.role), tmp, { recursive: true });
+      const extDir = join(tmp, 'extensions');
+      mkdirSync(extDir, { recursive: true });
+      for (const ext of BUILTIN_EXTENSIONS) {
+        const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
+        if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
+      }
+      if (isCompatibleKind(input.providerKind)) {
+        writeFileSync(
+          join(tmp, 'models.json'),
+          buildCompatibleModelsJson(
+            input.providerName,
+            input.providerKind,
+            input.baseURL,
+            [...new Set(input.models)].sort(),
+          ),
+        );
+      }
+      const contentDigest = snapshotContentDigest(tmp);
+      writeFileSync(join(tmp, '.complete'), JSON.stringify({ digest, contentDigest }));
+      publishSnapshot(tmp, profileDir, digest);
+    } finally {
+      if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
     }
-    if (isCompatibleKind(input.providerKind)) {
-      writeFileSync(join(tmp, 'models.json'), buildCompatibleModelsJson(input.providerName, input.providerKind, input.baseURL, input.models));
-    }
-    renameSync(tmp, profileDir);
-    writeFileSync(join(profileDir, '.complete'), digest);
     return { profileDir, digest };
+  }
+}
+
+function snapshotContentDigest(root: string): string {
+  const hash = createHash('sha256');
+  const visit = (relative: string): void => {
+    const absolute = relative ? join(root, relative) : root;
+    for (const entry of readdirSync(absolute, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!relative && entry.name === '.complete') continue;
+      const child = relative ? join(relative, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        hash.update(`d:${child}\0`);
+        visit(child);
+      } else if (entry.isFile()) {
+        hash.update(`f:${child}\0`);
+        hash.update(readFileSync(join(root, child)));
+      } else {
+        throw new Error(`角色快照包含不支持的文件类型：${child}`);
+      }
+    }
+  };
+  visit('');
+  return hash.digest('hex');
+}
+
+function validateSnapshot(profileDir: string, digest: string): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(profileDir, '.complete'), 'utf8')) as {
+      digest?: string;
+      contentDigest?: string;
+    };
+    return marker.digest === digest && marker.contentDigest === snapshotContentDigest(profileDir);
+  } catch {
+    return false;
+  }
+}
+
+/** Publish a fully completed candidate; a concurrent valid winner is reused after byte validation. */
+function publishSnapshot(tmp: string, profileDir: string, digest: string): void {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      renameSync(tmp, profileDir);
+      return;
+    } catch (error) {
+      if (!existsSync(profileDir)) throw error;
+      if (validateSnapshot(profileDir, digest)) return;
+
+      const invalid = `${profileDir}.invalid-${randomBytes(4).toString('hex')}`;
+      try {
+        renameSync(profileDir, invalid);
+        rmSync(invalid, { recursive: true, force: true });
+      } catch {
+        // Another publisher may have replaced/quarantined the same invalid directory; retry and validate it.
+      }
+    }
+  }
+  if (!validateSnapshot(profileDir, digest)) {
+    throw new Error('角色配置快照发布冲突且获胜内容无效');
   }
 }

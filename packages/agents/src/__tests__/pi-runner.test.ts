@@ -90,6 +90,22 @@ it('verifies the runtime via the locator', async () => {
   expect(verified.entry).toBe(harness.fakePiEntry);
 });
 
+it('materializes with the real provider revision and complete primary/fallback model set', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'profile-identity', role: 'coder', prompt: 'p', cwd: harness.cwd,
+  });
+  await collect(run.events);
+  expect((await run.done()).ok).toBe(true);
+  expect(harness.materializedProfiles).toEqual([
+    expect.objectContaining({
+      providerId: 'p1',
+      providerRevision: 7,
+      models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+    }),
+  ]);
+});
+
 it('uses globally unique attempt ids for repeated same-role executions', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   for (const executionId of ['execution-a', 'execution-b']) {

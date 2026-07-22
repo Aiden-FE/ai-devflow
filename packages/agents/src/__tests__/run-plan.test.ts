@@ -11,8 +11,8 @@ function valueAfter(args: string[], flag: string): string | undefined {
 
 function makeRunPlanFixture(ids: { role: TaskRole; executionId: string; attemptId: string }): PiRunPlanInput {
   const route: ProviderRoute = {
-    providerId: 'p1', providerKind: 'openai', providerName: 'openai', routeId: `p1:${ids.role}:primary`,
-    model: 'gpt-5.6-sol', thinking: 'high', secret: 'route-secret',
+    providerId: 'p1', providerRevision: 1, providerKind: 'openai', providerName: 'openai', routeId: `p1:${ids.role}:primary`,
+    model: 'gpt-5.6-sol', models: ['gpt-5.6-sol', 'gpt-5.6-terra'], thinking: 'high', secret: 'route-secret',
   };
   return {
     runtimeEntry: '/app/resources/pi-runtime/cli.js',

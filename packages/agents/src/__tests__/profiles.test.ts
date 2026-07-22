@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,47 @@ describe('ProfileMaterializer', () => {
     // provider revision change → new content-addressed snapshot
     const c = m.materialize({ ...input, providerRevision: 2 });
     expect(c.profileDir).not.toBe(a.profileDir);
+  });
+
+  it('keys snapshots by provider identity and the sorted complete model set', () => {
+    const base = mkdtempSync(join(tmpdir(), 'profiles-'));
+    const m = new ProfileMaterializer(ASSETS_ROOT, base);
+    const input = {
+      role: 'coder' as const,
+      providerId: 'provider-a',
+      providerKind: 'openai_compatible' as const,
+      providerRevision: 7,
+      baseURL: 'https://gw.example/v1',
+      providerName: 'ai-devflow-provider-a',
+      models: ['fallback-model', 'primary-model'],
+    };
+
+    const digest = m.digest(input);
+    expect(m.digest({ ...input, models: [...input.models].reverse() })).toBe(digest);
+    expect(m.digest({ ...input, providerId: 'provider-b' })).not.toBe(digest);
+    expect(m.digest({ ...input, providerName: 'ai-devflow-provider-b' })).not.toBe(digest);
+    expect(m.digest({ ...input, models: ['primary-model'] })).not.toBe(digest);
+  });
+
+  it('rejects and replaces a completed snapshot whose contents no longer validate', () => {
+    const base = mkdtempSync(join(tmpdir(), 'profiles-'));
+    const m = new ProfileMaterializer(ASSETS_ROOT, base);
+    const input = {
+      role: 'coder' as const,
+      providerId: 'p1',
+      providerKind: 'openai_compatible' as const,
+      providerRevision: 1,
+      baseURL: 'https://gw.example/v1',
+      providerName: 'ai-devflow-0123456789ab',
+      models: ['primary-model', 'fallback-model'],
+    };
+    const first = m.materialize(input);
+    writeFileSync(join(first.profileDir, 'models.json'), '{"tampered":true}');
+
+    const second = m.materialize(input);
+    expect(second.profileDir).toBe(first.profileDir);
+    expect(readFileSync(join(second.profileDir, 'models.json'), 'utf8')).toContain('fallback-model');
+    expect(readFileSync(join(second.profileDir, '.complete'), 'utf8')).toContain(first.digest);
   });
 
   it('materializes all four roles distinctly', () => {

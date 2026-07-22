@@ -135,10 +135,10 @@ export class PiRunner implements AgentRunner {
       role: request.role,
       providerId: route.providerId,
       providerKind: route.providerKind,
-      providerRevision: 1,
+      providerRevision: route.providerRevision,
       baseURL: route.baseURL,
       providerName: route.providerName,
-      models: [route.model],
+      models: route.models,
     });
 
     // 接管上下文：仅当前一尝试已产生副作用时注入（mutation 后接管，§10）。

@@ -42,10 +42,12 @@ function devRoute(routeId: string): ProviderRoute {
   const providerName = isCompatibleKind(kind) ? 'ai-devflow-devtest0001' : kind;
   return {
     providerId: 'dev',
+    providerRevision: 1,
     providerKind: kind,
     providerName,
     routeId,
     model: process.env.DEV_API_DEFAULT_MODEL!,
+    models: [process.env.DEV_API_DEFAULT_MODEL!],
     thinking: 'medium',
     baseURL,
     secret: process.env.DEV_API_KEY!,
@@ -87,10 +89,10 @@ async function runRealAttempt(opts: {
     role: opts.role,
     providerId: opts.route.providerId,
     providerKind: opts.route.providerKind,
-    providerRevision: 1,
+    providerRevision: opts.route.providerRevision,
     baseURL: opts.route.baseURL,
     providerName: opts.route.providerName,
-    models: [opts.route.model],
+    models: opts.route.models,
   });
   const sessionDir = join(opts.cwd, '.pi-runtime', 'sessions', opts.executionId, opts.attemptId);
   mkdirSync(join(sessionDir, 'home'), { recursive: true });
@@ -187,7 +189,7 @@ describe.skipIf(!HAVE_KEY)('real bundled pi provider e2e', () => {
     // 确定失败的候选：指向本地关闭端口的兼容网关。
     const badRoute: ProviderRoute = {
       providerId: 'bad', providerKind: 'openai_compatible', providerName: 'ai-devflow-deadbeef0001',
-      routeId: 'bad:coder:primary', model: 'unused-model', thinking: 'medium',
+      providerRevision: 1, routeId: 'bad:coder:primary', model: 'unused-model', models: ['unused-model'], thinking: 'medium',
       baseURL: 'http://127.0.0.1:59999/v1', secret: 'dead-secret',
     };
     const bad = await runRealAttempt({ role: 'coder', prompt: 'noop', cwd, route: badRoute, executionId: 'exec-fo', attemptId: 'attempt-01' });
