@@ -11,10 +11,13 @@
 // - createUpdater 支持注入 autoUpdater 加载器与 quitAndInstall 副作用，便于对状态机与事件做单元测试
 //   （开发环境 no-op 不再作为唯一验收依据）。
 //
-// 关键修复（未签名 macOS 无法自动安装）：
-// - Squirrel.Mac 要求应用已代码签名；未签名应用调用 quitAndInstall 会静默失败或无限等待。
-// - 在 darwin + app.isPackaged 时检测当前 .app bundle 签名；未签名/检测异常时改为打开 GitHub Releases
-//   手动下载，不进入 installing，保持 downloaded 状态允许再次点击。
+// 关键修复（macOS 未公证应用无法自动安装）：
+// - Squirrel.Mac 要求应用由相同开发者身份签名；未签名或 Ad hoc 签名的应用调用 quitAndInstall
+//   会静默失败或无限等待。本项目 macOS 官方发版采用 Ad hoc（无证书）签名（见 scripts/ad-hoc-sign.mjs），
+//   Ad hoc 签名虽能通过 codesign --verify，但无开发者身份/DR，Squirrel.Mac 无法自动安装更新。
+// - 在 darwin + app.isPackaged 时检测当前 .app bundle 是否由真实开发者身份签名（有 Authority=）；
+//   未签名 / Ad hoc / 检测异常时改为打开 GitHub Releases 手动下载，不进入 installing，
+//   保持 downloaded 状态允许再次点击。
 // - 安装请求发起后增加可注入超时；异步 error 或超时时从 installing 回到可恢复 error，并清理计时器。
 import { app, shell } from 'electron';
 import { execFile } from 'node:child_process';
@@ -98,16 +101,32 @@ function deriveAppBundlePath(execPath: string): string | undefined {
   return undefined;
 }
 
-/** 默认 macOS 签名检测：使用参数数组调用 /usr/bin/codesign，退出码 0 视为已签名。 */
-async function defaultCheckSignature(appPath: string): Promise<boolean> {
+/** 默认 macOS 签名检测：仅当 bundle 通过严格校验且由真实开发者身份（非 Ad hoc / linker-signed）签名时返回 true。
+ *  Ad hoc 签名（本项目 macOS 官方发版方式）虽能通过 codesign --verify，但 Squirrel.Mac 无法对其自动安装更新
+ *  （需要相同开发者身份/DR），故识别为「不可自动安装」-> 返回 false -> 走 GitHub Releases 手动下载。
+ *  导出以供单元测试覆盖 Ad hoc 判定（生产经打包冒烟 E2E 间接验证）。 */
+export async function defaultCheckSignature(appPath: string): Promise<boolean> {
   if (process.platform !== 'darwin' || !appPath) return false;
-  return new Promise((resolve) => {
+  // 1) 结构合法性校验（Ad hoc 签名也能通过此校验）。
+  const verified = await new Promise<boolean>((resolve) => {
     execFile(
       '/usr/bin/codesign',
       ['--verify', '--deep', '--strict', '--verbose=2', appPath],
       (err) => resolve(err === null),
     );
   });
+  if (!verified) return false;
+  // 2) 必须为真实开发者身份：仅真实证书带 `Authority=` 行；Ad hoc / linker-signed 均无 Authority。
+  //    codesign 诊断信息输出到 stderr，合并判断。
+  const info = await new Promise<string>((resolve) => {
+    execFile(
+      '/usr/bin/codesign',
+      ['-dv', '--verbose=4', appPath],
+      (err, stdout, stderr) => resolve(err ? '' : `${stdout ?? ''}\n${stderr ?? ''}`),
+    );
+  });
+  if (/Signature\s*=\s*adhoc/i.test(info)) return false;
+  return /Authority=/.test(info);
 }
 
 /**

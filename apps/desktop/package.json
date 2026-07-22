@@ -30,6 +30,7 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "npmRebuild": false,
+    "afterSign": "scripts/ad-hoc-sign.mjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -108,9 +109,6 @@
     "@ai-devflow/notifications": "workspace:*",
     "@ai-devflow/persistence": "workspace:*",
     "@ai-devflow/scheduler": "workspace:*",
-    "@ai-sdk/anthropic": "^1.0.0",
-    "@ai-sdk/openai": "^1.0.0",
-    "ai": "^4.0.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
     "electron-updater": "^6.3.9",

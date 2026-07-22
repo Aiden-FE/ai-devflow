@@ -15,11 +15,14 @@ name: release
 #
 # 必需 Secrets（仓库 Settings → Secrets → Actions）：
 #   - RELEASE_TOKEN: 具备 contents:write 的 fine-grained / PAT，用于推送 tag 与创建 Release、上传构件。
-# 可选 Secrets（签名/公证，仅 macOS 正式分发需要；缺失则产出未签名安装包，
-# 未签名 macOS 只能检测、下载更新，无法自动安装，需通过 GitHub Releases 手动下载并安装）：
-#   - MAC_CERTS: base64 编码的 .p12 证书（CSC_LINK 内容）
-#   - MAC_CERTS_PASSWORD: .p12 密码
-#   - APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID: 公证凭据
+# macOS 分发采用 Ad hoc（无证书）签名：
+#   - 不需要任何 Apple 付费开发者证书 / 公证凭据。构建时关闭 electron-builder 身份自动发现
+#     （CSC_IDENTITY_AUTO_DISCOVERY=false），由 afterSign 钩子 scripts/ad-hoc-sign.mjs 用 Ad hoc 身份
+#     （`-`）整体封装 .app bundle。
+#   - 产物未经公证，Gatekeeper 会隔离；用户首次运行需执行
+#     `xattr -d com.apple.quarantine /Applications/ai-devflow.app` 放行（见 README 安装说明）。
+#   - Ad hoc 应用无法被 Squirrel.Mac 自动安装更新（需相同开发者身份），应用内「立即升级」会引导
+#     用户到 GitHub Releases 手动下载新版（updater.ts 检测到 Ad hoc 即走手动下载分支）
 #
 # 三平台预期构件（publish 会逐一校验）：
 #   - macOS:  ai-devflow-<v>-mac-x64.dmg / -mac-arm64.dmg / -mac-x64.zip / -mac-arm64.zip / latest-mac.yml / *.blockmap
@@ -29,7 +32,7 @@ name: release
 # 验证流程：
 #   1. 触发后在本仓库 Releases 看到 vX.Y.Z 与三平台安装包及 latest*.yml / blockmap。
 #   2. 本地安装旧版（package.json version 低于 X.Y.Z），启动后 electron-updater 检查到更新并下载。
-#      Windows / Linux / 已签名 macOS 点击“立即升级”完成自动升级；未签名 macOS 会打开 GitHub Releases，
+#      Windows / Linux 点击“立即升级”完成自动升级；Ad hoc 签名的 macOS 会打开 GitHub Releases，
 #      需手动下载对应架构包并安装（见 docs/architecture.md §11）。
 
 on:
@@ -260,25 +263,12 @@ jobs:
       - name: Build installers + updater metadata (no publish)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          MAC_CERTS: ${{ secrets.MAC_CERTS }}
-          MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # 仅 macOS 需要签名凭据：提供了才导出 CSC_*，否则关闭签名身份自动发现，产出未签名构件。
+          # macOS 官方发版采用 Ad hoc（无证书）签名：关闭 electron-builder 身份自动发现，
+          # 由 afterSign 钩子（scripts/ad-hoc-sign.mjs）用 Ad hoc 身份封装 .app bundle。
+          # 产物未经公证，用户首次运行需执行 `xattr -d com.apple.quarantine` 放行（见 README 安装说明）。
           if [ "${{ matrix.platform }}" = "mac" ]; then
-            if [ -n "$MAC_CERTS" ]; then
-              export CSC_LINK="$MAC_CERTS"
-              export CSC_KEY_PASSWORD="$MAC_CERTS_PASSWORD"
-            else
-              export CSC_IDENTITY_AUTO_DISCOVERY=false
-            fi
-            if [ -n "$APPLE_ID" ]; then
-              export APPLE_ID="$APPLE_ID"
-              export APPLE_APP_SPECIFIC_PASSWORD="$APPLE_APP_SPECIFIC_PASSWORD"
-              export APPLE_TEAM_ID="$APPLE_TEAM_ID"
-            fi
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
           fi
           # --publish never：构建安装包 + blockmap + latest*.yml，但不创建/上传 Release（统一由 publish 阶段发布）。
           pnpm --filter @ai-devflow/desktop dist

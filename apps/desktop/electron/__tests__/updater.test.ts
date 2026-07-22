@@ -7,7 +7,13 @@ vi.mock('electron', () => ({
   shell: { openExternal: vi.fn() },
 }));
 
-import { createUpdater, MANUAL_DOWNLOAD_URL, type AutoUpdaterLike } from '../updater.js';
+// defaultCheckSignature 通过 execFile 调用真实 codesign；测试中桩掉以覆盖 Ad hoc 判定。
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
+}));
+
+import { createUpdater, defaultCheckSignature, MANUAL_DOWNLOAD_URL, type AutoUpdaterLike } from '../updater.js';
+import { execFile } from 'node:child_process';
 import type { UpdateStatus } from '@ai-devflow/core';
 
 /** 可控 autoUpdater 桩：记录事件处理器，支持手动触发事件与断言 quitAndInstall。 */
@@ -246,5 +252,65 @@ describe('updater (dev / not packaged)', () => {
     const r = await updater.installUpdate();
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy(); // 开发环境也给出可见信息，而非静默
+  });
+});
+
+describe('defaultCheckSignature (Ad hoc 检测)', () => {
+  const realPlatform = process.platform;
+
+  beforeEach(() => {
+    // defaultCheckSignature 仅在 darwin 调用 codesign；强制平台以在任意 CI OS 上可测。
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+    vi.mocked(execFile).mockReset();
+  });
+
+  /** 桩 codesign 两次调用：`--verify`（结构校验）与 `-dv`（身份信息）。 */
+  function mockCodesign(result: { verifyOk: boolean; info: string }) {
+    // execFile 具多重载，mockImplementation 需宽松匹配（lint=tsc，允许显式 any）。
+    const impl = (
+      _file: string,
+      args: readonly string[],
+      cb: (err: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      if (args.includes('--verify')) {
+        cb(result.verifyOk ? null : new Error('not signed'), '', '');
+      } else if (args.includes('-dv')) {
+        cb(null, '', result.info);
+      } else {
+        cb(new Error('unexpected codesign invocation'), '', '');
+      }
+    };
+    vi.mocked(execFile).mockImplementation(impl as never);
+  }
+
+  it('Ad hoc 签名通过 --verify 但返回 false（不可自动安装）', async () => {
+    mockCodesign({
+      verifyOk: true,
+      info: 'Identifier=com.ai-devflow.desktop\nCodeDirectory v=20400 flags=0x2(adhoc)\nSignature=adhoc\nTeamIdentifier=not set\n',
+    });
+    expect(await defaultCheckSignature('/x/ai-devflow.app')).toBe(false);
+  });
+
+  it('真实 Developer ID 签名（有 Authority）返回 true', async () => {
+    mockCodesign({
+      verifyOk: true,
+      info: 'Identifier=com.ai-devflow.desktop\nTeamIdentifier=ABC123DEFG\nAuthority=Developer ID Application: Aiden-FE (ABC123DEFG)\nSignature=valid\n',
+    });
+    expect(await defaultCheckSignature('/x/ai-devflow.app')).toBe(true);
+  });
+
+  it('未签名 bundle（--verify 失败）返回 false', async () => {
+    mockCodesign({ verifyOk: false, info: '' });
+    expect(await defaultCheckSignature('/x/ai-devflow.app')).toBe(false);
+  });
+
+  it('非 darwin 平台直接返回 false 且不调用 codesign', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    vi.mocked(execFile).mockImplementation((() => { throw new Error('should not be called'); }) as never);
+    expect(await defaultCheckSignature('/x/ai-devflow.app')).toBe(false);
+    expect(execFile).not.toHaveBeenCalled();
   });
 });

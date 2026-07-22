@@ -237,26 +237,7 @@ export const en: Record<string, string> = {
   'settings.webhooks.deliveries.col.status': 'Status',
   'settings.webhooks.deliveries.col.attempt': 'Attempt',
   'settings.webhooks.deliveries.col.result': 'Result',
-  'settings.ai': 'AI provider',
-  'settings.ai.hint': 'Used by "AI: draft tasks". The key is encrypted with system secure storage; plaintext is never returned.',
-  'settings.ai.provider': 'Provider',
-  'settings.ai.provider.anthropic': 'Anthropic (Claude)',
-  'settings.ai.provider.openai': 'OpenAI-compatible',
-  'settings.ai.apiKey': 'API Key',
-  'settings.ai.apiKey.hint': 'leave blank to keep',
-  'settings.ai.model': 'Model',
-  'settings.ai.model.anthropic.hint': 'claude-sonnet-5',
-  'settings.ai.model.openai.hint': 'gpt-4o',
-  'settings.ai.baseURL': 'Custom baseURL (optional)',
-  'settings.ai.baseURL.hint': 'Anthropic-compatible: you can enter a host root (https://host), a /v1 prefix (https://host/v1) or the full messages URL; it is normalized automatically so /v1/messages is neither missing nor duplicated. OpenAI-compatible paths are passed through unchanged.',
-  'settings.ai.save': 'Save',
-  'settings.ai.clear': 'Clear',
-  'settings.ai.unset': 'Not configured. Fill in and save to refine tasks with AI.',
-  'settings.ai.test': 'Test connection',
-  'settings.ai.testing': 'Testing…',
-  'settings.ai.testOk': 'Connection OK',
-  'settings.ai.testFail': 'Connection failed',
-  'settings.ai.testUrl': 'Request URL',
+  'settings.agents.col.version': 'Version',
   'settings.providers': 'AI providers',
   'settings.providers.hint': 'Ordered provider list; the app picks the built-in model per role and fails over automatically. API Keys are encrypted; models/tools/prompts are not configurable.',
   'settings.providers.empty': 'No provider yet. Add one API Key provider to start using AI tasks and chat.',
@@ -290,16 +271,12 @@ export const en: Record<string, string> = {
   'settings.language': 'Interface language',
   'settings.language.hint': 'Applies immediately and persists across restarts.',
 
-  // ---- global agent capability defaults ----
-
   // ---- theme ----
   'settings.theme': 'Theme',
   'settings.theme.hint': 'Follows the system theme automatically; changes apply instantly and persist.',
   'settings.theme.light': 'Light',
   'settings.theme.dark': 'Dark',
   'settings.theme.system': 'Auto',
-
-  // ---- project agent capability config ----
 
   // ---- auto update ----
   'update.check': 'Check for updates',
@@ -314,5 +291,5 @@ export const en: Record<string, string> = {
   'update.error': 'Update failed: {msg}',
   'update.idle': 'Click "Check for updates" to see if a new version is available',
   'update.title': 'App update',
-  'update.manualDownload': 'The current macOS app is unsigned and cannot install updates automatically. GitHub Releases has been opened; please download the {arch} build and install it manually.',
+  'update.manualDownload': 'The macOS app is Ad hoc-signed (not notarized) and cannot install updates automatically. GitHub Releases has been opened — download the {arch} build, then run `xattr -d com.apple.quarantine` on the new app before launching it.',
 };

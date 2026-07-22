@@ -362,12 +362,12 @@ pnpm test:real:pi
 
 1. **prepare**：校验 semver、拒绝重复 tag/release、质量门禁（`pnpm typecheck/lint/test`）、生成 CHANGELOG/Release Notes、版本号 bump、打 tag 推送。
 2. **pi-runtime-smoke**（新增，matrix: `macos-13/x64`、`macos-14/arm64`、`windows-latest/x64`、`ubuntu-latest/x64`）：检出 tag、安装冻结依赖、构建 desktop、执行 `electron-builder --dir`（仅当前矩阵架构）、运行 `verify-packaged-pi.mjs` 与 `run-e2e.mjs --packaged`。Linux 在 `dbus-run-session` 中启动 `gnome-keyring` 并提供 `DISPLAY`（`xvfb-run -a`），避免 `safeStorage` 回退到 `basic_text`。
-3. **build**（matrix mac/win/linux，`needs: pi-runtime-smoke`）：执行完整打包并上传 artifact。
+3. **build**（matrix mac/win/linux，`needs: pi-runtime-smoke`）：执行完整打包并上传 artifact。macOS 产物以 **Ad hoc（无证书）签名**：构建时 `CSC_IDENTITY_AUTO_DISCOVERY=false` 关闭 electron-builder 身份自动发现，由 afterSign 钩子 `apps/desktop/scripts/ad-hoc-sign.mjs` 用 Ad hoc 身份（`-`）整体封装 `.app` bundle。产物未经公证，Gatekeeper 会隔离，用户首次运行需执行 `xattr -d com.apple.quarantine /Applications/ai-devflow.app` 放行（见 README 安装说明）。
 4. **publish**（`needs: [prepare, build]`）：汇总 artifact 并统一创建 GitHub Release。
 
 ### 13.4 自动更新
 
-`apps/desktop/electron/updater.ts` 基于 `electron-updater` + electron-builder 的 GitHub Provider。仅 `app.isPackaged` 时启用；开发/E2E 返回 no-op。启动后异步检查，发现版本后静默下载；下载完成在设置页提示升级。未签名 macOS 打开 GitHub Releases 手动下载，其它平台调用 `quitAndInstall()`。详见 `updater.ts` 注释。
+`apps/desktop/electron/updater.ts` 基于 `electron-updater` + electron-builder 的 GitHub Provider。仅 `app.isPackaged` 时启用；开发/E2E 返回 no-op。启动后异步检查，发现版本后静默下载；下载完成在设置页提示升级。macOS 产物为 Ad hoc 签名（无开发者身份/DR），Squirrel.Mac 无法自动安装，故点击「立即升级」会打开 GitHub Releases 手动下载——`updater.ts` 的 `defaultCheckSignature` 通过 `codesign -dv` 检测到无 `Authority=`（即 Ad hoc / 未签名）即判定为不可自动安装；其它平台调用 `quitAndInstall()`。详见 `updater.ts` 注释。
 
 ## 14. 从旧多 Agent 架构迁移
 

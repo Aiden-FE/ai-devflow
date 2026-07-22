@@ -237,26 +237,7 @@ export const zh: Record<string, string> = {
   'settings.webhooks.deliveries.col.status': '状态码',
   'settings.webhooks.deliveries.col.attempt': '尝试',
   'settings.webhooks.deliveries.col.result': '结果',
-  'settings.ai': 'AI 服务商',
-  'settings.ai.hint': '用于“AI 沟通生成任务”。密钥经系统安全存储加密落盘，不回传明文。',
-  'settings.ai.provider': '服务商',
-  'settings.ai.provider.anthropic': 'Anthropic（Claude）',
-  'settings.ai.provider.openai': 'OpenAI 兼容',
-  'settings.ai.apiKey': 'API Key',
-  'settings.ai.apiKey.hint': '留空不修改',
-  'settings.ai.model': '模型',
-  'settings.ai.model.anthropic.hint': 'claude-sonnet-5',
-  'settings.ai.model.openai.hint': 'gpt-4o',
-  'settings.ai.baseURL': '自定义 baseURL（可选）',
-  'settings.ai.baseURL.hint': 'Anthropic 兼容：可填主机根地址（https://host）、/v1 前缀（https://host/v1）或完整 messages 地址，系统会自动规范化，避免漏加/重复拼接 /v1/messages。OpenAI 兼容路径保持原样。',
-  'settings.ai.save': '保存配置',
-  'settings.ai.clear': '清除配置',
-  'settings.ai.unset': '尚未配置。填写并保存后即可在新建任务时与 AI 沟通。',
-  'settings.ai.test': '测试连接',
-  'settings.ai.testing': '测试中…',
-  'settings.ai.testOk': '连接成功',
-  'settings.ai.testFail': '连接失败',
-  'settings.ai.testUrl': '请求地址',
+  'settings.agents.col.version': '版本',
   'settings.providers': 'AI 服务商',
   'settings.providers.hint': '有序的提供商列表；应用按角色选择内置模型并自动降级。API Key 加密存储；模型/工具/提示词不可配置。',
   'settings.providers.empty': '尚未配置提供商。新增一个 API Key 提供商即可开始使用 AI 任务与对话。',
@@ -290,16 +271,12 @@ export const zh: Record<string, string> = {
   'settings.language': '界面语言',
   'settings.language.hint': '切换后立即生效，并在重启后保持。',
 
-  // ---- 全局 Agent 能力默认配置 ----
-
   // ---- 主题 ----
   'settings.theme': '主题',
   'settings.theme.hint': '自动跟随系统主题；切换后立即生效并持久化。',
   'settings.theme.light': '浅色',
   'settings.theme.dark': '深色',
   'settings.theme.system': '自动',
-
-  // ---- 项目 Agent 能力配置 ----
 
   // ---- 自动更新 ----
   'update.check': '检查更新',
@@ -314,5 +291,5 @@ export const zh: Record<string, string> = {
   'update.error': '更新失败：{msg}',
   'update.idle': '点击“检查更新”查看是否有新版本',
   'update.title': '应用更新',
-  'update.manualDownload': '当前 macOS 应用未签名，无法自动安装更新。已打开 GitHub Releases，请下载 {arch} 架构的新版并手动安装。',
+  'update.manualDownload': '当前 macOS 应用为 Ad hoc 签名（未经公证），无法自动安装更新。已打开 GitHub Releases，请下载 {arch} 架构的新版并手动安装；首次运行前需执行 `xattr -d com.apple.quarantine` 放行。',
 };
