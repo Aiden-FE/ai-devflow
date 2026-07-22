@@ -151,8 +151,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13
-            arch: x64
+          # macOS x64 冒烟原用 macos-13（Intel），但该 runner 已无法稳定分配（实测排队 24min+ 仍无 runner）。
+          # build 阶段在 macos-latest(arm64) 上已交叉产出并校验 x64+arm64 dmg/zip，
+          # Pi 运行时为架构无关 JS，arm64 上的 verify-packaged-pi 已覆盖同一 manifest，故不再单独冒烟 x64。
           - os: macos-14
             arch: arm64
           - os: windows-latest
