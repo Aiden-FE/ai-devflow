@@ -14,7 +14,7 @@ import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync,
-  readlinkSync, rmSync, writeFileSync,
+  readlinkSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +94,30 @@ function validateLinkGraph(root, links) {
   }
 }
 
+/** 将 runtime 内所有绝对路径符号链接改写为相对路径，避免打包后在 Windows 上 readlink 返回\n * 构建期绝对路径（如 D:\a\...\resources\pi-runtime\...）而与清单中的相对 target 不一致。\n * 仅改写指向 runtime 根内部的链接；外部链接保持报错。\n */
+function normalizeAbsoluteSymlinks(root) {
+  const realRoot = realpathSync(root);
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const abs = join(dir, name);
+      const st = lstatSync(abs);
+      if (st.isDirectory()) { walk(abs); continue; }
+      if (!st.isSymbolicLink()) continue;
+      const target = readlinkSync(abs);
+      if (!isAbsolute(target)) continue;
+      const resolved = realpathSync(abs);
+      if (!isWithin(realRoot, resolved)) {
+        throw new Error(`staging 失败：发现指向 runtime 外部的绝对符号链接 ${normalizedRelative(root, abs)} -> ${target}`);
+      }
+      const relTarget = normalizedRelative(dirname(abs), resolved);
+      rmSync(abs);
+      const isDir = statSync(resolved).isDirectory();
+      symlinkSync(relTarget, abs, isDir ? 'dir' : 'file');
+    }
+  };
+  walk(realRoot);
+}
+
 function computeDirDigest(root) {
   const files = collectRuntimeEntries(root).files.sort();
   const hash = createHash('sha256');
@@ -127,7 +151,12 @@ function main() {
   const workspaceBacklink = join(STAGE_DIR, 'node_modules', '.pnpm', 'node_modules', '@ai-devflow', 'pi-runtime-bundle');
   if (existsSync(workspaceBacklink) && lstatSync(workspaceBacklink).isSymbolicLink()) rmSync(workspaceBacklink);
 
-  // 3. 解析 bin.pi（禁止硬编码）。
+  // 3. Windows 上 pnpm deploy 可能产生绝对路径符号链接；打包后 readlink 返回构建期绝对路径，
+  //    与 manifest 中的相对 target 不一致。这里统一改写为相对路径，确保跨平台自包含。
+  log('规范化符号链接为相对路径…');
+  normalizeAbsoluteSymlinks(STAGE_DIR);
+
+  // 4. 解析 bin.pi（禁止硬编码）。
   const piTopPkg = join(STAGE_DIR, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json');
   if (!existsSync(piTopPkg)) throw new Error('staging 失败：未找到 @earendil-works/pi-coding-agent');
   const piPkg = JSON.parse(readFileSync(realpathSync(piTopPkg), 'utf8'));
