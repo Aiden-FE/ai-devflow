@@ -6,6 +6,7 @@ export {
   type ProviderRoute,
   type ProviderHealthStore,
   type ModelChoice,
+  type ModelRoute,
 } from './provider-router.js';
 export {
   BundledPiLocator,

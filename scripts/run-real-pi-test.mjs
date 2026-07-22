@@ -2,8 +2,7 @@
 // 真实 Pi 集成测试入口（设计 §16.5）。由根 `pnpm test:real:pi` 调用（node --env-file=.env）。
 // 职责：预检四变量与 .env ignore；以子进程运行 vitest 真实测试并对输出做与生产一致的脱敏；
 // 在内存中检测原始输出是否泄露 DEV_API_KEY；finally 中扫描产物。绝不打印密钥/响应正文/env 快照。
-import { spawn } from 'node:child_process';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -70,24 +69,36 @@ child.stderr.on('data', (chunk) => {
   logBuf += safe;
 });
 
-const code = await new Promise((resolveExit) => child.on('exit', (c) => resolveExit(c ?? 1)));
-writeFileSync(redactedLog, logBuf);
-
-// finally：扫描产物（脱敏日志、staging manifest、staging 目录）是否含密钥。
+let code = 1;
 let scanFailed = false;
 try {
-  execSync(
-    `${process.execPath} ${join(REPO_ROOT, 'scripts/verify-real-pi-secrets.mjs')} ${JSON.stringify(redactedLog)} ${JSON.stringify(join(REPO_ROOT, 'apps/desktop/build/pi-runtime'))}`,
-    { cwd: REPO_ROOT, stdio: 'inherit', env: process.env },
-  );
-} catch {
-  scanFailed = true;
+  code = await new Promise((resolveExit) => {
+    child.once('error', () => resolveExit(1));
+    child.once('exit', (exitCode) => resolveExit(exitCode ?? 1));
+  });
+} finally {
+  writeFileSync(redactedLog, logBuf);
+  // 保留并递归扫描整棵真实测试产物（journal/SQLite/流日志/profile/session/fixture），
+  // 以及 staging runtime；扫描完成前不得清理任何测试产物。
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        join(REPO_ROOT, 'scripts/verify-real-pi-secrets.mjs'),
+        outDir,
+        join(REPO_ROOT, 'apps/desktop/build/pi-runtime'),
+      ],
+      { cwd: REPO_ROOT, stdio: 'inherit', env: process.env },
+    );
+  } catch {
+    scanFailed = true;
+  }
 }
 
 if (rawLeaked) fail('原始测试输出中检测到 DEV_API_KEY 泄露');
 if (scanFailed) fail('产物密钥扫描未通过');
 if (code !== 0) fail(`真实测试失败（vitest 退出码 ${code}）`);
 if (!rawLeaked && !scanFailed && code === 0) {
-  console.log('[test:real:pi] 通过：四角色协议/降级/并发验证成功，且无密钥泄露');
+  console.log('[test:real:pi] 通过：四角色/交互/真实路由降级/并发隔离验证成功，完整产物无密钥泄露');
 }
 process.exit(process.exitCode ?? code);

@@ -6,7 +6,7 @@
   "scripts": {
     "build": "pnpm --recursive --if-present run build",
     "test": "pnpm --recursive --if-present run test && pnpm test:scripts",
-    "test:scripts": "node --test scripts/gen-changelog.test.mjs",
+    "test:scripts": "node --test scripts/*.test.mjs",
     "test:real:pi": "pnpm --filter @ai-devflow/desktop stage:pi && node --env-file=.env scripts/run-real-pi-test.mjs",
     "typecheck": "pnpm --recursive --if-present run typecheck",
     "lint": "pnpm --recursive --if-present run lint",

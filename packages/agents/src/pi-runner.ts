@@ -5,7 +5,7 @@
 // 提供商侧失败按分类降级；mutation 后失败则把 journal 构成的接管上下文交给下一路线（先验证现状）。
 // 事件经异步队列桥接给调度器；活跃路线密钥全程脱敏。
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentEvent, Checkpoint, TaskRole } from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
@@ -150,7 +150,7 @@ export class PiRunner implements AgentRunner {
     mkdirSync(isolatedHome, { recursive: true });
     mkdirSync(tempDir, { recursive: true });
 
-    const { profileDir } = this.deps.materializer.materialize({
+    const { profileDir: immutableProfileDir } = this.deps.materializer.materialize({
       role: request.role,
       providerId: route.providerId,
       providerKind: route.providerKind,
@@ -159,6 +159,10 @@ export class PiRunner implements AgentRunner {
       providerName: route.providerName,
       models: route.models,
     });
+    // Pi may persist settings beneath PI_CODING_AGENT_DIR. Give every attempt a private writable
+    // copy while retaining the content-addressed materializer snapshot as the verified source.
+    const profileDir = join(sessionDir, 'config');
+    cpSync(immutableProfileDir, profileDir, { recursive: true, force: false, errorOnExist: true });
 
     // 接管上下文：仅当前一尝试已产生副作用时注入（mutation 后接管，§10）。
     const recoveryJournal = recoveryJournalFor(state.prevJournal);

@@ -18,6 +18,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runPiCatalogGate } from './pi-catalog-gate.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DESKTOP_ROOT = resolve(SCRIPT_DIR, '..');
@@ -135,6 +136,9 @@ function main() {
   const entry = `node_modules/@earendil-works/pi-coding-agent/${bin.replace(/^\.?\//, '')}`;
   const piVersion = piPkg.version;
   log(`Pi 版本 ${piVersion}，入口 ${entry}`);
+
+  const compatibility = runPiCatalogGate(join(STAGE_DIR, entry));
+  log(`离线兼容门禁通过（${compatibility.modelCount} 个模型，${compatibility.toolCount} 个内置工具）`);
 
   // 4. 角色资源（Task 6 起存在则复制并计算 digest）。
   let profilesDigest = null;

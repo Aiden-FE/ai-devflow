@@ -32,7 +32,14 @@ export interface PiRunnerHarness {
   runner: AgentRunner;
   cwd: string;
   fakePiEntry: string;
-  spawnedCommands: Array<{ args: string[]; initialMessage: string; checkpoint?: unknown }>;
+  spawnedCommands: Array<{
+    args: string[];
+    initialMessage: string;
+    checkpoint?: unknown;
+    configDir?: string;
+    sessionDir?: string;
+    executionId?: string;
+  }>;
   sleeps: number[];
   attemptIds: string[];
   attemptCollisions: string[];
@@ -42,7 +49,7 @@ export interface PiRunnerHarness {
 export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunnerHarness {
   const cwd = mkdtempSync(join(tmpdir(), 'pi-runner-cwd-'));
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
-  const spawnedCommands: Array<{ args: string[]; initialMessage: string; checkpoint?: unknown }> = [];
+  const spawnedCommands: PiRunnerHarness['spawnedCommands'] = [];
   const sleeps: number[] = [];
   const attemptIds: string[] = [];
   const attemptCollisions: string[] = [];
@@ -90,11 +97,11 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   });
 
   // 物化器桩：返回一个临时 profile 目录（fake CLI 不读取 profile 内容，run plan 只引用路径）。
+  const stableProfileDir = mkdtempSync(join(tmpdir(), 'pi-runner-profile-'));
   const materializer = {
     materialize: (profile: MaterializeInput) => {
       materializedProfiles.push(profile);
-      const profileDir = mkdtempSync(join(tmpdir(), 'pi-runner-profile-'));
-      return { profileDir, digest: 'fake-digest' };
+      return { profileDir: stableProfileDir, digest: 'fake-digest' };
     },
   };
 
@@ -104,6 +111,9 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
       args: [...args],
       initialMessage: args[args.length - 1] ?? '',
       checkpoint: checkpointPath ? JSON.parse(readFileSync(checkpointPath, 'utf8')) as unknown : undefined,
+      configDir: opts.env.PI_CODING_AGENT_DIR,
+      sessionDir: opts.env.PI_CODING_AGENT_SESSION_DIR,
+      executionId: opts.env.AI_DEVFLOW_EXECUTION_ID,
     });
     return nodeSpawn(command, args, {
       cwd: opts.cwd,

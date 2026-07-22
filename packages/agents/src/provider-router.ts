@@ -56,7 +56,7 @@ export interface ProviderHealthStore {
 type RoleKey = 'planner' | 'coder' | 'reviewer' | 'tester';
 type BaseKind = 'anthropic' | 'openai' | 'google' | 'deepseek' | 'openrouter';
 
-interface ModelRoute {
+export interface ModelRoute {
   primary: ModelChoice;
   fallback?: ModelChoice;
 }
@@ -177,6 +177,8 @@ export interface ProviderRouterDeps {
   health: ProviderHealthStore;
   now(): number;
   sleep(ms: number): Promise<void>;
+  /** Integration-test seam for a real provider model that is not the built-in production matrix. */
+  modelRouteFor?: (provider: ProviderConfig, workload: Workload) => ModelRoute | undefined;
 }
 
 export class ProviderRouter {
@@ -201,7 +203,8 @@ export class ProviderRouter {
       const secret = this.deps.resolveSecret(provider.id);
       if (!secret) continue;
       const base = baseKindOf(provider.kind);
-      const modelRoute = base ? MODEL_TABLE[base][roleKey] : undefined;
+      const modelRoute = this.deps.modelRouteFor?.(provider, workload)
+        ?? (base ? MODEL_TABLE[base][roleKey] : undefined);
       if (!modelRoute) continue;
       const providerName = providerNameFor(provider);
       const models = [modelRoute.primary.model, modelRoute.fallback?.model]

@@ -207,3 +207,16 @@ it('uses globally unique attempt ids for repeated same-role executions', async (
     expect.stringContaining('execution-b'),
   ]));
 });
+
+it('gives concurrent attempts distinct writable config and session roots', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  const runs = await Promise.all(['one', 'two'].map((executionId) => harness.runner.run({
+    taskId: executionId, executionId, role: 'tester', prompt: 'verify', cwd: harness.cwd,
+  })));
+  await Promise.all(runs.map(async (run) => {
+    await collect(run.events);
+    expect((await run.done()).ok).toBe(true);
+  }));
+  expect(new Set(harness.spawnedCommands.map((command) => command.configDir)).size).toBe(2);
+  expect(new Set(harness.spawnedCommands.map((command) => command.sessionDir)).size).toBe(2);
+});

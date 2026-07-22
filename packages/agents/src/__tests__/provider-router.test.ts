@@ -33,6 +33,21 @@ function makeRouterHarness(ids: string[]) {
 }
 
 describe('ProviderRouter', () => {
+  it('supports an explicit test-only model route while preserving production ordering', () => {
+    const harness = makeRouterHarness(['p1']);
+    const router = new ProviderRouter({
+      listProviders: () => harness.providers,
+      resolveSecret: () => 'secret',
+      health: harness.health,
+      now: () => 1_000,
+      sleep: async () => undefined,
+      modelRouteFor: () => ({ primary: { model: 'integration-model', thinking: 'medium' } }),
+    });
+    expect(router.routesFor('planner')).toEqual([
+      expect.objectContaining({ providerId: 'p1', model: 'integration-model', models: ['integration-model'] }),
+    ]);
+  });
+
   it('tries same-provider fallback before the next provider', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     const visited: string[] = [];
