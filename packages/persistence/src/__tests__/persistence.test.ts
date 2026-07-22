@@ -77,9 +77,8 @@ describe('repositories CRUD', () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: { maxConcurrent: 4 } });
     expect(repos.projects.get('p')!.settings.maxConcurrent).toBe(4);
     expect(repos.projects.list().length).toBe(1);
-    repos.projects.updateSettings('p', { maxConcurrent: 8, agentRoles: { coder: 'codex' } });
+    repos.projects.updateSettings('p', { maxConcurrent: 8 });
     expect(repos.projects.get('p')!.settings.maxConcurrent).toBe(8);
-    expect(repos.projects.get('p')!.settings.agentRoles!.coder).toBe('codex');
     repos.projects.delete('p');
     expect(repos.projects.get('p')).toBeUndefined();
   });
@@ -119,9 +118,6 @@ describe('full lifecycle', () => {
     repos.tasks.updateStatus('t', 'in_progress', 150);
     expect(repos.tasks.get('t')!.status).toBe('in_progress');
     expect(repos.tasks.get('t')!.statusChangedAt).toBe(150);
-
-    // Pi-only：schema v9 已删除 agent_type 列，任务不再携带 Agent 类型。
-    expect(repos.tasks.get('t')!.agentType).toBeUndefined();
 
     repos.tasks.updateStatus('t', 'in_review', 200);
     repos.tasks.updateStatus('t', 'archived', 400);
@@ -163,19 +159,19 @@ describe('full lifecycle', () => {
   it('execution records and logs persist and query', () => {
     repos.tasks.insert(makeTask('t', 'r', 'i', 'p'));
     const execId = randomId();
-    repos.executions.insert({ id: execId, taskId: 't', attempt: 1, agentType: 'claude_code', startedAt: 10, status: 'running' });
+    repos.executions.insert({ id: execId, taskId: 't', attempt: 1, startedAt: 10, status: 'running' });
     repos.logs.insert({ id: randomId(), taskId: 't', executionId: execId, level: 'info', text: 'start', t: 11 });
     repos.logs.insert({ id: randomId(), taskId: 't', executionId: execId, level: 'error', text: 'boom', t: 12 });
     expect(repos.logs.listByTask('t').length).toBe(2);
     expect(repos.executions.getLatest('t')!.id).toBe(execId);
-    repos.executions.update({ id: execId, taskId: 't', attempt: 1, agentType: 'claude_code', startedAt: 10, endedAt: 20, status: 'failed', summary: 'boom' });
+    repos.executions.update({ id: execId, taskId: 't', attempt: 1, startedAt: 10, endedAt: 20, status: 'failed', summary: 'boom' });
     expect(repos.executions.getLatest('t')!.status).toBe('failed');
   });
 
   it('listByTask returns the most recent N logs (not the oldest)', () => {
     repos.tasks.insert(makeTask('t', 'r', 'i', 'p'));
     const execId = randomId();
-    repos.executions.insert({ id: execId, taskId: 't', attempt: 1, agentType: 'claude_code', startedAt: 0, status: 'running' });
+    repos.executions.insert({ id: execId, taskId: 't', attempt: 1, startedAt: 0, status: 'running' });
     // 插入 20 条日志，limit=5 应返回最近 5 条（t=16..20），而非最早 5 条（t=1..5）
     for (let i = 1; i <= 20; i++) {
       repos.logs.insert({ id: randomId(), taskId: 't', executionId: execId, level: 'info', text: `line${i}`, t: i });

@@ -92,8 +92,6 @@ const api: DesktopApi = {
     getAiProvider: () => invoke('settings', 'getAiProvider')(),
     setAiProvider: (cfg) => invoke('settings', 'setAiProvider')(cfg),
     testAiProvider: (cfg) => invoke('settings', 'testAiProvider')(cfg),
-    getGlobalAgentConfig: () => invoke('settings', 'getGlobalAgentConfig')(),
-    setGlobalAgentConfig: (config) => invoke('settings', 'setGlobalAgentConfig')(config),
     getProjectSettings: (projectId) => invoke('settings', 'getProjectSettings')(projectId),
     updateProjectSettings: (projectId, settings) => invoke('settings', 'updateProjectSettings')(projectId, settings),
   },

@@ -213,8 +213,6 @@ describe('typed IPC wiring', () => {
     const updated = (await call('tasks', 'update', { id: 't', title: 'New', role: 'reviewer' })) as { title: string; role: string };
     expect(updated.title).toBe('New');
     expect(repos.tasks.get('t')!.role).toBe('reviewer');
-    // Pi-only：schema v9 已删除 agent_type 列，任务不再持久化 Agent 类型。
-    expect(repos.tasks.get('t')!.agentType).toBeUndefined();
     // 非可编辑状态拒绝
     repos.tasks.updateStatus('t', 'in_progress', now());
     await expect(call('tasks', 'update', { id: 't', title: 'X' })).rejects.toThrow(/编辑/);
@@ -272,7 +270,7 @@ describe('typed IPC wiring', () => {
     // 拖拽归档被拒
     await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/归档/);
     // 补一条执行记录（产物）
-    repos.executions.insert({ id: 'e1', taskId: 't', attempt: 1, agentType: 'test', startedAt: now(), status: 'succeeded' });
+    repos.executions.insert({ id: 'e1', taskId: 't', attempt: 1, startedAt: now(), status: 'succeeded' });
     await call('tasks', 'accept', 't');
     expect(repos.tasks.get('t')!.status).toBe('archived');
     // 非待验收任务验收拒绝
@@ -339,12 +337,6 @@ describe('new IPC channels (reject / createBatch / global config / test-connecti
     })).rejects.toThrow(/环|依赖/);
     // 原子性：未落库任何任务
     expect(repos.tasks.listByRequirement('r').length).toBe(0);
-  });
-
-  it('settings global agent config round-trips', async () => {
-    await call('settings', 'setGlobalAgentConfig', { coder: { tools: ['Read', 'Edit'] } });
-    const cfg = (await call('settings', 'getGlobalAgentConfig')) as { coder?: { tools?: string[] } };
-    expect(cfg.coder?.tools).toEqual(['Read', 'Edit']);
   });
 
   it('settings.testAiProvider reports a diagnostic error without an API key (no secret leaked)', async () => {

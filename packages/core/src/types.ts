@@ -1,8 +1,5 @@
 // @ai-devflow/core —— 领域类型契约（纯 TS，零 Node 依赖，Renderer 与 Main 共享）
 
-/** Agent 类型。新增自定义 Agent 在此追加字面量并在 agents 包注册。 */
-export type AgentType = 'claude_code' | 'codex' | 'pi' | 'test';
-
 /**
  * 任务状态（内部值）。
  *
@@ -26,7 +23,7 @@ export type TaskStatus =
 /** 可见泳道状态（不含 backlog 与暂停标识 awaiting_input）。 */
 export const VISIBLE_LANES: TaskStatus[] = ['ready', 'in_progress', 'testing', 'in_review', 'archived'];
 
-/** 任务角色，映射到 AgentType。 */
+/** 任务角色：选择内置 Pi profile 的唯一任务级维度（Pi-only）。 */
 export type TaskRole = 'planner' | 'coder' | 'reviewer' | 'tester';
 
 /** 流水线阶段定义。 */
@@ -50,79 +47,8 @@ export interface Project {
 }
 
 export interface ProjectSettings {
-  /** 角色 -> AgentType 映射覆盖（旧字段，向后兼容；仅控制默认 Agent）。 */
-  agentRoles?: Partial<Record<TaskRole, AgentType>>;
-  /**
-   * 角色 -> 能力配置（新字段，优先于 agentRoles）。
-   * 兼容旧数据：缺省时回退到 agentRoles + 角色默认。
-   * 逐字段继承全局：未配置（undefined）的字段继承 GlobalAgentConfig；显式值（含 []）覆盖全局。
-   */
-  roleConfigs?: Partial<Record<TaskRole, RoleAgentConfig>>;
   /** 该项目并发上限覆盖。 */
   maxConcurrent?: number;
-}
-
-/**
- * 全局 Agent 能力默认配置：角色 -> RoleAgentConfig。
- * 存入 credentials('global_agent_config')（明文 JSON，非密钥）。
- * 运行时合并顺序：项目显式值 > 全局值 > 系统默认（defaultAgentForRole / 适配器默认）。
- */
-export type GlobalAgentConfig = Partial<Record<TaskRole, RoleAgentConfig>>;
-
-/**
- * 单个角色（planner/coder/reviewer/tester）的 Agent 能力配置。
- *
- * 字段语义（重要 —— 区分「未配置」与「空数组」）：
- * - `undefined`（未配置）= 继承上一层（项目继承全局；全局继承系统默认），表示「不限制 / 按默认」。
- * - `[]`（显式空数组）= 明确的覆盖值：tools=[] 表示禁用全部工具、skills=[] 表示关闭全部 skills、
- *   plugins=[] 表示不加载额外插件。合并时 `[]` 会覆盖继承值，不会被当成「未配置」。
- * 项目级配置存入 projects.settings_json；全局默认存入 credentials('global_agent_config')。
- */
-export interface RoleAgentConfig {
-  /** 默认 Agent（覆盖角色默认映射）。缺省=按角色默认。 */
-  agentType?: AgentType;
-  /** 插件白名单（本地目录路径或 URL）。空数组=不加载额外插件；缺省=不限制。 */
-  plugins?: string[];
-  /** Skills 白名单。适配器声明支持范围：Claude Code 仅支持“全开 / 全关（--disable-slash-commands）”。 */
-  skills?: string[];
-  /** 工具白名单（如 Bash,Edit,Read）。空数组=禁用全部工具；缺省=不限制。 */
-  tools?: string[];
-  /** 工具黑名单（禁用的工具名）。 */
-  disallowedTools?: string[];
-  /**
-   * 是否要求把需授权的工具调用转为人工 approval_request。
-   * true=不无条件绕过权限，每个工具调用暂停等待用户批准/拒绝；缺省=false（沿用各 CLI 的非绕过默认）。
-   */
-  requireApproval?: boolean;
-}
-
-/**
- * 由 Orchestrator 解析后传给 Adapter 的最终能力配置。
- * 任务显式 agentType 优先于角色默认；其余字段来自角色 RoleAgentConfig。
- */
-export interface AgentCapabilities {
-  agentType: AgentType;
-  plugins?: string[];
-  skills?: string[];
-  tools?: string[];
-  disallowedTools?: string[];
-  /**
-   * 是否要求把需授权的工具调用转为人工 approval_request。
-   * true=不无条件绕过权限，真实权限请求暂停等待用户处理；false=沿用各 CLI 默认。
-   */
-  requireApproval?: boolean;
-}
-
-/** Adapter 声明自身支持的能力（不支持的字段在 UI 禁用并说明，不静默忽略）。 */
-export interface AgentCapabilitySupport {
-  /** 工具白名单限制（Claude Code --allowedTools/--tools；Codex 沙箱）。 */
-  tools: boolean;
-  /** 插件加载（Claude Code --plugin-dir/--plugin-url）。 */
-  plugins: boolean;
-  /** Skills 控制：'all-or-none' 仅支持全开/全关；false 不支持。 */
-  skills: 'all-or-none' | false;
-  /** 把权限请求转为人工 approval_request。 */
-  approval: boolean;
 }
 
 export interface Iteration {
@@ -155,7 +81,6 @@ export interface Task {
   title: string;
   description: string;
   status: TaskStatus;
-  agentType?: AgentType;
   role: TaskRole;
   stages: Stage[];
   /** 当前阶段索引。 */
@@ -214,11 +139,6 @@ export interface ExecutionRecord {
   id: string;
   taskId: string;
   attempt: number;
-  /**
-   * @deprecated Pi-only 运行时不再区分 Agent 类型；该字段仅为旧 Renderer 兼容保留，永不填充。
-   * 删除阶段（schema v9 已删列后）连同类型一并移除。
-   */
-  agentType?: AgentType;
   startedAt: number;
   endedAt?: number;
   status: 'running' | 'paused' | 'succeeded' | 'failed' | 'canceled';
@@ -280,46 +200,6 @@ export interface WebhookDelivery {
   durationMs: number;
   responseSnippet?: string;
   ok: boolean;
-}
-
-/** 桥接器检测结果。 */
-export interface AgentDetection {
-  agentType: AgentType;
-  available: boolean;
-  version?: string;
-  /** 解析到的 CLI 绝对路径（找不到时回退为命令名）。 */
-  path?: string;
-  reason?: string;
-  /**
-   * 不可用时的错误类别，便于 UI 区分处置：
-   * - 'not-found'：未找到 CLI（ENOENT）。
-   * - 'incompatible-node'：CLI 已找到，但其 shebang/PATH 命中的 Node 运行时过旧（如不支持 ??=）。
-   * - 'other'：其它检测失败。
-   */
-  errorKind?: 'not-found' | 'incompatible-node' | 'other';
-  /** 解析到的 Node 可执行文件绝对路径（诊断用，incompatible-node 时尤其重要）。 */
-  nodePath?: string;
-  /** Node 运行时版本（诊断用）。 */
-  nodeVersion?: string;
-}
-
-/** Agent 运行请求。 */
-export interface AgentRunRequest {
-  taskId: string;
-  prompt: string;
-  cwd: string;
-  resumeFrom?: Checkpoint;
-  userInput?: string;
-  env?: Record<string, string>;
-  /** 由 Orchestrator 解析的最终能力配置（角色配置 + 任务显式 agentType 覆盖）。 */
-  capabilities?: AgentCapabilities;
-  /**
-   * 恢复待处理交互时携带的决策：
-   * - clarification/confirmation: 用户文本回答。
-   * - approval: 'allow' | 'deny'。
-   * 适配器据此决定恢复后是否放行对应工具。
-   */
-  interactionResponse?: { kind: InteractionKind; value: string };
 }
 
 /** 门禁上下文：判定迁移所需的外部事实。 */

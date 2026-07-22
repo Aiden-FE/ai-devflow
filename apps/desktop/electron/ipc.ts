@@ -209,7 +209,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       title: input.title,
       description: input.description,
       status: 'ready',
-      agentType: input.agentType,
       role: input.role,
       stages: [{ id: 'impl', name: '实现', role: input.role }],
       currentStage: 0,
@@ -272,7 +271,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (input.title !== undefined) t.title = input.title;
     if (input.description !== undefined) t.description = input.description;
     if (input.role !== undefined) t.role = input.role;
-    if (input.agentType !== undefined) t.agentType = input.agentType || undefined;
     if (input.dependsOn !== undefined) t.dependsOn = input.dependsOn === null ? [] : input.dependsOn;
     t.updatedAt = now();
     repos.tasks.update(t);
@@ -424,15 +422,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       }
     }
     return testConnection({ ...(cfg ?? {}), apiKey: apiKey ?? '' });
-  });
-  // 全局 Agent 能力默认配置（明文 JSON，非密钥）：项目可按角色/字段覆盖（item 12）。
-  ipcMain.handle(channel('settings', 'getGlobalAgentConfig'), () => {
-    const raw = repos.credentials.get('global_agent_config');
-    if (!raw) return {};
-    try { return JSON.parse(raw); } catch { return {}; }
-  });
-  ipcMain.handle(channel('settings', 'setGlobalAgentConfig'), (_e, config) => {
-    repos.credentials.upsert('global_agent_config', JSON.stringify(config ?? {}));
   });
   ipcMain.handle(channel('settings', 'getProjectSettings'), (_e, projectId) => repos.projects.get(projectId)?.settings ?? {});
   ipcMain.handle(channel('settings', 'updateProjectSettings'), (_e, projectId, settings) => repos.projects.updateSettings(projectId, settings));

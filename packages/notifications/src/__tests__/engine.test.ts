@@ -52,7 +52,7 @@ function seedProject() {
 function seedTask(statusChangedAt: number, status: Task['status'] = 'in_progress'): Task {
   const t: Task = {
     id: randomId(), requirementId: 'r', iterationId: 'i', projectId: 'p',
-    title: 'Overdue task', description: '', status, agentType: 'test', role: 'coder',
+    title: 'Overdue task', description: '', status, role: 'coder',
     stages: [], currentStage: 0, statusChangedAt, createdAt: statusChangedAt, updatedAt: statusChangedAt, retryCount: 0,
   };
   repos.tasks.insert(t);

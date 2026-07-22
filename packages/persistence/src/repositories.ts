@@ -7,7 +7,6 @@ import type {
   Task,
   TaskStatus,
   TaskRole,
-  AgentType,
   Stage,
   ExecutionRecord,
   Checkpoint,
@@ -373,7 +372,6 @@ export interface TasksRepo {
   listRecoverable(): Task[];
   update(t: Task): void;
   updateStatus(id: string, status: TaskStatus, at: number): void;
-  assignAgent(id: string, agentType: AgentType): void;
   setWorktree(id: string, path: string | undefined): void;
   incRetry(id: string): void;
   delete(id: string): void;
@@ -444,11 +442,6 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
       );
       if (status === 'archived') stmt.run(status, at, at, pausedFrom, at, id);
       else stmt.run(status, at, at, pausedFrom, id);
-    },
-    assignAgent(id, agentType) {
-      // Pi-only：agent_type 列已在 schema v9 删除，此方法保留为 no-op 以兼容旧调用，删除阶段移除。
-      void id;
-      void agentType;
     },
     setWorktree(id, path) {
       db.prepare('UPDATE tasks SET worktree_path=?, updated_at=? WHERE id=?').run(path ?? null, Date.now(), id);

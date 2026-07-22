@@ -38,12 +38,6 @@ export const en: Record<string, string> = {
   'status.archived': 'Archived',
 
   // ---- agent ----
-  'agent.claude_code': 'Claude Code',
-  'agent.codex': 'Codex',
-  'agent.pi': 'Pi',
-  'agent.test': 'Test adapter',
-  'agent.unassigned': 'Unassigned',
-  'agent.default': 'Default (by role)',
 
   // ---- role ----
   'role.planner': 'Planner',
@@ -122,7 +116,6 @@ export const en: Record<string, string> = {
   'task.title': 'Title',
   'task.description': 'Description',
   'task.role': 'Role',
-  'task.agent': 'Agent (optional)',
   'task.dependsOn': 'Depends on (serial)',
   'task.dependsOn.none': 'None',
   'task.dependsOn.hint': 'A successor can only start after its predecessors complete (reach In review / Archived)',
@@ -181,7 +174,6 @@ export const en: Record<string, string> = {
   'detail.history.show': 'Show execution records',
   'detail.history.hide': 'Hide execution records',
   'detail.col.attempt': 'Attempt',
-  'detail.col.agent': 'Agent',
   'detail.col.status': 'Status',
   'detail.col.started': 'Started',
   'detail.col.ended': 'Ended',
@@ -215,14 +207,6 @@ export const en: Record<string, string> = {
 
   // ---- settings ----
   'settings.title': 'Settings',
-  'settings.agents': 'Agent bridge detection',
-  'settings.agents.redetect': 'Re-detect',
-  'settings.agents.detecting': 'Detecting…',
-  'settings.agents.hint': 'Detect whether the local machine has the prerequisites to run each agent.',
-  'settings.agents.col.agent': 'Agent',
-  'settings.agents.col.available': 'Available',
-  'settings.agents.col.version': 'Version',
-  'settings.agents.col.note': 'Note',
   'settings.notifRules': 'Timeout notification rules',
   'settings.notifRules.new': 'New rule',
   'settings.notifRules.hint': 'Notify via desktop & webhook when a task stays in a status longer than the threshold. Timed from status change; restored after restart.',
@@ -303,8 +287,6 @@ export const en: Record<string, string> = {
   'settings.language.hint': 'Applies immediately and persists across restarts.',
 
   // ---- global agent capability defaults ----
-  'settings.globalAgent': 'Global agent capability defaults',
-  'settings.globalAgent.hint': 'Default capability config for all projects. Projects can override per role and per field; unset fields inherit these global values.',
 
   // ---- theme ----
   'settings.theme': 'Theme',
@@ -314,22 +296,6 @@ export const en: Record<string, string> = {
   'settings.theme.system': 'Auto',
 
   // ---- project agent capability config ----
-  'settings.agentConfig': 'Project agent capability config',
-  'settings.agentConfig.hint': 'Override the global defaults per project and role. Fields left blank inherit the global value (shown as placeholder); saving blanks does not pin inherited values to the project. Only capabilities declared by the adapter are configurable; unsupported ones are disabled with a note.',
-  'settings.agentConfig.inherited': 'inherited',
-  'settings.agentConfig.overridden': 'overridden',
-  'settings.agentConfig.resetInherit': 'Reset to inherited',
-  'settings.agentConfig.project': 'Project',
-  'settings.agentConfig.role': 'Role',
-  'settings.agentConfig.defaultAgent': 'Default agent',
-  'settings.agentConfig.tools': 'Allowed tools (comma separated, e.g. Bash,Edit,Read)',
-  'settings.agentConfig.disallowedTools': 'Disallowed tools (comma separated)',
-  'settings.agentConfig.plugins': 'Plugins (comma separated, local dir or URL)',
-  'settings.agentConfig.skills': 'Skills (leave empty = disable all; Claude Code supports all-on/all-off only)',
-  'settings.agentConfig.requireApproval': 'Tool calls require manual approval (approval_request)',
-  'settings.agentConfig.unsupported': 'Not supported by this adapter',
-  'settings.agentConfig.saved': 'Saved',
-  'settings.agentConfig.capability': 'Capability support',
 
   // ---- auto update ----
   'update.check': 'Check for updates',

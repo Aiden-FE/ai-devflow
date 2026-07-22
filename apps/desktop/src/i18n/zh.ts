@@ -38,12 +38,6 @@ export const zh: Record<string, string> = {
   'status.archived': '已归档',
 
   // ---- Agent ----
-  'agent.claude_code': 'Claude Code',
-  'agent.codex': 'Codex',
-  'agent.pi': 'Pi',
-  'agent.test': '测试适配器',
-  'agent.unassigned': '未分配',
-  'agent.default': '默认（按角色）',
 
   // ---- 角色 ----
   'role.planner': '规划',
@@ -122,7 +116,6 @@ export const zh: Record<string, string> = {
   'task.title': '标题',
   'task.description': '描述',
   'task.role': '角色',
-  'task.agent': '指定 Agent（可选）',
   'task.dependsOn': '前置任务（串行依赖）',
   'task.dependsOn.none': '无',
   'task.dependsOn.hint': '后继任务需等待前置完成（进入测试中/归档）后才能启动',
@@ -181,7 +174,6 @@ export const zh: Record<string, string> = {
   'detail.history.show': '展开执行记录',
   'detail.history.hide': '收起执行记录',
   'detail.col.attempt': '尝试',
-  'detail.col.agent': 'Agent',
   'detail.col.status': '状态',
   'detail.col.started': '开始',
   'detail.col.ended': '结束',
@@ -215,14 +207,6 @@ export const zh: Record<string, string> = {
 
   // ---- 设置 ----
   'settings.title': '设置',
-  'settings.agents': 'Agent 桥接器检测',
-  'settings.agents.redetect': '重新检测',
-  'settings.agents.detecting': '检测中…',
-  'settings.agents.hint': '检测本机是否具备运行各 Agent 的前置条件。',
-  'settings.agents.col.agent': 'Agent',
-  'settings.agents.col.available': '可用',
-  'settings.agents.col.version': '版本',
-  'settings.agents.col.note': '说明',
   'settings.notifRules': '超时通知规则',
   'settings.notifRules.new': '新建规则',
   'settings.notifRules.hint': '任务在某状态停留超过阈值时触发桌面通知与 Webhook。计时基于状态变更时间，重启后恢复。',
@@ -303,8 +287,6 @@ export const zh: Record<string, string> = {
   'settings.language.hint': '切换后立即生效，并在重启后保持。',
 
   // ---- 全局 Agent 能力默认配置 ----
-  'settings.globalAgent': '全局 Agent 能力默认配置',
-  'settings.globalAgent.hint': '所有项目的默认能力配置。项目可按角色、按字段覆盖；未覆盖的字段继承此全局值。',
 
   // ---- 主题 ----
   'settings.theme': '主题',
@@ -314,22 +296,6 @@ export const zh: Record<string, string> = {
   'settings.theme.system': '自动',
 
   // ---- 项目 Agent 能力配置 ----
-  'settings.agentConfig': '项目 Agent 能力配置',
-  'settings.agentConfig.hint': '按项目与角色覆盖全局默认。未填写的字段继承全局值（占位符所示）；留空保存不会把继承值固化为项目值。仅适配器声明支持的能力可配置，不支持者禁用并说明。',
-  'settings.agentConfig.inherited': '继承全局',
-  'settings.agentConfig.overridden': '项目覆盖',
-  'settings.agentConfig.resetInherit': '恢复继承',
-  'settings.agentConfig.project': '项目',
-  'settings.agentConfig.role': '角色',
-  'settings.agentConfig.defaultAgent': '默认 Agent',
-  'settings.agentConfig.tools': '允许的工具（逗号分隔，如 Bash,Edit,Read）',
-  'settings.agentConfig.disallowedTools': '禁用的工具（逗号分隔）',
-  'settings.agentConfig.plugins': '插件（逗号分隔，本地目录或 URL）',
-  'settings.agentConfig.skills': 'Skills（留空=关闭全部；Claude Code 仅支持全开/全关）',
-  'settings.agentConfig.requireApproval': '工具调用需人工授权（approval_request）',
-  'settings.agentConfig.unsupported': '该适配器不支持此能力',
-  'settings.agentConfig.saved': '已保存',
-  'settings.agentConfig.capability': '能力支持',
 
   // ---- 自动更新 ----
   'update.check': '检查更新',

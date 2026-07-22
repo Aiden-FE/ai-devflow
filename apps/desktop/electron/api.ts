@@ -7,7 +7,6 @@ import type {
   Task,
   TaskStatus,
   TaskRole,
-  AgentType,
   LogEntry,
   ExecutionRecord,
   NotificationRule,
@@ -25,7 +24,6 @@ import type {
   UpdateStatus,
   InstallUpdateResult,
   RejectTaskInput,
-  GlobalAgentConfig,
   TestConnectionResult,
   ProviderSummary,
   ProviderInput,
@@ -58,18 +56,16 @@ export interface CreateTaskInput {
   title: string;
   description: string;
   role: TaskRole;
-  agentType?: AgentType;
   /** 串行依赖：前置任务 ID 列表（同需求兄弟任务）。 */
   dependsOn?: string[];
 }
 
-/** 任务可编辑字段（仅 ready 允许编辑）。agentType 为 null 表示清除（按角色默认）；dependsOn 为 null 表示清空依赖。 */
+/** 任务可编辑字段（仅 ready 允许编辑）。dependsOn 为 null 表示清空依赖。 */
 export interface UpdateTaskInput {
   id: string;
   title?: string;
   description?: string;
   role?: TaskRole;
-  agentType?: AgentType | null;
   dependsOn?: string[] | null;
 }
 
@@ -196,9 +192,6 @@ export interface DesktopApi {
     setAiProvider(cfg: AiProviderConfig | undefined): Promise<void>;
     /** 测试 AI 服务商连通性：返回脱敏后的最终地址、HTTP 状态与服务端摘要（不含 API Key）。 */
     testAiProvider(cfg: AiProviderConfig): Promise<TestConnectionResult>;
-    /** 全局 Agent 能力默认配置（项目可按角色/字段覆盖）。 */
-    getGlobalAgentConfig(): Promise<GlobalAgentConfig>;
-    setGlobalAgentConfig(config: GlobalAgentConfig): Promise<void>;
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
   };
