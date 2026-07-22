@@ -96,6 +96,8 @@ function validateLinkGraph(root, links) {
 
 /** 将 runtime 内所有绝对路径符号链接改写为相对路径，避免打包后在 Windows 上 readlink 返回\n * 构建期绝对路径（如 D:\a\...\resources\pi-runtime\...）而与清单中的相对 target 不一致。\n * 仅改写指向 runtime 根内部的链接；外部链接保持报错。\n */
 function normalizeAbsoluteSymlinks(root) {
+  // Linux/macOS 上 pnpm deploy 已生成相对符号链接，无需改写；仅 Windows 需要处理绝对路径。
+  if (process.platform !== 'win32') return;
   const realRoot = realpathSync(root);
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
