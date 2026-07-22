@@ -25,6 +25,12 @@ export type Workload =
   | 'task_proposal'
   | 'requirement_proposal';
 
+/**
+ * 模型角色键：workload 的粗粒度分组，用于按角色配置模型。
+ * `chat` 覆盖 task_chat/requirement_chat；`proposal` 覆盖 task_proposal/requirement_proposal。
+ */
+export type ModelRoleKey = 'planner' | 'coder' | 'reviewer' | 'tester' | 'chat' | 'proposal';
+
 /** 故障分类（设计 §9.4）。 */
 export type FailureKind =
   | 'authentication'
@@ -52,6 +58,10 @@ export interface ProviderConfig {
   credentialRef: string;
   /** 仅两类 compatible provider 使用。 */
   baseURL?: string;
+  /** 默认模型；未设置且对应 workload 无覆盖时，该服务商对此 workload 不可用。 */
+  defaultModel?: string;
+  /** 按 workload 覆盖默认模型。 */
+  workloadModels?: Partial<Record<ModelRoleKey, string>>;
   /** 配置修订号：每次保存递增，用于清除相关路线的旧健康状态。 */
   revision: number;
 }
@@ -116,6 +126,23 @@ const COMPATIBLE_KINDS: ReadonlySet<ProviderKind> = new Set(['openai_compatible'
 /** 显式「本地兼容服务」允许的 http 主机。 */
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
+/** 去除模型名首尾空白；空字符串归一化为 undefined。 */
+function trimModel(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+/** 归一化 workload 模型覆盖表：丢弃空白值，无有效项时返回 undefined。 */
+function normalizeWorkloadModels(input?: Partial<Record<ModelRoleKey, string>>): Partial<Record<ModelRoleKey, string>> | undefined {
+  if (!input) return undefined;
+  const out: Partial<Record<ModelRoleKey, string>> = {};
+  for (const [key, value] of Object.entries(input)) {
+    const trimmed = trimModel(value);
+    if (trimmed) out[key as ModelRoleKey] = trimmed;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * 归一化 Provider 保存输入并校验（§8.1/§8.3）。
  * - 首版仅接受 `authType: 'api_key'`。
@@ -141,6 +168,8 @@ export function normalizeProviderInput(input: ProviderInput): { config: Provider
     if (url.hash || url.search) throw new Error('Base URL 禁止包含 query 或 fragment');
     baseURL = url.toString().replace(/\/$/, '');
   }
+  const defaultModel = trimModel(input.defaultModel);
+  const workloadModels = normalizeWorkloadModels(input.workloadModels);
   return {
     config: {
       id: input.id.trim(),
@@ -151,6 +180,8 @@ export function normalizeProviderInput(input: ProviderInput): { config: Provider
       authType: input.authType,
       credentialRef: `provider:${input.id.trim()}`,
       baseURL,
+      defaultModel,
+      workloadModels,
       revision: input.revision,
     },
     secret: input.apiKey?.trim() || undefined,
