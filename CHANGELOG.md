@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- normalize absolute symlinks in staged Pi runtime for Windows（1f68f11）
 - set explicit executableName for deterministic Linux executable（a733176）
 - harden execution policy, env safety and Pi interaction protocol（b918a92）
 - harden execution policy and Pi interaction protocol（ea90312）
