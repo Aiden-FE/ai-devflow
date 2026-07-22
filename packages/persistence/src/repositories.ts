@@ -681,6 +681,7 @@ export interface CredentialsRepo {
   upsert(key: string, encryptedValue: string): void;
   get(key: string): string | undefined;
   delete(key: string): void;
+  transaction<T>(fn: () => T): T;
 }
 function credentialsRepo(db: DatabaseSync): CredentialsRepo {
   return {
@@ -695,6 +696,9 @@ function credentialsRepo(db: DatabaseSync): CredentialsRepo {
     },
     delete(key) {
       db.prepare('DELETE FROM credentials WHERE key=?').run(key);
+    },
+    transaction(fn) {
+      return tx(db, fn);
     },
   };
 }

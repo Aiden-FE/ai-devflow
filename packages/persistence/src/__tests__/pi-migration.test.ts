@@ -50,6 +50,17 @@ describe('Pi-only schema migration (v9, active)', () => {
     expect(db.prepare("SELECT 1 AS x FROM credentials WHERE key='global_agent_config'").get()).toBeUndefined();
   });
 
+  it('backs up an existing v8 database even when it has zero projects', () => {
+    const path = freshPath();
+    const v8 = openDatabase(path, { maxVersion: 8 });
+    expect((v8.prepare('SELECT COUNT(*) AS n FROM projects').get() as { n: number }).n).toBe(0);
+    v8.close();
+
+    const db = openDatabase(path);
+    expect(getCurrentVersion(db)).toBe(9);
+    expect(readdirSync(join(path, '..', 'backups')).filter((name) => name.endsWith('.db'))).toHaveLength(1);
+  });
+
   it('keeps only the newest three backups by timestamp', () => {
     const dir = mkdtempSync(join(tmpdir(), 'aidf-v9-retain-'));
     const path = join(dir, 'app.db');

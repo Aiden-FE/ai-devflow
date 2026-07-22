@@ -1,3 +1,7 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRepositories, openDatabase } from '@ai-devflow/persistence';
 import { describe, expect, it } from 'vitest';
 import { ProviderStore } from '../provider-store.js';
 
@@ -56,6 +60,38 @@ describe('ProviderStore', () => {
     expect(harness.store.list()).toEqual([]);
     // No marker and the old ciphertext is preserved for the user to re-enter the key.
     expect(harness.credentials.get('ai_provider')).toBeDefined();
+  });
+
+  it('rolls back metadata, key, marker, and legacy deletion in one real SQLite transaction', () => {
+    const db = openDatabase(join(mkdtempSync(join(tmpdir(), 'aidf-provider-migration-')), 'app.db'));
+    const repos = createRepositories(db);
+    const encrypt = (value: string) => `enc:${Buffer.from(value).toString('base64')}`;
+    const decrypt = (value: string) => Buffer.from(value.slice(4), 'base64').toString();
+    repos.credentials.upsert('ai_provider', encrypt(JSON.stringify({
+      provider: 'openai', apiKey: 'legacy-key', model: 'discard-me',
+    })));
+    const store = new ProviderStore(
+      {
+        get: (key) => repos.credentials.get(key),
+        upsert: (key, value) => {
+          if (key === 'provider-migration:v1') throw new Error('injected marker failure');
+          repos.credentials.upsert(key, value);
+        },
+        delete: (key) => repos.credentials.delete(key),
+        transaction: (fn) => (repos.credentials as typeof repos.credentials & {
+          transaction<T>(work: () => T): T;
+        }).transaction(fn),
+      },
+      { encrypt, decrypt },
+      () => undefined,
+    );
+
+    expect(() => store.migrateLegacy()).toThrow(/injected marker failure/);
+    expect(repos.credentials.get('ai_provider')).toBeDefined();
+    expect(repos.credentials.get('providers:v1')).toBeUndefined();
+    expect(repos.credentials.get('provider-migration:v1')).toBeUndefined();
+    expect(store.listConfigs()).toEqual([]);
+    db.close();
   });
 
   it('fails closed when secure encryption is unavailable', () => {

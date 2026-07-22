@@ -32,7 +32,7 @@ export function openDatabase(path: string, opts: OpenDatabaseOptions = {}): Data
 }
 
 /**
- * 迁移前一致性备份（设计 §12.3）：仅当存在待应用迁移、库为文件型且已有业务数据时，
+ * 迁移前一致性备份（设计 §12.3）：只要文件型旧库存在待应用迁移，
  * 先 `VACUUM INTO` 到 <dbDir>/backups（保留最近三份），再执行迁移。':memory:' 库跳过。
  */
 function maybeBackupBeforeMigration(db: DatabaseSync, path: string, maxVersion?: number): void {
@@ -41,21 +41,8 @@ function maybeBackupBeforeMigration(db: DatabaseSync, path: string, maxVersion?:
   if (current === 0) return; // 全新库无需备份
   const target = maxVersion ?? MIGRATIONS[MIGRATIONS.length - 1]!.version;
   const hasPending = MIGRATIONS.some((m) => m.version > current && m.version <= target);
-  if (!hasPending || !hasBusinessData(db)) return;
+  if (!hasPending) return;
   backupBeforeMigration(db, path, join(dirname(path), 'backups'), current, Date.now());
-}
-
-function hasBusinessData(db: DatabaseSync): boolean {
-  try {
-    const r = db
-      .prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='projects'")
-      .get() as { c: number } | undefined;
-    if (!r?.c) return false;
-    const n = db.prepare('SELECT COUNT(*) AS c FROM projects').get() as { c: number } | undefined;
-    return (n?.c ?? 0) > 0;
-  } catch {
-    return false;
-  }
 }
 
 /** 运行未应用的迁移（≤ target，缺省全部），记录版本号。事务包裹保证原子。 */

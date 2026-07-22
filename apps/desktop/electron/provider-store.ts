@@ -168,16 +168,16 @@ export class ProviderStore {
    * workload map 接管）。仅在新记录落盘后写 marker 并于同一事务删除旧 key。无法解密时保留旧密文、
    * 不建记录/marker（调用方提示用户重新输入密钥）。
    */
-  migrateLegacy(): void {
-    if (this.credentials.get(MIGRATION_MARKER)) return;
+  migrateLegacy(): 'not_needed' | 'migrated' | 'needs_reentry' {
+    if (this.credentials.get(MIGRATION_MARKER)) return 'not_needed';
     const legacyEnc = this.credentials.get(LEGACY_KEY);
-    if (!legacyEnc) return;
+    if (!legacyEnc) return 'not_needed';
     let legacy: LegacyAiProvider;
     try {
       legacy = JSON.parse(this.crypto.decrypt(legacyEnc)) as LegacyAiProvider;
     } catch {
       // 无法解密：不伪造迁移成功，保留旧密文，等待用户重新输入密钥。
-      return;
+      return 'needs_reentry';
     }
     const id = randomUUID();
     const kind = legacy.provider === 'openai' ? 'openai' : 'anthropic';
@@ -199,5 +199,6 @@ export class ProviderStore {
       this.credentials.upsert(MIGRATION_MARKER, this.crypto.encrypt(`migrated:${id}`));
       this.credentials.delete(LEGACY_KEY);
     });
+    return 'migrated';
   }
 }

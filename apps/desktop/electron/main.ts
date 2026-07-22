@@ -3,7 +3,7 @@
 import { app, BrowserWindow, session, protocol, shell, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { createServices } from './services.js';
+import { createServices, initializeServices } from './services.js';
 import { registerIpc } from './ipc.js';
 import { ElectronNotifier, parseDeepLink } from './notifier.js';
 import type { Services } from './services.js';
@@ -115,6 +115,7 @@ app.whenReady().then(async () => {
 
   const notifier = new ElectronNotifier(() => mainWindow, (taskId) => handleDeepLink(taskId));
   services = createServices(notifier);
+  services.initializationStatus = await initializeServices(services);
 
   // 主题：在创建窗口前应用 nativeTheme.themeSource 与窗口背景，避免亮色启动闪黑。
   const mode = readThemeMode(services);

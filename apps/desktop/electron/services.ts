@@ -26,6 +26,48 @@ export interface Services {
   encryptSecret: (s: string) => string;
   decryptSecret: (s: string) => string;
   updater: Updater;
+  initializationStatus?: ServiceInitializationStatus;
+}
+
+export interface ServiceInitializationStatus {
+  credentialMigration: 'not_needed' | 'migrated' | 'needs_reentry' | 'failed';
+  runtime: 'ready' | 'unavailable';
+}
+
+interface InitializableServices {
+  piRuntime?: {
+    providerStore: {
+      migrateLegacy(): 'not_needed' | 'migrated' | 'needs_reentry';
+    };
+    locator: {
+      verify(): Promise<{ version: string; entry: string }>;
+    };
+  };
+}
+
+/**
+ * Complete all startup-only Pi initialization before IPC registration or scheduler recovery.
+ * Errors are deliberately collapsed to stable high-level states so credential/runtime details
+ * can never escape through logs or Renderer-visible service state.
+ */
+export async function initializeServices(
+  services: InitializableServices,
+): Promise<ServiceInitializationStatus> {
+  let credentialMigration: ServiceInitializationStatus['credentialMigration'] = 'not_needed';
+  try {
+    credentialMigration = services.piRuntime?.providerStore.migrateLegacy() ?? 'not_needed';
+  } catch {
+    credentialMigration = 'failed';
+  }
+
+  let runtime: ServiceInitializationStatus['runtime'] = 'unavailable';
+  try {
+    await services.piRuntime?.locator.verify();
+    runtime = services.piRuntime ? 'ready' : 'unavailable';
+  } catch {
+    runtime = 'unavailable';
+  }
+  return { credentialMigration, runtime };
 }
 
 export function createServices(notifier: Notifier): Services {

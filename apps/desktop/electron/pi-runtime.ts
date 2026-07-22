@@ -111,7 +111,7 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
       get: (k) => repos.credentials.get(k),
       upsert: (k, v) => repos.credentials.upsert(k, v),
       delete: (k) => repos.credentials.delete(k),
-      transaction: (fn) => fn(),
+      transaction: (fn) => repos.credentials.transaction(fn),
     },
     cipher,
     (providerId) => repos.providerHealth.clearProvider(providerId),
