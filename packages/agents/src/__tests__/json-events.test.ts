@@ -62,6 +62,71 @@ describe('createPiEventTranslator', () => {
     expect(() => translator.finish()).toThrow(/agent_end/);
   });
 
+  it('accepts agent_end after a clean interaction terminal without a report result', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction',
+      args: { kind: 'clarification', title: 'Need input', detail: 'Choose target' },
+    }));
+    const events = translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false,
+      result: { details: { kind: 'clarification', title: 'Need input', detail: 'Choose target' } },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+
+    expect(events).toContainEqual(expect.objectContaining({ type: 'ask_user', question: 'Need input' }));
+    expect(translator.hadInteraction()).toBe(true);
+    expect(translator.hasStructuredResult()).toBe(false);
+    expect(() => translator.finish()).not.toThrow();
+  });
+
+  it('rejects a failed interaction end followed by agent_end without pausing', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction',
+      args: { kind: 'clarification', title: 'Need input', detail: 'Choose target' },
+    }));
+    const events = translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: true,
+      result: { content: [{ type: 'text', text: 'policy blocked' }] },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'ask_user' }));
+    expect(translator.hadInteraction()).toBe(false);
+    expect(() => translator.finish()).toThrow(/protocol failure/);
+  });
+
+  it('rejects an interaction end without a matching start followed by agent_end', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    const events = translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false,
+      result: { details: { kind: 'clarification', title: 'Need input', detail: 'Choose target' } },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'ask_user' }));
+    expect(translator.hadInteraction()).toBe(false);
+    expect(() => translator.finish()).toThrow(/protocol failure/);
+  });
+
+  it('rejects a malformed interaction lifecycle followed by agent_end', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction',
+      args: { kind: 'clarification', title: 'Need input', detail: 'Choose target' },
+    }));
+    const events = translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false,
+      result: { details: {} },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'ask_user' }));
+    expect(translator.hadInteraction()).toBe(false);
+    expect(() => translator.finish()).toThrow(/protocol failure/);
+  });
+
   it('redacts the active route secret before emitting or journaling', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1', secrets: ['route-secret'] });
     const events = translator.push(JSON.stringify({ type: 'message_update', delta: 'never route-secret here' }));

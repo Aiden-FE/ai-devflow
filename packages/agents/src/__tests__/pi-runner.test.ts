@@ -145,6 +145,19 @@ it('stops without failover on an interaction and surfaces ask_user', async () =>
   expect(result.ok).toBe(true);
 });
 
+it('fails a reviewer latch-blocked interaction terminal without pausing', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'reviewer-latch-blocked-interaction' });
+  const run = await harness.runner.run({
+    taskId: 'reviewer-blocked', executionId: 'reviewer-blocked', role: 'reviewer', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'ask_user' }));
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  expect((await run.done()).ok).toBe(false);
+});
+
 it('does not fail over on a task-result failure (structured result received)', async () => {
   const harness = createPiRunnerHarness({ scenario: 'task-result-failure' });
   const run = await harness.runner.run({

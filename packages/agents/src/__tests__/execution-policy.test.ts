@@ -88,6 +88,64 @@ describe('execution policy', () => {
     });
   });
 
+  it.each(['coder', 'tester'] as const)(
+    'rejects package-manager execution wrappers and nested payloads for %s',
+    (role) => {
+      const policy = createExecutionPolicy({ role, worktree: worktree() });
+      for (const command of [
+        'pnpm exec node -e "process.exit(0)"',
+        'npm exec -- sh -c "touch escaped"',
+        'pnpm dlx tsx /tmp/outside.ts',
+        '/usr/local/bin/pnpm exec python3 -c "print(1)"',
+        'corepack pnpm --filter @ai-devflow/agents exec node -e "process.exit(0)"',
+        'corepack npm --workspace agents exec -- sh -c "touch escaped"',
+        'corepack yarn --cwd . exec node -e "process.exit(0)"',
+        '/usr/bin/corepack pnpm exec python3 -c "print(1)"',
+        'pnpm --filter @ai-devflow/agents node -e "process.exit(0)"',
+      ]) {
+        expect(bash(policy, command)).toMatchObject({
+          block: true,
+          reason: expect.stringContaining('policy:package-execution-wrapper'),
+        });
+      }
+    },
+  );
+
+  it.each([
+    'npm run test -- x',
+    'pnpm vitest run exec',
+  ])('does not classify a later verification argument as the package action: %s', (command) => {
+    const policy = createExecutionPolicy({ role: 'reviewer', worktree: worktree() });
+    expect(bash(policy, command)).toBeUndefined();
+  });
+
+  it.each([
+    'corepack pnpm@9 exec node -e "process.exit(0)"',
+    'corepack yarnpkg exec node -e "process.exit(0)"',
+    '/usr/bin/corepack prepare pnpm@9 --activate',
+    'npm --heading foo exec node -e "process.exit(0)"',
+    'pnpm --mystery value exec node -e "process.exit(0)"',
+    'yarnpkg exec node -e "process.exit(0)"',
+    'pnpm frobnicate',
+  ])('fails closed for ambiguous package-manager command: %s', (command) => {
+    const policy = createExecutionPolicy({ role: 'coder', worktree: worktree() });
+    expect(bash(policy, command)).toMatchObject({
+      block: true,
+      reason: expect.stringContaining('policy:package-execution-wrapper'),
+    });
+  });
+
+  it.each(['coder', 'tester'] as const)(
+    'rejects pnpm implicit interpreter execution for %s',
+    (role) => {
+      const policy = createExecutionPolicy({ role, worktree: worktree() });
+      expect(bash(policy, 'pnpm --filter @ai-devflow/agents node -e "process.exit(0)"')).toMatchObject({
+        block: true,
+        reason: expect.stringContaining('policy:package-execution-wrapper'),
+      });
+    },
+  );
+
   it.each(['coder', 'reviewer', 'tester'] as const)(
     'rejects command wrappers before classifying nested commands for %s',
     (role) => {
@@ -121,6 +179,9 @@ describe('execution policy', () => {
     expect(bash(policy, 'git diff --check')).toBeUndefined();
     expect(bash(policy, 'git status --porcelain')).toBeUndefined();
     expect(bash(policy, 'pnpm --filter @ai-devflow/agents test')).toBeUndefined();
+    expect(bash(policy, 'npm run test')).toBeUndefined();
+    expect(bash(policy, 'pnpm vitest run')).toBeUndefined();
+    expect(bash(policy, 'yarnpkg test')).toBeUndefined();
     expect(bash(policy, 'git status --output=owned')).toMatchObject({ block: true });
     expect(bash(policy, 'git -c alias.status=clean status')).toMatchObject({ block: true });
     expect(bash(policy, 'pnpm add left-pad')).toMatchObject({ block: true });

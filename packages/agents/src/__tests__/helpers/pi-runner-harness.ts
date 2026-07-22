@@ -30,7 +30,8 @@ export type FakeScenario =
   | 'report-without-end'
   | 'malformed-then-report'
   | 'provider-error-then-report'
-  | 'interaction-then-report';
+  | 'interaction-then-report'
+  | 'reviewer-latch-blocked-interaction';
 
 export interface PiRunnerHarness {
   runner: AgentRunner;

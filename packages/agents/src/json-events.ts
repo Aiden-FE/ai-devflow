@@ -76,6 +76,28 @@ function normalize(r: StructuredResult): StructuredResult {
   };
 }
 
+function interactionInput(value: unknown): { kind: 'clarification' | 'confirmation'; title: string; detail: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as { kind?: unknown; title?: unknown; detail?: unknown };
+  if (input.kind !== 'clarification' && input.kind !== 'confirmation') return undefined;
+  if (typeof input.title !== 'string' || typeof input.detail !== 'string') return undefined;
+  return { kind: input.kind, title: input.title, detail: input.detail };
+}
+
+function interactionResult(value: unknown): ReturnType<typeof interactionInput> {
+  const result = value as { details?: unknown; content?: Array<{ text?: string }> } | undefined;
+  const details = result?.details as { aiDevflowInteraction?: unknown } | undefined;
+  const direct = interactionInput(details?.aiDevflowInteraction ?? details);
+  if (direct) return direct;
+  const text = result?.content?.[0]?.text;
+  if (typeof text !== 'string') return undefined;
+  try {
+    return interactionInput((JSON.parse(text) as { aiDevflowInteraction?: unknown }).aiDevflowInteraction);
+  } catch {
+    return undefined;
+  }
+}
+
 export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEventTranslator {
   const redact = makeRedactor(opts.secrets ?? []);
   const journal: AttemptJournal = {
@@ -91,7 +113,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
   let result: StructuredResult | undefined;
   let providerError: { status: number; message: string } | undefined;
   let interactionOccurred = false;
-  let protocolFailure = false;
+  let protocolFailure: string | undefined;
 
   const t = () => now();
 
@@ -102,7 +124,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
       try {
         ev = JSON.parse(line) as Record<string, unknown>;
       } catch {
-        protocolFailure = true;
+        protocolFailure ??= 'Pi stdout 包含非法 JSON';
         return events;
       }
       const type = ev.type as string | undefined;
@@ -130,6 +152,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
           const name = String(ev.toolName ?? '');
           const isError = ev.isError === true;
           const call = journal.toolCalls.find((c) => c.id === id);
+          const matchedStart = call?.name === name && call.state === 'started';
           if (call) call.state = isError ? 'failed' : 'completed';
           const args = pendingArgs.get(id) ?? {};
           if (name === REPORT_TOOL) {
@@ -143,9 +166,19 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
               };
             }
           } else if (name === INTERACTION_TOOL) {
-            const input = (args as { kind?: string; title?: string; detail?: string }) ?? {};
-            interactionOccurred = true;
-            events.push({ type: 'ask_user', question: redact(input.title ?? '需要确认'), context: redact(input.detail ?? ''), t: t() });
+            const input = interactionInput(args);
+            const completed = interactionResult(ev.result);
+            const payloadMatches = input && completed
+              && input.kind === completed.kind
+              && input.title === completed.title
+              && input.detail === completed.detail;
+            if (!matchedStart || ev.isError !== false || !payloadMatches) {
+              protocolFailure ??= 'interaction 工具生命周期无效';
+              if (call) call.state = 'failed';
+            } else {
+              interactionOccurred = true;
+              events.push({ type: 'ask_user', question: redact(input.title), context: redact(input.detail), t: t() });
+            }
           } else if (FILE_TOOLS.has(name)) {
             const path = typeof args.path === 'string' ? args.path : undefined;
             if (path) {
@@ -182,12 +215,14 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
         if (call.state === 'started') call.state = 'uncertain';
       }
       if (protocolFailure) {
-        throw new Error('protocol failure：Pi stdout 包含非法 JSON');
+        throw new Error(`protocol failure：${protocolFailure}`);
       }
       if (interactionOccurred) {
-        if (result || agentEnded) {
+        if (result) {
           throw new Error('protocol failure：未解决的 interaction 不得同时报告任务完成');
         }
+        // Real Pi may close the turn with agent_end after the interaction tool. Without a
+        // structured result this is still a pause terminal, never task completion.
         return;
       }
       if (!agentEnded && result) {

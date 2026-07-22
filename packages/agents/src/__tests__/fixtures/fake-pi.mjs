@@ -86,7 +86,8 @@ switch (scenario) {
   case 'interaction':
     emit({ type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction', args: { kind: 'clarification', title: 'need input', detail: 'please clarify' } });
     emit({ type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false, result: { details: { aiDevflowInteraction: { kind: 'clarification', title: 'need input', detail: 'please clarify' } } } });
-    // 不输出 report_result / agent_end；supervisor 在工具结果后终止进程，runner 识别为暂停（非降级）。
+    // Real Pi emits agent_end after the interaction tool; no report_result means this remains a pause terminal.
+    emit({ type: 'agent_end', messages: [] });
     process.exit(0);
     break;
 
@@ -123,6 +124,15 @@ switch (scenario) {
     emit({ type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction', args: { kind: 'clarification', title: 'need input', detail: 'please clarify' } });
     emit({ type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false, result: { details: {} } });
     succeed('report after unresolved interaction');
+    break;
+
+  case 'reviewer-latch-blocked-interaction':
+    emit({ type: 'tool_execution_start', toolCallId: 'b1', toolName: 'bash', args: { command: 'git status --porcelain' } });
+    emit({ type: 'tool_execution_end', toolCallId: 'b1', toolName: 'bash', isError: true, result: { content: [{ type: 'text', text: 'policy:reviewer-tracked-files-changed' }] } });
+    emit({ type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction', args: { kind: 'clarification', title: 'Need input', detail: 'Choose target' } });
+    emit({ type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: true, result: { content: [{ type: 'text', text: 'policy:reviewer-integrity-violation' }] } });
+    emit({ type: 'agent_end', messages: [] });
+    process.exit(0);
     break;
 
   default:

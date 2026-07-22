@@ -47,6 +47,22 @@ const DESTRUCTIVE_GIT = new Set([
 const INTERPRETERS = new Set(['node', 'python', 'python3', 'perl', 'ruby', 'php']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']);
 const COMMAND_WRAPPERS = new Set(['env', 'command', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout', 'xargs']);
+const DIRECT_PACKAGE_WRAPPERS = new Set(['npx', 'pnpx', 'bunx']);
+const PACKAGE_EXECUTION_ACTIONS: Partial<Record<string, Set<string>>> = {
+  pnpm: new Set(['exec', 'dlx']),
+  npm: new Set(['exec', 'x']),
+  yarn: new Set(['exec', 'dlx']),
+  bun: new Set(['x']),
+};
+const PACKAGE_VERIFICATION_ACTIONS: Record<string, Set<string>> = {
+  pnpm: new Set(['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc']),
+  npm: new Set(['test']),
+  yarn: new Set(['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc']),
+  bun: new Set(['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc']),
+};
+const PACKAGE_VERIFICATION_SCRIPTS = new Set(['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc']);
+
+type PackageCommandDisposition = 'verification' | 'install' | 'deny';
 
 function block(code: string, detail: string): BlockResult {
   return { block: true, reason: `policy:${code}: ${detail}` };
@@ -139,14 +155,40 @@ function firstOutsidePath(worktree: string, argv: string[]): string | undefined 
   return undefined;
 }
 
-function packageAction(argv: string[]): string | undefined {
-  const first = commandName(argv[0]);
-  if (!['pnpm', 'npm', 'yarn', 'bun'].includes(first)) return undefined;
-  for (const arg of argv.slice(1)) {
-    const action = arg.toLowerCase();
-    if (INSTALL_ACTIONS.has(action)) return action;
+function packageManager(token: string | undefined): string | undefined {
+  const name = commandName(token);
+  if (name === 'yarnpkg') return 'yarn';
+  return PACKAGE_EXECUTION_ACTIONS[name] ? name : undefined;
+}
+
+function packageCommandDisposition(argv: string[]): PackageCommandDisposition | undefined {
+  const executable = commandName(argv[0]);
+  if (executable === 'corepack' || DIRECT_PACKAGE_WRAPPERS.has(executable)) return 'deny';
+
+  const manager = packageManager(argv[0]);
+  if (!manager) return undefined;
+  let args = argv.slice(1);
+
+  // The only required manager-global prefix is the repository's filtered pnpm form.
+  if (manager === 'pnpm' && args[0] === '--filter') {
+    const selector = args[1];
+    if (!selector || selector.startsWith('-')) return 'deny';
+    args = args.slice(2);
+  } else if (args[0]?.startsWith('-')) {
+    return 'deny';
   }
-  return undefined;
+
+  const actionToken = args[0];
+  if (!actionToken || actionToken !== actionToken.toLowerCase() || commandName(actionToken) !== actionToken) {
+    return 'deny';
+  }
+  if (PACKAGE_EXECUTION_ACTIONS[manager]?.has(actionToken)) return 'deny';
+  if (INSTALL_ACTIONS.has(actionToken)) return 'install';
+  if (actionToken === 'run') {
+    const script = args[1];
+    return script && PACKAGE_VERIFICATION_SCRIPTS.has(script) ? 'verification' : 'deny';
+  }
+  return PACKAGE_VERIFICATION_ACTIONS[manager]?.has(actionToken) ? 'verification' : 'deny';
 }
 
 function gitSubcommand(argv: string[]): string | undefined {
@@ -203,10 +245,7 @@ function reviewerPackageTestAllowed(argv: string[]): boolean {
   const first = commandName(argv[0]);
   if (first === 'cargo') return argv[1] === 'test';
   if (first === 'go') return argv[1] === 'test';
-  if (!['pnpm', 'npm', 'yarn', 'bun'].includes(first)) return false;
-  const actions = argv.filter((arg) => !arg.startsWith('-'));
-  if (actions[0] === first) actions.shift();
-  return actions.some((arg) => ['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc'].includes(arg));
+  return packageCommandDisposition(argv) === 'verification';
 }
 
 function reviewerCommandAllowed(argv: string[]): boolean {
@@ -276,6 +315,10 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
       if (!argv?.length) return block('shell-parse', '命令参数无法安全解析');
 
       const executable = argv[0]!;
+      const packageDisposition = packageCommandDisposition(argv);
+      if (packageDisposition === 'deny') {
+        return block('package-execution-wrapper', '禁止通过包管理器执行任意嵌套命令');
+      }
       if (COMMAND_WRAPPERS.has(commandName(executable))) {
         return block('command-wrapper', '禁止通过命令包装器改变被审查的可执行命令');
       }
@@ -285,8 +328,7 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
 
       if (hasFindMutation(argv)) return block('find-mutation', '禁止 find 删除或执行子命令');
       if (hasForbiddenInterpreterEscape(argv)) return block('interpreter-escape', '禁止 shell/interpreter 逃逸');
-      const action = packageAction(argv);
-      if (action) return block('install-forbidden', '禁止安装/发布依赖');
+      if (packageDisposition === 'install') return block('install-forbidden', '禁止安装/发布依赖');
       const subcommand = gitSubcommand(argv);
       if (subcommand && DESTRUCTIVE_GIT.has(subcommand)) {
         return block('git-mutation', '禁止破坏性或变更型 git 命令');
