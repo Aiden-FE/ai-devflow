@@ -194,7 +194,9 @@ function verifyManifest(app) {
     if (typeof expectedTarget !== 'string') fail(`runtime manifest 符号链接 target 无效：${rel}`);
     const path = safeRuntimePath(app.runtimeDir, rel);
     const actualTarget = tree.links.get(rel);
-    if (actualTarget !== expectedTarget) fail(`runtime 符号链接被重定向：${rel}`);
+    if (actualTarget !== expectedTarget) {
+      fail(`runtime 符号链接被重定向：${rel}\n  期望：${expectedTarget}\n  实际：${actualTarget}`);
+    }
     let resolvedTarget;
     try {
       resolvedTarget = realpathSync(path);
