@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- set explicit executableName for deterministic Linux executable（a733176）
 - harden execution policy, env safety and Pi interaction protocol（b918a92）
 - harden execution policy and Pi interaction protocol（ea90312）
 - enforce provider-wide auth readiness（67acab9）
@@ -40,6 +41,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
 
 ### 其他变更
+- add directory listing diagnostics to verify-packaged-pi on missing executable（202e9af）
 - harden real Pi secret and planner gates（43c7876）
 - require real reviewer policy denial（ef3174b）
 - align packaged profile isolation checks（c3cc5e3）
