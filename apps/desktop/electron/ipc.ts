@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
-import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput } from '@ai-devflow/core';
+import { hasModelConfig } from './provider-store.js';
+import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig } from '@ai-devflow/core';
 import {
   randomId,
   now,
@@ -403,7 +404,8 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- AI 服务商（有序提供商列表，Pi-only；脱敏契约，不暴露模型/密钥/credentialRef） ----
   const providerStore = services.providerStore;
-  const healthView = (providerId: string): 'available' | 'untested' | 'cooldown' | 'configuration_error' => {
+  const healthView = (providerId: string, config?: ProviderConfig): 'available' | 'untested' | 'cooldown' | 'configuration_error' => {
+    if (config && !hasModelConfig(config)) return 'configuration_error';
     const hs = repos.providerHealth.listByProvider(providerId);
     if (hs.length === 0) return 'untested';
     const nowMs = Date.now();
@@ -411,13 +413,15 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (hs.some((h) => h.state === 'open' && (h.cooldownUntil === undefined || h.cooldownUntil > nowMs))) return 'cooldown';
     return 'available';
   };
-  ipcMain.handle(channel('providers', 'list'), () =>
-    (providerStore?.list() ?? []).map((p) => ({ ...p, health: healthView(p.id) })),
-  );
+  ipcMain.handle(channel('providers', 'list'), () => {
+    const configs = new Map((providerStore?.listConfigs() ?? []).map((c) => [c.id, c] as const));
+    return (providerStore?.list() ?? []).map((p) => ({ ...p, health: healthView(p.id, configs.get(p.id)) }));
+  });
   ipcMain.handle(channel('providers', 'save'), (_e, input) => {
     if (!providerStore) throw new Error('provider store 不可用');
     const summary = providerStore.save(input);
-    return { ...summary, health: healthView(summary.id) };
+    const config = providerStore.listConfigs().find((c) => c.id === summary.id);
+    return { ...summary, health: healthView(summary.id, config) };
   });
   ipcMain.handle(channel('providers', 'remove'), (_e, id: string) => {
     providerStore?.remove(id);
@@ -426,7 +430,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     providerStore?.reorder(ids);
   });
   ipcMain.handle(channel('providers', 'health'), () =>
-    (providerStore?.listConfigs() ?? []).map((p) => ({ providerId: p.id, status: healthView(p.id) })),
+    (providerStore?.listConfigs() ?? []).map((p) => ({ providerId: p.id, status: healthView(p.id, p) })),
   );
   const migrationStatus = () => {
     const state = services.initializationStatus?.credentialMigration;
@@ -441,12 +445,23 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       credentialMigration: 'migrated',
       runtime: services.initializationStatus?.runtime ?? 'unavailable',
     };
-    return { ...summary, health: healthView(summary.id) };
+    const config = providerStore.listConfigs().find((c) => c.id === summary.id);
+    return { ...summary, health: healthView(summary.id, config) };
   });
   // 测试连接：经 ProviderRouter 解析该提供商的可用路线并做一次最小 Pi 探测。
   ipcMain.handle(channel('providers', 'test'), (_e, id: string) => {
     if (!services.piAi) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };
     return services.piAi.testConnection(id);
+  });
+  // 列出兼容网关可用模型：解析 provider 配置与密钥后调用 fetchCompatibleModels。
+  // 标准提供商返回空数组；密钥仅在 Main 进程内使用，不进入 Renderer。
+  ipcMain.handle(channel('providers', 'listModels'), async (_e, id: string) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    const config = providerStore.listConfigs().find((p) => p.id === id);
+    if (!config) throw new Error('提供商不存在');
+    const secret = providerStore.resolveSecret(id) ?? '';
+    if (!services.piAi) throw new Error('AI 服务未就绪');
+    return services.piAi.listModels(config, secret);
   });
 
   // ---- 自动更新 ----

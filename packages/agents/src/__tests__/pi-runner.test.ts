@@ -220,7 +220,7 @@ it('verifies the runtime via the locator', async () => {
   expect(verified.entry).toBe(harness.fakePiEntry);
 });
 
-it('materializes with the real provider revision and complete primary/fallback model set', async () => {
+it('materializes with the real provider revision and resolved model set', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const run = await harness.runner.run({
     taskId: 't1', executionId: 'profile-identity', role: 'coder', prompt: 'p', cwd: harness.cwd,
@@ -231,7 +231,7 @@ it('materializes with the real provider revision and complete primary/fallback m
     expect.objectContaining({
       providerId: 'p1',
       providerRevision: 7,
-      models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+      models: ['gpt-default'],
     }),
   ]);
 });

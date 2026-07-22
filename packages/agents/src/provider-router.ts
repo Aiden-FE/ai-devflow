@@ -1,15 +1,19 @@
 // ProviderRouter：有序提供商路由 + 熔断/降级（设计 §9）。
 //
-// - 候选顺序：当前 workload 在提供商 N 的 primary → fallback → 提供商 N+1 …
-// - 禁用/无凭证/无该 workload 模型映射/仍处熔断冷却的路线不进入本轮候选；
+// - 模型来源：用户配置的 ProviderConfig.defaultModel / workloadModels（按 ModelRoleKey 覆盖）。
+//   每个 workload 在每个提供商下至多解析出一个模型 -> 一条候选路线（无同提供商 fallback 层）；
+//   解析不到模型的提供商对该 workload 跳过。
+// - 候选顺序：提供商 N 的路线 -> 提供商 N+1 的路线 …（按 priority 升序）。
+//   禁用/无凭证/无该 workload 模型/仍处熔断冷却的路线不进入本轮候选；
 //   若全部路线都在冷却，仅选最早到期的一条做 half-open 探测（禁止忙循环）。
 // - 故障分类驱动熔断：authentication/model_unavailable 开到 revision 变更；rate_limit 用 Retry-After
 //   或指数冷却并立即降级；transient/runtime/protocol 当前路线重试一次再冷却降级。
 // - 总尝试上限 8 次 operation 调用。Pi 自身 retry 关闭，重试只由本路由控制（§7.5/§9.4）。
 //
 // ProviderHealthStore 结构化依赖（不 import persistence）；Task 9 由 Electron 注入持久化仓储。
+// modelRouteFor 为集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入。
 import { createHash } from 'node:crypto';
-import type { FailureKind, ProviderConfig, ProviderHealth, ProviderKind, Workload } from '@ai-devflow/core';
+import type { FailureKind, ModelRoleKey, ProviderConfig, ProviderHealth, ProviderKind, Workload } from '@ai-devflow/core';
 
 export interface ModelChoice {
   model: string;
@@ -31,7 +35,7 @@ export interface ProviderRoute {
   providerName: string;
   routeId: string;
   model: string;
-  /** 当前 workload 在该提供商下的完整 primary/fallback 模型集合。 */
+  /** 当前 workload 在该提供商下解析出的模型集合（单元素：用户配置解析出的唯一模型）。 */
   models: string[];
   thinking: ModelChoice['thinking'];
   baseURL?: string;
@@ -58,9 +62,8 @@ export interface ProviderHealthStore {
   clearProvider(providerId: string): void;
 }
 
-// ---- 内置模型表（设计 §7.2，逐字固定；升级需经真实提供商发布验证） ----
+// ---- 模型解析（设计 §7.2：模型由用户配置，不再内置 MODEL_TABLE） ----
 
-type RoleKey = 'planner' | 'coder' | 'reviewer' | 'tester';
 type BaseKind = 'anthropic' | 'openai' | 'google' | 'deepseek' | 'openrouter';
 
 export interface ModelRoute {
@@ -68,68 +71,47 @@ export interface ModelRoute {
   fallback?: ModelChoice;
 }
 
-const MODEL_TABLE: Record<BaseKind, Record<RoleKey, ModelRoute>> = {
-  anthropic: {
-    planner: { primary: { model: 'claude-sonnet-5', thinking: 'high' }, fallback: { model: 'claude-sonnet-4-6', thinking: 'high' } },
-    coder: { primary: { model: 'claude-sonnet-5', thinking: 'xhigh' }, fallback: { model: 'claude-sonnet-4-6', thinking: 'high' } },
-    reviewer: { primary: { model: 'claude-sonnet-5', thinking: 'high' }, fallback: { model: 'claude-sonnet-4-6', thinking: 'high' } },
-    tester: { primary: { model: 'claude-sonnet-4-6', thinking: 'medium' }, fallback: { model: 'claude-sonnet-4-5', thinking: 'medium' } },
-  },
-  openai: {
-    planner: { primary: { model: 'gpt-5.6-terra', thinking: 'high' }, fallback: { model: 'gpt-5.4', thinking: 'high' } },
-    coder: { primary: { model: 'gpt-5.6-sol', thinking: 'xhigh' }, fallback: { model: 'gpt-5.6-terra', thinking: 'high' } },
-    reviewer: { primary: { model: 'gpt-5.6-terra', thinking: 'high' }, fallback: { model: 'gpt-5.4', thinking: 'high' } },
-    tester: { primary: { model: 'gpt-5.6-luna', thinking: 'medium' }, fallback: { model: 'gpt-5.4-mini', thinking: 'medium' } },
-  },
-  google: {
-    planner: { primary: { model: 'gemini-3.1-pro-preview', thinking: 'high' }, fallback: { model: 'gemini-2.5-pro', thinking: 'high' } },
-    coder: { primary: { model: 'gemini-3.1-pro-preview', thinking: 'high' }, fallback: { model: 'gemini-2.5-pro', thinking: 'high' } },
-    reviewer: { primary: { model: 'gemini-3.1-pro-preview', thinking: 'high' }, fallback: { model: 'gemini-2.5-pro', thinking: 'medium' } },
-    tester: { primary: { model: 'gemini-3.5-flash', thinking: 'medium' }, fallback: { model: 'gemini-2.5-flash', thinking: 'medium' } },
-  },
-  deepseek: {
-    planner: { primary: { model: 'deepseek-v4-pro', thinking: 'high' }, fallback: { model: 'deepseek-v4-flash', thinking: 'medium' } },
-    coder: { primary: { model: 'deepseek-v4-pro', thinking: 'high' }, fallback: { model: 'deepseek-v4-flash', thinking: 'high' } },
-    reviewer: { primary: { model: 'deepseek-v4-pro', thinking: 'high' }, fallback: { model: 'deepseek-v4-flash', thinking: 'medium' } },
-    tester: { primary: { model: 'deepseek-v4-flash', thinking: 'medium' } },
-  },
-  openrouter: {
-    planner: { primary: { model: 'anthropic/claude-sonnet-5', thinking: 'high' }, fallback: { model: 'anthropic/claude-sonnet-4.6', thinking: 'high' } },
-    coder: { primary: { model: 'openai/gpt-5.6-sol', thinking: 'xhigh' }, fallback: { model: 'anthropic/claude-sonnet-5', thinking: 'high' } },
-    reviewer: { primary: { model: 'anthropic/claude-sonnet-4.6', thinking: 'high' }, fallback: { model: 'openai/gpt-5.6-terra', thinking: 'high' } },
-    tester: { primary: { model: 'deepseek/deepseek-v4-flash', thinking: 'medium' }, fallback: { model: 'google/gemini-3.5-flash', thinking: 'medium' } },
-  },
-};
-
+/** 兼容网关 -> 标准基底（仅用于 providerNameFor 生成 ai-devflow-<hash> 名）。 */
 const COMPATIBLE_BASE: Partial<Record<ProviderKind, BaseKind>> = {
   openai_compatible: 'openai',
   anthropic_compatible: 'anthropic',
 };
 
-function baseKindOf(kind: ProviderKind): BaseKind | undefined {
-  if (COMPATIBLE_BASE[kind]) return COMPATIBLE_BASE[kind];
-  if (kind === 'anthropic' || kind === 'openai' || kind === 'google' || kind === 'deepseek' || kind === 'openrouter') {
-    return kind;
+/**
+ * workload -> 模型角色键（设计 §7.2）。`chat` 覆盖 task_chat/requirement_chat，
+ * `proposal` 覆盖 task_proposal/requirement_proposal；四角色一一对应。
+ */
+export function workloadRoleKey(workload: Workload): ModelRoleKey {
+  switch (workload) {
+    case 'planner': return 'planner';
+    case 'coder': return 'coder';
+    case 'reviewer': return 'reviewer';
+    case 'tester': return 'tester';
+    case 'task_chat':
+    case 'requirement_chat': return 'chat';
+    case 'task_proposal':
+    case 'requirement_proposal': return 'proposal';
   }
-  return undefined;
 }
 
-/** workload → 取用哪个角色的模型表（对话=tester，结构化提案=planner）。 */
-function roleKeyOf(workload: Workload): RoleKey {
-  switch (workload) {
-    case 'planner':
-    case 'coder':
-    case 'reviewer':
-    case 'tester':
-      return workload;
-    case 'task_chat':
-    case 'requirement_chat':
-      return 'tester';
-    case 'task_proposal':
-    case 'requirement_proposal':
-      return 'planner';
-  }
+/**
+ * 解析某提供商在指定 workload 下应使用的模型：workloadModels 按角色覆盖，否则取 defaultModel；
+ * 两者皆无返回 undefined（调用方跳过该提供商对此 workload 的候选）。
+ */
+export function resolveModelFor(provider: ProviderConfig, workload: Workload): string | undefined {
+  const role = workloadRoleKey(workload);
+  return provider.workloadModels?.[role] ?? provider.defaultModel;
 }
+
+/** 用户配置模型不携带 thinking 等级；按角色回落到默认等级（modelRouteFor 缝可显式覆盖）。 */
+const DEFAULT_THINKING_BY_ROLE: Record<ModelRoleKey, ModelChoice['thinking']> = {
+  planner: 'high',
+  coder: 'xhigh',
+  reviewer: 'high',
+  tester: 'medium',
+  chat: 'medium',
+  proposal: 'high',
+};
 
 function providerNameFor(provider: ProviderConfig): string {
   const base = COMPATIBLE_BASE[provider.kind];
@@ -185,16 +167,15 @@ export interface ProviderRouterDeps {
   health: ProviderHealthStore;
   now(): number;
   sleep(ms: number): Promise<void>;
-  /** Integration-test seam for a real provider model that is not the built-in production matrix. */
+  /** 集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入非生产模型。 */
   modelRouteFor?: (provider: ProviderConfig, workload: Workload) => ModelRoute | undefined;
 }
 
 export class ProviderRouter {
   constructor(private deps: ProviderRouterDeps) {}
 
-  /** 生成某 workload 的候选路线（primary→fallback→下一提供商），跳过冷却路线；全冷却时仅 half-open 探测最早到期者。 */
+  /** 生成某 workload 的候选路线（每提供商至多一条：用户配置解析出的模型），跳过冷却路线；全冷却时仅 half-open 探测最早到期者。 */
   routesFor(workload: Workload, now = this.deps.now()): ProviderRoute[] {
-    const roleKey = roleKeyOf(workload);
     const providers = this.deps
       .listProviders()
       .filter((p) => p.enabled)
@@ -212,43 +193,42 @@ export class ProviderRouter {
       if (authHealth?.state === 'open' || authHealth?.state === 'half_open') continue;
       const secret = this.deps.resolveSecret(provider.id);
       if (!secret) continue;
-      const base = baseKindOf(provider.kind);
-      const modelRoute = this.deps.modelRouteFor?.(provider, workload)
-        ?? (base ? MODEL_TABLE[base][roleKey] : undefined);
-      if (!modelRoute) continue;
-      const providerName = providerNameFor(provider);
-      const models = [modelRoute.primary.model, modelRoute.fallback?.model]
-        .filter((model): model is string => model !== undefined);
-      const tiers: Array<['primary' | 'fallback', ModelChoice | undefined]> = [
-        ['primary', modelRoute.primary],
-        ['fallback', modelRoute.fallback],
-      ];
-      for (const [tier, choice] of tiers) {
-        if (!choice) continue;
-        const routeId = `${provider.id}:${workload}:${tier}`;
-        const h = this.deps.health.get(provider.id, routeId);
-        const isOpen = h?.state === 'open';
-        const isHalfOpen = h?.state === 'half_open';
-        // open 且无到期（auth/model 直到 revision 变更）或到期未到 → 冷却中。
-        const cooling = !!isHalfOpen || (!!isOpen && (h!.cooldownUntil === undefined || h!.cooldownUntil > now));
-        candidates.push({
-          route: {
-            providerId: provider.id,
-            providerRevision: provider.revision,
-            providerKind: provider.kind,
-            providerName,
-            routeId,
-            model: choice.model,
-            models,
-            thinking: choice.thinking,
-            baseURL: provider.baseURL,
-            secret,
-          },
-          cooling,
-          cooldownUntil: h?.cooldownUntil,
-          probeEligible: !!isOpen && h?.cooldownUntil !== undefined,
-        });
+      // modelRouteFor 缝存在时覆盖用户配置解析（含 thinking）；否则按 defaultModel/workloadModels 解析。
+      const seam = this.deps.modelRouteFor?.(provider, workload);
+      let model: string | undefined;
+      let thinking: ModelChoice['thinking'];
+      if (seam) {
+        model = seam.primary.model;
+        thinking = seam.primary.thinking;
+      } else {
+        model = resolveModelFor(provider, workload);
+        thinking = DEFAULT_THINKING_BY_ROLE[workloadRoleKey(workload)];
       }
+      if (model === undefined) continue;
+      const providerName = providerNameFor(provider);
+      const routeId = `${provider.id}:${workload}`;
+      const h = this.deps.health.get(provider.id, routeId);
+      const isOpen = h?.state === 'open';
+      const isHalfOpen = h?.state === 'half_open';
+      // open 且无到期（auth/model 直到 revision 变更）或到期未到 -> 冷却中。
+      const cooling = !!isHalfOpen || (!!isOpen && (h!.cooldownUntil === undefined || h!.cooldownUntil > now));
+      candidates.push({
+        route: {
+          providerId: provider.id,
+          providerRevision: provider.revision,
+          providerKind: provider.kind,
+          providerName,
+          routeId,
+          model,
+          models: [model],
+          thinking,
+          baseURL: provider.baseURL,
+          secret,
+        },
+        cooling,
+        cooldownUntil: h?.cooldownUntil,
+        probeEligible: !!isOpen && h?.cooldownUntil !== undefined,
+      });
     }
 
     const active = candidates.filter((c) => !c.cooling).map((c) => c.route);

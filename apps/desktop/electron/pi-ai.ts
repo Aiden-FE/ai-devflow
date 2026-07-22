@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
+import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
 import { redactText, validateProposalDag } from '@ai-devflow/core';
 import { z } from 'zod';
 import type {
@@ -21,6 +21,7 @@ import {
   isCompatibleKind,
 } from '@ai-devflow/agents';
 import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_TASK_SYSTEM } from './pi-ai-prompts.js';
+import { fetchCompatibleModels } from './provider-models.js';
 
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
@@ -38,6 +39,11 @@ export interface PiAiService {
   propose(messages: AiChatMessage[], context?: string): Promise<AiTaskProposal[]>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
+  /**
+   * 列出兼容网关可用模型；标准提供商返回空数组（不发起网络请求）。
+   * `provider` / `secret` 由调用方（IPC 层）从 ProviderStore 解析；密钥不进入 Renderer。
+   */
+  listModels(provider: ProviderConfig, secret: string): Promise<{ id: string }[]>;
 }
 
 export interface ProductionExecutorDeps {
@@ -377,6 +383,11 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
 
     testConnection(providerId) {
       return testConnectionWithRouter(executeText, providerId);
+    },
+
+    async listModels(provider, secret) {
+      const ids = await fetchCompatibleModels(provider, secret);
+      return ids.map((id) => ({ id }));
     },
   };
 }
