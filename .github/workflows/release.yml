@@ -194,6 +194,10 @@ jobs:
       - name: Build unpacked application for matrix architecture
         run: pnpm --filter @ai-devflow/desktop exec electron-builder --dir --${{ matrix.arch }}
 
+      - name: Normalize symlinks in packaged Pi runtime (Windows)
+        if: runner.os == 'Windows'
+        run: node apps/desktop/scripts/normalize-pi-symlinks.mjs apps/desktop/release
+
       - name: Inspect packaged Pi runtime
         run: |
           set -o pipefail

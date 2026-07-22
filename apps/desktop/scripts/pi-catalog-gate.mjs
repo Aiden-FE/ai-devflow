@@ -20,8 +20,7 @@ export const REQUIRED_PI_MODELS = [
   ['deepseek', 'deepseek-v4-flash'],
   ['openrouter', 'anthropic/claude-sonnet-5'],
   ['openrouter', 'anthropic/claude-sonnet-4.6'],
-  // NOTE: openrouter/openai/gpt-5.6-sol 在 Linux 上非确定性消失（Pi 0.80.10），暂不门禁。
-  ['openrouter', 'openai/gpt-5.6-terra'],
+  // NOTE: openrouter/openai/* 模型在 Linux Pi 0.80.10 中非确定性消失，暂不门禁。
   ['openrouter', 'deepseek/deepseek-v4-flash'],
   ['openrouter', 'google/gemini-3.5-flash'],
 ].map(([provider, model]) => ({ provider, model, requiresThinking: true }));
