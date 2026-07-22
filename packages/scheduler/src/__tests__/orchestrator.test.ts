@@ -91,13 +91,14 @@ describe('orchestrator pipeline', () => {
     expect(events.some((e) => e.event.type === 'file_change')).toBe(true);
   });
 
-  it('passes role + executionId to the runner for dev and review', async () => {
-    const t = makeTask();
+  it('passes the stage role + executionId to the runner for dev and review', async () => {
+    const t = makeTask({
+      role: 'coder',
+      stages: [{ id: 'plan', name: '规划', role: 'planner' }],
+    });
     repos.tasks.insert(t);
     await orch.start(t.id);
-    const roles = runner.requests.map((r) => r.role);
-    expect(roles).toContain('coder');
-    expect(roles).toContain('reviewer');
+    expect(runner.requests.map((r) => r.role)).toEqual(['planner', 'reviewer']);
     expect(runner.requests.every((r) => !!r.executionId)).toBe(true);
   });
 });
@@ -295,7 +296,7 @@ describe('orchestrator approval flow', () => {
 describe('orchestrator bounded retry (no infinite loop)', () => {
   beforeEach(() => setup(() => [{ type: 'done', summary: 'ok', t: 0 }]));
 
-  it('stops after maxAttempts and returns task to ready', async () => {
+  it('stops after maxAttempts in awaiting_input with a sanitized provider interaction', async () => {
     const fr = new FakeAgentRunner(() => [{ type: 'error', message: 'boom', recoverable: true, t: 0 }]);
     const orch2 = makeOrch(repos, fr, { autoRetry: true, retryPolicy: { maxAttempts: 2, baseDelayMs: 5, maxDelayMs: 20, backoff: true } });
     const t = makeTask();
@@ -303,13 +304,16 @@ describe('orchestrator bounded retry (no infinite loop)', () => {
     await orch2.start(t.id);
     for (let i = 0; i < 60; i++) {
       const tk = repos.tasks.get(t.id);
-      if (tk!.status === 'ready' && repos.executions.listByTask(t.id).length >= 2) break;
+      if (tk!.status === 'awaiting_input' && repos.executions.listByTask(t.id).length >= 2) break;
       await new Promise((r) => setTimeout(r, 20));
     }
     const final = repos.tasks.get(t.id)!;
-    expect(final.status).toBe('ready');
+    expect(final.status).toBe('awaiting_input');
     const failed = repos.executions.listByTask(t.id).filter((e) => e.status === 'failed');
     expect(failed.length).toBe(2);
+    const interaction = repos.pendingInteractions.getPendingForTask(t.id);
+    expect(interaction).toMatchObject({ kind: 'clarification', status: 'pending' });
+    expect(`${interaction?.title} ${interaction?.detail}`).toContain('AI 服务');
   }, 8000);
 
   it('worktree creation failure is bounded and logs the reason (no infinite loop)', async () => {
@@ -322,11 +326,11 @@ describe('orchestrator bounded retry (no infinite loop)', () => {
     await orch2.start(t.id);
     for (let i = 0; i < 60; i++) {
       const tk = repos.tasks.get(t.id);
-      if (tk!.status === 'ready' && repos.executions.listByTask(t.id).length >= 2) break;
+      if (tk!.status === 'awaiting_input' && repos.executions.listByTask(t.id).length >= 2) break;
       await new Promise((r) => setTimeout(r, 20));
     }
     const final = repos.tasks.get(t.id)!;
-    expect(final.status).toBe('ready');
+    expect(final.status).toBe('awaiting_input');
     expect(repos.executions.listByTask(t.id).filter((e) => e.status === 'failed').length).toBe(2);
     const logs = repos.logs.listByTask(t.id).map((l) => l.text);
     expect(logs.some((l) => l.includes('worktree'))).toBe(true);
@@ -637,6 +641,34 @@ describe('orchestrator pause/cancel during review (testing lane)', () => {
     const reviewExecs = repos.executions.listByTask(t.id).filter((e) => isReviewExecution(e.summary));
     expect(reviewExecs.length).toBe(2);
     expect(reviewExecs.some((e) => (e.summary ?? '').includes('review:pass'))).toBe(true);
+  });
+
+  it('pauses reviewer-originated interactions through the same awaiting_input lifecycle', async () => {
+    const fr = new FakeAgentRunner(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      {
+        reviewerEvents: () => [{
+          type: 'ask_user',
+          question: 'Which compatibility target should be reviewed?',
+          context: 'Reviewer needs a target.',
+          t: 0,
+        }],
+      },
+    );
+    const orch2 = makeOrch(repos, fr);
+    const t = makeTask();
+    repos.tasks.insert(t);
+
+    await orch2.start(t.id);
+
+    expect(repos.tasks.get(t.id)).toMatchObject({ status: 'awaiting_input', pausedFrom: 'testing' });
+    expect(repos.pendingInteractions.getPendingForTask(t.id)).toMatchObject({
+      kind: 'clarification',
+      title: 'Which compatibility target should be reviewed?',
+    });
+    expect(repos.executions.listByTask(t.id).find((execution) => isReviewExecution(execution.summary))).toMatchObject({
+      status: 'paused',
+    });
   });
 
   it('cancel during review stops the reviewer and lands stably in ready (no fail verdict, no retry)', async () => {

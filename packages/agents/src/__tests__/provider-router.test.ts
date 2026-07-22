@@ -45,13 +45,17 @@ describe('ProviderRouter', () => {
     expect(visited).toEqual(['p1:coder:primary', 'p1:coder:fallback', 'p2:coder:primary']);
   });
 
-  it('opens authentication failures until provider revision changes', async () => {
+  it('opens authentication failures provider-wide and skips same-provider fallback', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
+    const visited: string[] = [];
     await harness.router.execute('tester', async (route) => {
+      visited.push(route.routeId);
       if (route.providerId === 'p1') throw new ProviderExecutionError('unauthorized', 'authentication', 401);
       return 'ok';
     });
+    expect(visited).toEqual(['p1:tester:primary', 'p2:tester:primary']);
     expect(harness.health.get('p1', 'p1:tester:primary')?.state).toBe('open');
+    expect(harness.health.get('p1', 'p1:tester:fallback')?.state).toBe('open');
     // Authentication routes stay open without a cooldown expiry (until revision change).
     expect(harness.health.get('p1', 'p1:tester:primary')?.cooldownUntil).toBeUndefined();
   });
@@ -94,13 +98,13 @@ describe('ProviderRouter', () => {
     ]);
   });
 
-  it('honors retryAfterMs for rate limiting and cools down', async () => {
+  it('records retryAfterMs cooldown and immediately falls back without sleeping', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     await harness.router.execute('tester', async (route) => {
       if (route.providerId === 'p1') throw new ProviderExecutionError('slow down', 'rate_limit', 429, 5_000);
       return 'ok';
     });
-    expect(harness.sleeps).toContain(5_000);
+    expect(harness.sleeps).toEqual([]);
     const h = harness.health.get('p1', 'p1:tester:primary');
     expect(h?.state).toBe('open');
     expect(h?.cooldownUntil).toBe(1_000 + 5_000);
@@ -108,11 +112,52 @@ describe('ProviderRouter', () => {
 
   it('resets health to closed on success', async () => {
     const harness = makeRouterHarness(['p1']);
-    harness.health.upsert({ providerId: 'p1', routeId: 'p1:coder:primary', state: 'half_open', consecutiveFailures: 3, updatedAt: 0 });
+    harness.health.upsert({
+      providerId: 'p1', routeId: 'p1:coder:primary', state: 'open',
+      consecutiveFailures: 3, cooldownUntil: 0, updatedAt: 0,
+    });
     await harness.router.execute('coder', async () => 'ok');
     const h = harness.health.get('p1', 'p1:coder:primary');
     expect(h?.state).toBe('closed');
     expect(h?.consecutiveFailures).toBe(0);
+  });
+
+  it('atomically allows only one concurrent half-open probe per route', async () => {
+    const harness = makeRouterHarness(['p1', 'p2']);
+    harness.health.upsert({
+      providerId: 'p1', routeId: 'p1:coder:primary', state: 'open',
+      consecutiveFailures: 2, cooldownUntil: 900, updatedAt: 0,
+    });
+    harness.health.upsert({
+      providerId: 'p1', routeId: 'p1:coder:fallback', state: 'open',
+      consecutiveFailures: 1, updatedAt: 0,
+    });
+    let releaseProbe!: () => void;
+    const holdProbe = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    let probeStarted!: () => void;
+    const started = new Promise<void>((resolve) => { probeStarted = resolve; });
+    const firstVisited: string[] = [];
+    const first = harness.router.execute('coder', async (route) => {
+      firstVisited.push(route.routeId);
+      if (route.providerId === 'p1') {
+        probeStarted();
+        await holdProbe;
+      }
+      return 'first';
+    });
+    await started;
+    expect(harness.health.get('p1', 'p1:coder:primary')?.state).toBe('half_open');
+
+    const secondVisited: string[] = [];
+    await expect(harness.router.execute('coder', async (route) => {
+      secondVisited.push(route.routeId);
+      return 'second';
+    })).resolves.toBe('second');
+    expect(secondVisited[0]).toBe('p2:coder:primary');
+
+    releaseProbe();
+    await expect(first).resolves.toBe('first');
+    expect(firstVisited).toEqual(['p1:coder:primary']);
   });
 
   it('half-open probes only the earliest-expiring route when all are cooling down', async () => {

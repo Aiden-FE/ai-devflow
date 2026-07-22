@@ -19,6 +19,7 @@ import {
   checkTaskDependencies,
   now,
   randomId,
+  redactText,
   decideRetry,
   DEFAULT_RETRY_POLICY,
   type RetryPolicy,
@@ -86,6 +87,14 @@ interface ActivePipeline {
 }
 
 const IMPLICIT_STAGE_ID = '__main__';
+const REVIEW_STAGE_ID = '__review__';
+
+interface RunConsumption {
+  done: boolean;
+  interacted: boolean;
+  output: string;
+  error?: string;
+}
 
 /** 审查 Agent 必须覆盖的基本规则维度（随审查结论一并持久化）。 */
 const REVIEW_CHECKS = ['需求覆盖', '测试/构建/lint', '明显回归', '安全问题', '无关改动'];
@@ -205,7 +214,7 @@ export class Orchestrator extends EventEmitter {
     };
     this.repos.executions.insert(execution);
     entry.executionId = execution.id;
-    this.log(execution, 'info', `启动 ${task.role} 角色执行（第 ${execution.attempt} 次尝试）`);
+    this.log(execution, 'info', `启动流水线执行（第 ${execution.attempt} 次尝试）`);
 
     // 启动窗口期被受控停止（如信号量等待期间 pause/cancel）：不创建 worktree，直接收尾。
     if (entry.stopReason) {
@@ -261,7 +270,7 @@ export class Orchestrator extends EventEmitter {
       const run = await this.runner.run({
         taskId: task.id,
         executionId: execution.id,
-        role: task.role,
+        role: stage.role,
         prompt,
         cwd: worktreePath!,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
@@ -270,47 +279,20 @@ export class Orchestrator extends EventEmitter {
       });
       entry.run = run;
 
-      let stageDone = false;
-      let askedUser = false;
       try {
-        for await (const ev of run.events) {
-          // 受控停止（pause/cancel）：丢弃晚到事件，取消运行并退出循环。
+        const consumed = await this.consumeRun(task, execution, run, entry, stage, i);
+        if (consumed.interacted) return;
+        if (consumed.error) throw new Error(consumed.error);
+        if (!consumed.done) {
+          // 阶段未正常完成（受控停止或异常）
           if (entry.stopReason) {
-            await run.cancel();
-            break;
+            this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', this.stopSummary(entry.stopReason));
+            return;
           }
-          await this.handleEvent(task, execution, ev, entry);
-          if (ev.type === 'ask_user' || ev.type === 'approval_request') {
-            askedUser = true;
-            // 暂停：记录检查点与待处理交互，执行记录标记 paused，转 awaiting_input，停止当前运行。
-            // 拒绝授权不判定成功：暂停后由用户决策，恢复时按决策放行/拒绝，绝不自动归档。
-            this.recordCheckpoint(task, stage, i, ev);
-            this.markExecution(execution, 'paused', ev.type === 'ask_user' ? '等待用户回答' : '等待工具授权');
-            this.transition(task, 'awaiting_input');
-            task.pausedFrom = 'in_progress';
-            await run.cancel();
-            break;
-          }
-          if (ev.type === 'done') {
-            stageDone = true;
-          }
-          if (ev.type === 'error') {
-            throw new Error((ev as { message: string }).message);
-          }
+          throw new Error(`阶段 ${stage.id} 未完成`);
         }
       } finally {
         entry.run = undefined;
-      }
-
-      if (askedUser) return; // 等待用户回答/授权后 resume
-
-      if (!stageDone) {
-        // 阶段未正常完成（受控停止或异常）
-        if (entry.stopReason) {
-          this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', this.stopSummary(entry.stopReason));
-          return;
-        }
-        throw new Error(`阶段 ${stage.id} 未完成`);
       }
 
       // 阶段完成，写检查点
@@ -416,17 +398,17 @@ export class Orchestrator extends EventEmitter {
       });
       entry.run = run;
       try {
-        for await (const ev of run.events) {
-          // 受控停止（pause/cancel）：丢弃晚到事件，取消审查运行并退出循环。
-          if (entry.stopReason) {
-            await run.cancel();
-            break;
-          }
-          await this.handleEvent(task, execution, ev, entry);
-          if (ev.type === 'done') output += `\n${ev.summary}`;
-          else if (ev.type === 'log') output += `\n${ev.text}`;
-          else if (ev.type === 'error') errored = ev.message;
-        }
+        const consumed = await this.consumeRun(
+          task,
+          execution,
+          run,
+          entry,
+          { id: REVIEW_STAGE_ID },
+          task.currentStage,
+        );
+        if (consumed.interacted) return undefined;
+        output = consumed.output;
+        errored = consumed.error;
       } finally {
         entry.run = undefined;
       }
@@ -455,6 +437,52 @@ export class Orchestrator extends EventEmitter {
         `${verdict.checks?.length ? `\n覆盖维度：${verdict.checks.join('、')}` : ''}`,
     });
     return verdict;
+  }
+
+  /** Consume every AgentRun through one interaction-aware lifecycle for development and review. */
+  private async consumeRun(
+    task: Task,
+    execution: ExecutionRecord,
+    run: AgentRun,
+    entry: ActivePipeline,
+    stage: { id: string },
+    stageIndex: number,
+  ): Promise<RunConsumption> {
+    let done = false;
+    let interacted = false;
+    let output = '';
+    let error: string | undefined;
+    for await (const ev of run.events) {
+      if (entry.stopReason) {
+        await run.cancel();
+        break;
+      }
+      await this.handleEvent(task, execution, ev, entry);
+      if (ev.type === 'done') {
+        done = true;
+        output += `\n${ev.summary}`;
+      } else if (ev.type === 'log') {
+        output += `\n${ev.text}`;
+      } else if (ev.type === 'error') {
+        error = ev.message;
+      } else if (ev.type === 'ask_user' || ev.type === 'approval_request') {
+        interacted = true;
+        this.recordCheckpoint(task, stage, stageIndex, ev);
+        const pauseReason = ev.type === 'ask_user' ? '等待用户回答' : '等待工具授权';
+        this.markExecution(
+          execution,
+          'paused',
+          stage.id === REVIEW_STAGE_ID ? `审查已停止（${pauseReason}）` : pauseReason,
+        );
+        const pausedFrom = task.status;
+        this.transition(task, 'awaiting_input');
+        task.pausedFrom = pausedFrom;
+        this.repos.tasks.update(task);
+        await run.cancel();
+        break;
+      }
+    }
+    return { done, interacted, output, error };
   }
 
   /** 解析审查 Agent 输出中的结论标记；无明确 PASS 时保守按不通过（绝不绕过审查进入待验收）。 */
@@ -863,11 +891,25 @@ export class Orchestrator extends EventEmitter {
       this.emit('task-retry', { taskId: task.id, delayMs: decision.delayMs, reason: decision.reason });
       this.scheduleRetry(task.id, decision.delayMs, generation);
     } else {
-      // 退回 ready 供手动重试
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
-        this.transition(task, 'ready');
+      if (this.autoRetry) {
+        const safeDetail = redactText(err.message).slice(0, 500);
+        const pausedFrom = task.status;
+        this.transition(task, 'awaiting_input');
+        task.pausedFrom = pausedFrom;
+        this.repos.tasks.update(task);
+        const title = 'AI 服务多次失败，请检查提供商配置后重试';
+        const msg = this.recordMessage(task, latest, { role: 'system', kind: 'clarification_request', text: title });
+        this.createInteraction(task, 'clarification', title, {
+          messageId: msg.id,
+          detail: `自动重试预算已耗尽。脱敏诊断：${safeDetail}`,
+        });
+        if (latest) this.log(latest, 'error', `已达最大重试次数，任务等待人工处理：${safeDetail}`);
+      } else {
+        // 未启用自动重试时退回 ready 供手动重试。
+        if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
+          this.transition(task, 'ready');
+        }
       }
-      if (latest) this.log(latest, 'error', `已达最大重试次数，任务退回待开发：${err.message}`);
       this.emit('task-failed', { taskId: task.id, error: err.message });
     }
   }

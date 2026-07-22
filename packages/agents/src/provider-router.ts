@@ -194,6 +194,7 @@ export class ProviderRouter {
       route: ProviderRoute;
       cooling: boolean;
       cooldownUntil?: number;
+      probeEligible: boolean;
     }
     const candidates: Candidate[] = [];
     for (const provider of providers) {
@@ -214,8 +215,9 @@ export class ProviderRouter {
         const routeId = `${provider.id}:${workload}:${tier}`;
         const h = this.deps.health.get(provider.id, routeId);
         const isOpen = h?.state === 'open';
+        const isHalfOpen = h?.state === 'half_open';
         // open 且无到期（auth/model 直到 revision 变更）或到期未到 → 冷却中。
-        const cooling = !!isOpen && (h!.cooldownUntil === undefined || h!.cooldownUntil > now);
+        const cooling = !!isHalfOpen || (!!isOpen && (h!.cooldownUntil === undefined || h!.cooldownUntil > now));
         candidates.push({
           route: {
             providerId: provider.id,
@@ -231,6 +233,7 @@ export class ProviderRouter {
           },
           cooling,
           cooldownUntil: h?.cooldownUntil,
+          probeEligible: !!isOpen && h?.cooldownUntil !== undefined,
         });
       }
     }
@@ -239,7 +242,7 @@ export class ProviderRouter {
     if (active.length > 0) return active;
     // 全部冷却：仅选最早到期的一条 half-open 探测（无到期者如 auth 不可探测）。
     const probes = candidates
-      .filter((c) => c.cooldownUntil !== undefined)
+      .filter((c) => c.probeEligible)
       .sort((a, b) => (a.cooldownUntil ?? 0) - (b.cooldownUntil ?? 0));
     if (probes.length > 0) return [probes[0]!.route];
     return [];
@@ -263,7 +266,9 @@ export class ProviderRouter {
     }
     let calls = 0;
     const retriedSame = new Set<string>();
+    const authenticationFailures = new Set<string>();
     for (const route of routes) {
+      if (authenticationFailures.has(route.providerId) || !this.claimRoute(route)) continue;
       // eslint-disable-next-line no-constant-condition
       while (true) {
         if (calls >= MAX_ATTEMPTS) {
@@ -280,20 +285,39 @@ export class ProviderRouter {
           if (kind === 'task_result' || kind === 'interaction') {
             throw err;
           }
+          if (kind === 'authentication') {
+            authenticationFailures.add(route.providerId);
+            for (const providerRoute of routes) {
+              if (providerRoute.providerId === route.providerId) {
+                this.recordFailure(providerRoute, kind, retryAfterMs);
+              }
+            }
+            break;
+          }
           this.recordFailure(route, kind, retryAfterMs);
           const retryableSame = kind === 'transient_provider' || kind === 'runtime' || kind === 'protocol';
           if (retryableSame && !retriedSame.has(route.routeId)) {
             retriedSame.add(route.routeId);
             continue; // 当前路线重试一次
           }
-          if (kind === 'rate_limit' && retryAfterMs && retryAfterMs > 0) {
-            await this.deps.sleep(retryAfterMs);
-          }
           break; // 降级到下一路线
         }
       }
     }
     throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider');
+  }
+
+  /** Synchronously claim an open route so concurrent executions cannot duplicate its half-open probe. */
+  private claimRoute(route: ProviderRoute): boolean {
+    const existing = this.deps.health.get(route.providerId, route.routeId);
+    if (!existing || existing.state === 'closed') return true;
+    if (existing.state === 'half_open') return false;
+    this.deps.health.upsert({
+      ...existing,
+      state: 'half_open',
+      updatedAt: this.deps.now(),
+    });
+    return true;
   }
 
   private recordSuccess(route: ProviderRoute): void {
