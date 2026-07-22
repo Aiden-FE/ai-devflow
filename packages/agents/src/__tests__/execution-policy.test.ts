@@ -88,6 +88,34 @@ describe('execution policy', () => {
     });
   });
 
+  it.each(['coder', 'reviewer', 'tester'] as const)(
+    'rejects command wrappers before classifying nested commands for %s',
+    (role) => {
+      const policy = createExecutionPolicy({ role, worktree: worktree() });
+      for (const command of [
+        'env sh -c "touch escaped"',
+        'command python3 -c "open(\'escaped\',\'w\')"',
+        '/usr/bin/env git reset --hard HEAD',
+      ]) {
+        expect(bash(policy, command)).toMatchObject({
+          block: true,
+          reason: expect.stringContaining('policy:command-wrapper'),
+        });
+      }
+    },
+  );
+
+  it.each(['coder', 'reviewer', 'tester'] as const)(
+    'rejects path-form executable tokens for %s',
+    (role) => {
+      const policy = createExecutionPolicy({ role, worktree: worktree() });
+      expect(bash(policy, './wrapper --do-it')).toMatchObject({
+        block: true,
+        reason: expect.stringContaining('policy:executable-path'),
+      });
+    },
+  );
+
   it('uses exact reviewer argv patterns for read-only git and package verification', () => {
     const policy = createExecutionPolicy({ role: 'reviewer', worktree: worktree() });
     expect(bash(policy, 'git diff --check')).toBeUndefined();
@@ -116,6 +144,21 @@ describe('execution policy', () => {
     expect(result).toMatchObject({
       isError: true,
       content: [expect.objectContaining({ text: expect.stringContaining('policy:reviewer-tracked-files-changed') })],
+    });
+
+    expect(policy.onToolCall({
+      type: 'tool_call',
+      toolCallId: 'report-after-mutation',
+      toolName: 'ai_devflow_report_result',
+      input: {
+        summary: 'REVIEW_VERDICT: PASS',
+        verification: ['claimed clean'],
+        changedFiles: [],
+        unresolved: [],
+      },
+    })).toMatchObject({
+      block: true,
+      reason: expect.stringContaining('policy:reviewer-integrity-violation'),
     });
   });
 });

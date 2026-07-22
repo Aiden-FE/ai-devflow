@@ -46,6 +46,7 @@ const DESTRUCTIVE_GIT = new Set([
 ]);
 const INTERPRETERS = new Set(['node', 'python', 'python3', 'perl', 'ruby', 'php']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']);
+const COMMAND_WRAPPERS = new Set(['env', 'command', 'exec', 'nice', 'nohup', 'sudo', 'time', 'timeout', 'xargs']);
 
 function block(code: string, detail: string): BlockResult {
   return { block: true, reason: `policy:${code}: ${detail}` };
@@ -233,12 +234,17 @@ export function snapshotTrackedFiles(worktree: string): string {
 
 export function createExecutionPolicy(context: ExecutionPolicyContext) {
   const reviewerHashes = new Map<string, string>();
+  let reviewerIntegrityViolation = false;
 
   return {
     onToolCall(event: ToolCallLike): BlockResult | undefined {
       const name = event.toolName;
       const input = event.input ?? {};
       const reviewer = context.role === 'reviewer';
+
+      if (reviewer && reviewerIntegrityViolation) {
+        return block('reviewer-integrity-violation', 'reviewer 已改变受跟踪文件，本次运行不得继续或提交结果');
+      }
 
       if (reviewer && (name === 'write' || name === 'edit')) {
         return block('reviewer-read-only', 'reviewer 角色禁止写文件');
@@ -268,6 +274,14 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
       }
       const argv = shellTokens(command);
       if (!argv?.length) return block('shell-parse', '命令参数无法安全解析');
+
+      const executable = argv[0]!;
+      if (COMMAND_WRAPPERS.has(commandName(executable))) {
+        return block('command-wrapper', '禁止通过命令包装器改变被审查的可执行命令');
+      }
+      if (isAbsolute(executable) || executable.startsWith('.') || executable.includes('/') || executable.includes('\\')) {
+        return block('executable-path', '可执行命令必须使用不含路径的受分类名称');
+      }
 
       if (hasFindMutation(argv)) return block('find-mutation', '禁止 find 删除或执行子命令');
       if (hasForbiddenInterpreterEscape(argv)) return block('interpreter-escape', '禁止 shell/interpreter 逃逸');
@@ -305,6 +319,7 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
         changed = true;
       }
       if (!changed) return undefined;
+      reviewerIntegrityViolation = true;
       return {
         content: [{ type: 'text', text: 'policy:reviewer-tracked-files-changed: reviewer 命令改变了受跟踪文件' }],
         isError: true,
