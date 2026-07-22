@@ -91,6 +91,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
   let result: StructuredResult | undefined;
   let providerError: { status: number; message: string } | undefined;
   let interactionOccurred = false;
+  let protocolFailure = false;
 
   const t = () => now();
 
@@ -101,7 +102,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
       try {
         ev = JSON.parse(line) as Record<string, unknown>;
       } catch {
-        // 非法行：protocol 诊断，不崩溃。
+        protocolFailure = true;
         return events;
       }
       const type = ev.type as string | undefined;
@@ -179,6 +180,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     finish(): void {
       for (const call of journal.toolCalls) {
         if (call.state === 'started') call.state = 'uncertain';
+      }
+      if (protocolFailure) {
+        throw new Error('protocol failure：Pi stdout 包含非法 JSON');
       }
       if (agentEnded && !result) {
         throw new Error('protocol failure：Pi 已结束但缺少有效的结构化结果（ai_devflow_report_result）');

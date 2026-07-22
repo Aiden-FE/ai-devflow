@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { BundledPiLocator } from '../runtime-locator.js';
+import { buildProbeEnv, BundledPiLocator } from '../runtime-locator.js';
 
 interface ExecResult {
   stdout: string;
@@ -65,6 +65,48 @@ function makeCorruptRuntimeFixture(): string {
 }
 
 describe('BundledPiLocator', () => {
+  it('builds a minimal probe environment that excludes hostile parent configuration', () => {
+    const env = buildProbeEnv({
+      LANG: 'en_US.UTF-8',
+      SystemRoot: 'C:\\Windows',
+      PATH: '/hostile/bin',
+      OPENAI_API_KEY: 'parent-provider-secret',
+      PI_CODING_AGENT_DIR: '/hostile/pi',
+      NODE_OPTIONS: '--require /hostile.js',
+      NODE_PATH: '/hostile/modules',
+      NPM_CONFIG_PREFIX: '/hostile/npm',
+      AI_DEVFLOW_DEV: '1',
+      DEV_API_KEY: 'dev-secret',
+    });
+    expect(env).toMatchObject({
+      ELECTRON_RUN_AS_NODE: '1',
+      PI_OFFLINE: '1',
+      PI_SKIP_VERSION_CHECK: '1',
+      PI_TELEMETRY: '0',
+      LANG: 'en_US.UTF-8',
+      SystemRoot: 'C:\\Windows',
+    });
+    for (const key of ['PATH', 'OPENAI_API_KEY', 'PI_CODING_AGENT_DIR', 'NODE_OPTIONS', 'NODE_PATH', 'NPM_CONFIG_PREFIX', 'AI_DEVFLOW_DEV', 'DEV_API_KEY']) {
+      expect(env[key]).toBeUndefined();
+    }
+  });
+
+  it('passes only the minimal environment to the version probe', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-runtime-clean-env-'));
+    mkdirSync(join(root, 'package'), { recursive: true });
+    writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10');
+    let received: Record<string, string> | undefined;
+    const locator = new BundledPiLocator(root, {
+      execFile: async (_command, _args, options) => {
+        received = options.env;
+        return { stdout: '0.80.10\n', stderr: '', exitCode: 0 };
+      },
+    });
+    await locator.verify();
+    expect(received).toEqual(buildProbeEnv(process.env));
+  });
+
   it('returns an absolute verified entry and never consults PATH', async () => {
     const root = mkdtempSync(join(tmpdir(), 'pi-runtime-'));
     mkdirSync(join(root, 'package'), { recursive: true });

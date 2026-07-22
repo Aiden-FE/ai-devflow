@@ -1,9 +1,8 @@
-// PiProcessSupervisor：一次执行尝试 = 一个独立 Pi JSON 子进程（设计 §5/§6.3/§14/§15）。
-//
-// 以 process.execPath + ELECTRON_RUN_AS_NODE=1 + shell:false 启动捆绑 Pi 入口；stdout 只接受 JSONL，
-// stderr 按行脱敏入有界诊断缓冲。POSIX 用独立进程组并向 -pid 发信号（SIGTERM→2s 后 SIGKILL）；
-// Windows 用 taskkill /PID <pid> /T /F。角色超时触发受控终止。退出或取消时先终止进程组再封存 journal。
+// PiProcessSupervisor：一次执行尝试 = 一个独立 Pi JSON 子进程。
+// 完成边界同时等待 child close/error 与 stdout/stderr EOF；单行上限 2 MiB，stderr 脱敏后限 8 MiB。
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { redactText } from '@ai-devflow/core';
 import type { PiRunPlan } from './run-plan.js';
 
 export interface RawLine {
@@ -24,7 +23,8 @@ export type SpawnFn = (
   opts: { cwd: string; env: Record<string, string>; detached: boolean; stdio: ['pipe', 'pipe', 'pipe'] },
 ) => ChildProcess;
 
-const STDERR_LIMIT = 8 * 1024 * 1024; // 8 MiB 环形上限，防止失控输出耗尽内存
+const MAX_LINE_BYTES = 2 * 1024 * 1024;
+const STDERR_LIMIT = 8 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
 
 export interface ProcessSupervisorOptions {
@@ -53,54 +53,33 @@ export class PiProcessSupervisor {
       detached,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    if (child.stdin) child.stdin.end();
+    child.stdin?.end();
 
-    const redact = makeLineRedactor(secrets);
-    const stdoutLines = lineStream(child.stdout);
-    const stderrLines = lineStream(child.stderr);
+    let settled = false;
+    let settleResolve!: (value: { exitCode: number | null; signal: NodeJS.Signals | null }) => void;
+    let settleReject!: (error: Error) => void;
+    const settledPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      settleResolve = resolve;
+      settleReject = reject;
+    });
+    // Avoid an unhandled-rejection race when spawn fails before the consumer calls done().
+    void settledPromise.catch(() => undefined);
 
-    let stderrBytes = 0;
-    async function* merged(): AsyncIterable<RawLine> {
-      const queue: RawLine[] = [];
-      let waiters: Array<() => void> = [];
-      let done = false;
-      const push = (l: RawLine) => {
-        queue.push(l);
-        const w = waiters.shift();
-        if (w) w();
-      };
-      void (async () => {
-        try {
-          for await (const l of stdoutLines) push({ stream: 'stdout', text: l });
-        } catch { /* closed */ }
-      })();
-      void (async () => {
-        try {
-          for await (const l of stderrLines) {
-            if (stderrBytes >= STDERR_LIMIT) continue; // 丢弃超额 stderr
-            const text = redact(l);
-            stderrBytes += Buffer.byteLength(text, 'utf8');
-            push({ stream: 'stderr', text });
-          }
-        } catch { /* closed */ }
-      })();
-      child.once('exit', () => {
-        done = true;
-        waiters.forEach((w) => w());
-        waiters = [];
-      });
-      while (true) {
-        if (queue.length > 0) yield queue.shift()!;
-        else if (done) return;
-        else await new Promise<void>((resolve) => waiters.push(resolve));
-      }
-    }
-
-    let exitInfo: { exitCode: number | null; signal: NodeJS.Signals | null } | null = null;
-    const exitWaiters: Array<(i: { exitCode: number | null; signal: NodeJS.Signals | null }) => void> = [];
-    child.once('exit', (code, signal) => {
-      exitInfo = { exitCode: code, signal };
-      exitWaiters.splice(0).forEach((w) => w(exitInfo!));
+    const wakeWaiters: Array<() => void> = [];
+    const wake = (): void => {
+      for (const waiter of wakeWaiters.splice(0)) waiter();
+    };
+    child.once('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      settleResolve({ exitCode: code, signal });
+      wake();
+    });
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      settleReject(error);
+      wake();
     });
 
     const killProcess = async (): Promise<void> => {
@@ -116,22 +95,73 @@ export class PiProcessSupervisor {
       try {
         process.kill(-child.pid, 'SIGTERM');
       } catch {
-        try { child.kill('SIGTERM'); } catch { /* already gone */ }
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          return;
+        }
       }
-      await new Promise((r) => {
-        const t = setTimeout(r, KILL_GRACE_MS);
-        t.unref?.();
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, KILL_GRACE_MS);
+        timer.unref?.();
       });
-      if (!child.killed) {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch {
-          try { child.kill('SIGKILL'); } catch { /* gone */ }
+      if (!settled) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
         }
       }
     };
 
-    const timer = setTimeout(() => {
+    const redact = makeLineRedactor(secrets);
+    const queue: RawLine[] = [];
+    let readers = 2;
+    let readerError: Error | undefined;
+    let stderrBytes = 0;
+
+    const push = (line: RawLine): void => {
+      queue.push(line);
+      wake();
+    };
+    const overflow = (): void => {
       void killProcess();
-    }, opts.timeoutMs);
+    };
+    const pump = async (stream: NodeJS.ReadableStream | null, kind: RawLine['stream']): Promise<void> => {
+      try {
+        for await (const raw of lineStream(stream, overflow)) {
+          if (kind === 'stdout') {
+            push({ stream: kind, text: raw });
+          } else if (stderrBytes < STDERR_LIMIT) {
+            const text = redact(raw);
+            stderrBytes += Buffer.byteLength(text, 'utf8');
+            if (stderrBytes <= STDERR_LIMIT) push({ stream: kind, text });
+          }
+        }
+      } catch (error) {
+        readerError ??= error instanceof Error ? error : new Error(String(error));
+        void killProcess();
+      } finally {
+        readers -= 1;
+        wake();
+      }
+    };
+    void pump(child.stdout, 'stdout');
+    void pump(child.stderr, 'stderr');
+
+    async function* merged(): AsyncIterable<RawLine> {
+      for (;;) {
+        if (queue.length > 0) {
+          yield queue.shift()!;
+          continue;
+        }
+        if (readerError) throw readerError;
+        if (readers === 0 && settled) return;
+        await new Promise<void>((resolve) => wakeWaiters.push(resolve));
+      }
+    }
+
+    const timer = setTimeout(() => void killProcess(), opts.timeoutMs);
     timer.unref?.();
 
     return {
@@ -142,9 +172,11 @@ export class PiProcessSupervisor {
         await killProcess();
       },
       async done() {
-        const info = exitInfo ?? (await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => exitWaiters.push(resolve)));
-        clearTimeout(timer);
-        return { exitCode: info.exitCode, signal: info.signal };
+        try {
+          return await settledPromise;
+        } finally {
+          clearTimeout(timer);
+        }
       },
     };
   }
@@ -153,22 +185,39 @@ export class PiProcessSupervisor {
 function makeLineRedactor(secrets: string[]): (text: string) => string {
   return (text: string): string => {
     let out = text;
-    for (const s of secrets) if (s) out = out.split(s).join('***');
-    return out;
+    for (const secret of secrets) if (secret) out = out.split(secret).join('***');
+    return redactText(out);
   };
 }
 
-async function* lineStream(stream: NodeJS.ReadableStream | null): AsyncIterable<string> {
+async function* lineStream(
+  stream: NodeJS.ReadableStream | null,
+  onOverflow: () => void,
+): AsyncIterable<string> {
   if (!stream) return;
+  const decoder = new StringDecoder('utf8');
   let buffer = '';
-  for await (const chunk of stream as unknown as Iterable<Buffer>) {
-    buffer += chunk.toString('utf8');
-    let idx: number;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx).replace(/\r$/, '');
-      buffer = buffer.slice(idx + 1);
+  const check = (): void => {
+    if (Buffer.byteLength(buffer, 'utf8') > MAX_LINE_BYTES) {
+      onOverflow();
+      throw new Error('protocol failure: Pi output line exceeds 2 MiB');
+    }
+  };
+  for await (const chunk of stream as unknown as AsyncIterable<Buffer | string>) {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    let newline: number;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, '');
+      if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
+        onOverflow();
+        throw new Error('protocol failure: Pi output line exceeds 2 MiB');
+      }
+      buffer = buffer.slice(newline + 1);
       if (line.length > 0) yield line;
     }
+    check();
   }
+  buffer += decoder.end();
+  check();
   if (buffer.length > 0) yield buffer;
 }

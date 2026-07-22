@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   BundledPiLocator,
+  buildProbeEnv,
   PiProcessSupervisor,
   PiRunner,
   ProfileMaterializer,
@@ -38,7 +39,7 @@ class DevPiLocator implements RuntimeLocator {
   constructor(private entry: string) {}
   async verify(): Promise<{ version: string; entry: string }> {
     const { stdout } = await execFileP(process.execPath, [this.entry, '--version'], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: buildProbeEnv(process.env),
     });
     const version = String(stdout).trim();
     if (version !== EXPECTED_PI_VERSION) {

@@ -9,6 +9,7 @@ export {
 } from './provider-router.js';
 export {
   BundledPiLocator,
+  buildProbeEnv,
   type PiRuntimeManifest,
   type VerifiedPiRuntime,
   type BundledPiLocatorOptions,

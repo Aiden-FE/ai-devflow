@@ -63,6 +63,11 @@ describe('createPiEventTranslator', () => {
   it('records unknown event types as debug diagnostics without crashing', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     expect(() => translator.push(JSON.stringify({ type: 'some_future_event', x: 1 }))).not.toThrow();
+  });
+
+  it('fails closed at finish after malformed stdout JSON', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     expect(() => translator.push('not-json-at-all')).not.toThrow();
+    expect(() => translator.finish()).toThrow(/protocol failure/);
   });
 });

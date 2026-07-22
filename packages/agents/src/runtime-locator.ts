@@ -18,7 +18,11 @@ export interface PiRuntimeManifest {
 }
 
 export interface ExecLike {
-  (command: string, args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  (
+    command: string,
+    args: string[],
+    options: { env: Record<string, string> },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
 
 export interface BundledPiLocatorOptions {
@@ -76,7 +80,7 @@ export class BundledPiLocator {
         if (!existsSync(join(this.root, 'profiles', role))) throw new Error(`运行时校验失败：缺少角色 ${role}`);
       }
     }
-    const result = await this.execFile(process.execPath, [entry, '--version']);
+    const result = await this.execFile(process.execPath, [entry, '--version'], { env: buildProbeEnv(process.env) });
     const version = (result.stdout ?? '').trim();
     if (result.exitCode !== 0 || version !== manifest.piVersion) {
       throw new Error(`运行时校验失败：版本不匹配（期望 ${manifest.piVersion}，实际 ${version || '无输出'}）`);
@@ -128,6 +132,29 @@ export class BundledPiLocator {
   }
 }
 
+const PROBE_PASSTHROUGH = [
+  'LANG', 'LC_ALL', 'LC_CTYPE',
+  'SystemRoot', 'ComSpec', 'PATHEXT',
+  'TMPDIR', 'TEMP', 'TMP',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY',
+] as const;
+
+/** Minimal environment shared by packaged and development Pi startup probes. */
+export function buildProbeEnv(source: NodeJS.ProcessEnv | Record<string, string | undefined>): Record<string, string> {
+  const env: Record<string, string> = {
+    ELECTRON_RUN_AS_NODE: '1',
+    PI_OFFLINE: '1',
+    PI_SKIP_VERSION_CHECK: '1',
+    PI_TELEMETRY: '0',
+  };
+  for (const key of PROBE_PASSTHROUGH) {
+    const value = source[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}
+
 function isRecord(value: unknown): value is Record<string, string> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -153,12 +180,16 @@ function collectLinks(root: string): Map<string, string> {
   return links;
 }
 
-async function defaultExecFile(command: string, args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function defaultExecFile(
+  command: string,
+  args: string[],
+  options: { env: Record<string, string> },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const execFileP = promisify(execFile);
   try {
-    const { stdout, stderr } = await execFileP(command, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } });
+    const { stdout, stderr } = await execFileP(command, args, { env: options.env });
     return { stdout: String(stdout), stderr: String(stderr), exitCode: 0 };
   } catch (err) {
     const e = err as { stdout?: unknown; stderr?: unknown; code?: number };
