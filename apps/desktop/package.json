@@ -30,6 +30,7 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "npmRebuild": false,
+    "executableName": "ai-devflow",
     "afterSign": "scripts/ad-hoc-sign.mjs",
     "directories": {
       "output": "release",
