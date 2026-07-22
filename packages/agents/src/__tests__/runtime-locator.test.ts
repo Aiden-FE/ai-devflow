@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
@@ -30,20 +30,27 @@ function writeRuntimeManifest(
   }));
 }
 
-function makeLinkedRuntimeFixture(actualTarget = 'targets/a', expectedTarget = actualTarget): string {
+function createDirectoryLink(root: string, linkPath: string, target: string): string {
+  const platformTarget = process.platform === 'win32' ? join(root, target) : target;
+  symlinkSync(platformTarget, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  return readlinkSync(linkPath);
+}
+
+function makeLinkedRuntimeFixture(): { root: string; linkPath: string; rawTarget: string } {
   const root = mkdtempSync(join(tmpdir(), 'pi-runtime-links-'));
+  const linkPath = join(root, 'alias');
   mkdirSync(join(root, 'package'), { recursive: true });
   mkdirSync(join(root, 'targets', 'a'), { recursive: true });
   mkdirSync(join(root, 'targets', 'b'), { recursive: true });
   writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
   writeFileSync(join(root, 'targets', 'a', 'value.txt'), 'a');
   writeFileSync(join(root, 'targets', 'b', 'value.txt'), 'b');
-  symlinkSync(actualTarget, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
-  writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: expectedTarget }, [
+  const rawTarget = createDirectoryLink(root, linkPath, 'targets/a');
+  writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: rawTarget }, [
     'targets/a/value.txt',
     'targets/b/value.txt',
   ]);
-  return root;
+  return { root, linkPath, rawTarget };
 }
 
 function makeCorruptRuntimeFixture(): string {
@@ -70,7 +77,7 @@ describe('BundledPiLocator', () => {
   });
 
   it('accepts an exact in-root link whose target is checksum-bound', async () => {
-    const root = makeLinkedRuntimeFixture();
+    const { root } = makeLinkedRuntimeFixture();
     const command = await new BundledPiLocator(root, { execFile: fakeVersionExec }).verify();
     expect(command.entry).toBe(join(root, 'package', 'cli.js'));
   });
@@ -88,8 +95,13 @@ describe('BundledPiLocator', () => {
   });
 
   it('rejects an in-root link retargeted despite a successful version probe', async () => {
-    const root = makeLinkedRuntimeFixture('targets/b', 'targets/a');
-    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(/符号链接/);
+    const { root, linkPath, rawTarget } = makeLinkedRuntimeFixture();
+    unlinkSync(linkPath);
+    createDirectoryLink(root, linkPath, 'targets/b');
+    expect(readlinkSync(linkPath)).not.toBe(rawTarget);
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接被重定向 alias/,
+    );
   });
 
   it('rejects a manifest-covered link that escapes the real runtime root', async () => {
@@ -98,9 +110,62 @@ describe('BundledPiLocator', () => {
     const root = mkdtempSync(join(tmpdir(), 'pi-runtime-escape-'));
     mkdirSync(join(root, 'package'), { recursive: true });
     writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
-    symlinkSync(outside, join(root, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
-    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: outside });
-    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(/越出/);
+    const linkPath = join(root, 'alias');
+    symlinkSync(outside, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: readlinkSync(linkPath) });
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接目标越出运行时 alias/,
+    );
+  });
+
+  it('rejects a manifest link path occupied by a regular file', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-runtime-non-link-'));
+    mkdirSync(join(root, 'package'), { recursive: true });
+    writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
+    writeFileSync(join(root, 'alias'), 'not a link');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: 'unused-target' });
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接缺失或不是符号链接 alias/,
+    );
+  });
+
+  it('rejects a manifest link path that is missing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-runtime-missing-link-'));
+    mkdirSync(join(root, 'package'), { recursive: true });
+    writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: 'unused-target' });
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接缺失或不是符号链接 alias/,
+    );
+  });
+
+  it('rejects a link whose captured target later disappears', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-runtime-broken-link-'));
+    const target = join(root, 'targets', 'a');
+    const linkPath = join(root, 'alias');
+    mkdirSync(join(root, 'package'), { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
+    const rawTarget = createDirectoryLink(root, linkPath, 'targets/a');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: rawTarget });
+    rmSync(target, { recursive: true });
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接目标缺失 alias/,
+    );
+  });
+
+  it('rejects an in-root link target absent from manifest file hashes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-runtime-unbound-link-'));
+    const linkPath = join(root, 'alias');
+    mkdirSync(join(root, 'package'), { recursive: true });
+    mkdirSync(join(root, 'targets', 'a'), { recursive: true });
+    writeFileSync(join(root, 'package', 'cli.js'), 'console.log("0.80.10")');
+    writeFileSync(join(root, 'targets', 'a', 'unlisted.txt'), 'unbound');
+    const rawTarget = createDirectoryLink(root, linkPath, 'targets/a');
+    writeRuntimeManifest(root, 'package/cli.js', '0.80.10', null, { alias: rawTarget });
+    await expect(new BundledPiLocator(root, { execFile: fakeVersionExec }).verify()).rejects.toThrow(
+      /运行时校验失败：符号链接目标未受摘要保护 alias/,
+    );
   });
 
   it('rejects a checksum mismatch instead of falling back', async () => {
