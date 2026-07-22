@@ -53,7 +53,10 @@ export function assertPiCatalogCompatibility(catalogOutput, helpOutput, opts = {
   for (const expected of models) {
     const key = `${expected.provider}\0${expected.model}`;
     const actual = catalog.get(key);
-    if (!actual) throw new Error(`missing model ${expected.provider}/${expected.model}`);
+    if (!actual) {
+      const available = [...catalog.keys()].sort().map((k) => k.replace('\0', '/')).join('\n  ');
+      throw new Error(`missing model ${expected.provider}/${expected.model}\nAvailable models (${catalog.size}):\n  ${available}`);
+    }
     if (expected.requiresThinking && !actual.thinking) {
       throw new Error(`thinking unsupported ${expected.provider}/${expected.model}`);
     }
