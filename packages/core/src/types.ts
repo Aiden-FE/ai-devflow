@@ -244,34 +244,10 @@ export interface AuditFinding {
 /** 界面语言。 */
 export type Locale = 'zh' | 'en';
 
-/** AI 服务商配置（用于"AI 沟通生成任务"）。密钥落盘前由 safeStorage 加密。 */
-export interface AiProviderConfig {
-  provider: 'anthropic' | 'openai';
-  /** 明文 API Key（内存中）；落盘前由主进程加密。 */
-  apiKey: string;
-  /** 可选自定义 baseURL（兼容 OpenAI 协议的网关/自托管服务）。 */
-  baseURL?: string;
-  /** 模型名，例如 claude-sonnet-5 / gpt-4o。 */
-  model: string;
-}
-
-/** AI 对话消息（与 ai-sdk 协议对齐）。 */
+/** AI 对话消息。 */
 export interface AiChatMessage {
   role: 'user' | 'assistant';
   content: string;
-}
-
-/** 「测试连接」结果：脱敏后的最终请求地址、HTTP 状态与服务端摘要（不含 API Key）。 */
-export interface TestConnectionResult {
-  ok: boolean;
-  /** HTTP 状态码（0 表示网络层失败）。 */
-  status: number;
-  /** 脱敏后的最终请求地址。 */
-  url: string;
-  /** 服务端响应摘要（脱敏、截断）。 */
-  serverSummary?: string;
-  /** 失败原因（脱敏）。 */
-  error?: string;
 }
 
 /**

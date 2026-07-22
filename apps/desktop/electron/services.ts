@@ -3,19 +3,21 @@
 import { app } from 'electron';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import type { AgentRunner } from '@ai-devflow/agents';
+import { PiProcessSupervisor, type AgentRunner } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
 import { createUpdater, type Updater } from './updater.js';
 import { createPiRuntime, type PiRuntimeServices } from './pi-runtime.js';
 import type { ProviderStore } from './provider-store.js';
+import { createPiAiService, createProductionTextExecutor, type PiAiService } from './pi-ai.js';
 
 export interface Services {
   repos: Repositories;
   runner?: AgentRunner;
   providerStore?: ProviderStore;
   piRuntime?: PiRuntimeServices;
+  piAi?: PiAiService;
   orchestrator: Orchestrator;
   timeoutEngine: TimeoutEngine;
   webhooks: WebhookSender;
@@ -33,6 +35,15 @@ export function createServices(notifier: Notifier): Services {
   const db = openDatabase(dbPath);
   const repos = createRepositories(db);
   const piRuntime = createPiRuntime(repos, userData);
+  const piAi = createPiAiService(
+    createProductionTextExecutor({
+      locator: piRuntime.locator,
+      router: piRuntime.router,
+      supervisor: new PiProcessSupervisor(),
+      sessionsBaseDir: join(userData, 'pi-runtime', 'sessions'),
+      projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
+    }),
+  );
   const orchestrator = new Orchestrator(repos, piRuntime.runner, {
     worktreesBaseDir,
     maxConcurrent: 2,
@@ -48,6 +59,7 @@ export function createServices(notifier: Notifier): Services {
     runner: piRuntime.runner,
     providerStore: piRuntime.providerStore,
     piRuntime,
+    piAi,
     orchestrator,
     timeoutEngine,
     webhooks,

@@ -15,7 +15,6 @@ import type {
   ProjectSettings,
   Locale,
   ThemeMode,
-  AiProviderConfig,
   AiChatMessage,
   AiTaskProposal,
   AiRequirementProposal,
@@ -24,7 +23,6 @@ import type {
   UpdateStatus,
   InstallUpdateResult,
   RejectTaskInput,
-  TestConnectionResult,
   ProviderSummary,
   ProviderInput,
   ProviderTestResult,
@@ -188,10 +186,6 @@ export interface DesktopApi {
     setTheme(mode: ThemeMode): Promise<void>;
     /** 同步获取当前解析后的主题（'light'|'dark'），供 preload 在首绘前设置 <html> class，避免闪黑。 */
     getResolvedThemeSync(): 'light' | 'dark';
-    getAiProvider(): Promise<AiProviderConfig | undefined>;
-    setAiProvider(cfg: AiProviderConfig | undefined): Promise<void>;
-    /** 测试 AI 服务商连通性：返回脱敏后的最终地址、HTTP 状态与服务端摘要（不含 API Key）。 */
-    testAiProvider(cfg: AiProviderConfig): Promise<TestConnectionResult>;
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
   };

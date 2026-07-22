@@ -89,9 +89,6 @@ const api: DesktopApi = {
         return 'dark';
       }
     },
-    getAiProvider: () => invoke('settings', 'getAiProvider')(),
-    setAiProvider: (cfg) => invoke('settings', 'setAiProvider')(cfg),
-    testAiProvider: (cfg) => invoke('settings', 'testAiProvider')(cfg),
     getProjectSettings: (projectId) => invoke('settings', 'getProjectSettings')(projectId),
     updateProjectSettings: (projectId, settings) => invoke('settings', 'updateProjectSettings')(projectId, settings),
   },

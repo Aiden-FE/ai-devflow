@@ -38,6 +38,9 @@ import type { Updater } from '../updater.js';
 import type { StreamEvent } from '../api.js';
 import type { DatabaseSync } from '@ai-devflow/persistence';
 import { now } from '@ai-devflow/core';
+import { ProviderStore } from '../provider-store.js';
+import { createPiAiService } from '../pi-ai.js';
+import type { PiTextExecutor } from '../pi-ai.js';
 
 // no-op 更新器（dev 下 createUpdater 也返回 no-op，这里显式构造供测试装配）。
 const noopUpdater: Updater = {
@@ -72,7 +75,29 @@ function buildServices() {
   const orchestrator = new Orchestrator(repos, runner, { worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false });
   const webhooks = new WebhookSender(repos, { maxAttempts: 1, timeoutMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, new NullNotifier(), webhooks, { intervalMs: 999_999_999 });
-  return { orchestrator, webhooks, timeoutEngine } satisfies Partial<Services>;
+
+  const values = new Map<string, string>();
+  const providerStore = new ProviderStore(
+    {
+      get: (k) => values.get(k),
+      upsert: (k, v) => values.set(k, v),
+      delete: (k) => values.delete(k),
+      transaction: <T>(fn: () => T) => fn(),
+    },
+    {
+      encrypt: (v) => `enc:${Buffer.from(v).toString('base64')}`,
+      decrypt: (v) => Buffer.from(v.slice(4), 'base64').toString(),
+    },
+    () => undefined,
+  );
+  const fakeExecutor: PiTextExecutor = async (workload) => {
+    if (workload === 'task_proposal') return '{"tasks":[]}';
+    if (workload === 'requirement_proposal') return '{"title":"T","description":"D","acceptance":"A","priority":"medium"}';
+    return 'hello';
+  };
+  const piAi = createPiAiService(fakeExecutor);
+
+  return { orchestrator, webhooks, timeoutEngine, providerStore, piAi } satisfies Partial<Services>;
 }
 
 beforeEach(() => {
@@ -87,6 +112,8 @@ beforeEach(() => {
     orchestrator: built.orchestrator,
     webhooks: built.webhooks,
     timeoutEngine: built.timeoutEngine,
+    providerStore: built.providerStore,
+    piAi: built.piAi,
     dbPath: ':memory:',
     worktreesBaseDir: workdir,
     encryptSecret,
@@ -143,7 +170,7 @@ describe('typed IPC wiring', () => {
     const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
     const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
-    const t = await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder', agentType: 'test' }) as { id: string; status: string };
+    const t = await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder' }) as { id: string; status: string };
 
     // 预置 worktree 路径以跳过真实 git（编排器逻辑仍验证）
     const task = repos.tasks.get(t.id)!;
@@ -175,18 +202,16 @@ describe('typed IPC wiring', () => {
     expect(await call('settings', 'getLocale')).toBe('zh');
   });
 
-  it('settings ai provider encrypts key and get returns masked; empty key preserves existing', async () => {
-    await call('settings', 'setAiProvider', { provider: 'anthropic', apiKey: 'sk-secret', model: 'claude-sonnet-5' });
-    const cfg = (await call('settings', 'getAiProvider')) as { apiKey: string; model: string };
-    expect(cfg.apiKey).toBe(''); // 不回传明文
-    expect(cfg.model).toBe('claude-sonnet-5');
-    // 留空 apiKey 保存时沿用既有密钥
-    await call('settings', 'setAiProvider', { provider: 'anthropic', apiKey: '', model: 'claude-sonnet-5' });
-    const stored = repos.credentials.get('ai_provider')!;
-    expect(decryptSecret(stored)).toContain('sk-secret');
-    // 清除
-    await call('settings', 'setAiProvider', undefined);
-    expect(repos.credentials.get('ai_provider')).toBeUndefined();
+  it('providers CRUD masks secrets and preserves order', async () => {
+    const saved = await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'Primary', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-secret', revision: 1,
+    }) as Record<string, unknown>;
+    expect(saved.hasCredential).toBe(true);
+    expect(JSON.stringify(saved)).not.toContain('sk-secret');
+    expect(saved).not.toHaveProperty('model');
+    expect(saved).not.toHaveProperty('credentialRef');
+    expect(await call('providers', 'list')).toEqual([saved]);
   });
 
   it('requirements.archive gates on all subtasks archived', async () => {
@@ -233,8 +258,8 @@ describe('typed IPC wiring', () => {
     const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
     const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
-    const pred = await call('tasks', 'create', { requirementId: r.id, title: 'Pred', description: '', role: 'coder', agentType: 'test' }) as { id: string };
-    const succ = await call('tasks', 'create', { requirementId: r.id, title: 'Succ', description: '', role: 'coder', agentType: 'test', dependsOn: [pred.id] }) as { id: string };
+    const pred = await call('tasks', 'create', { requirementId: r.id, title: 'Pred', description: '', role: 'coder' }) as { id: string };
+    const succ = await call('tasks', 'create', { requirementId: r.id, title: 'Succ', description: '', role: 'coder',  dependsOn: [pred.id] }) as { id: string };
     expect(repos.tasks.get(succ.id)!.dependsOn).toEqual([pred.id]);
     // 新建任务直接为 ready；启动 -> 前置未完成，被依赖门禁拒绝
     expect(repos.tasks.get(succ.id)!.status).toBe('ready');
@@ -249,7 +274,7 @@ describe('typed IPC wiring', () => {
     const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
     const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
-    await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder', agentType: 'test' });
+    await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder' });
     const all = (await call('tasks', 'listAll')) as unknown[];
     expect(all.length).toBe(1);
   });
@@ -339,10 +364,11 @@ describe('new IPC channels (reject / createBatch / global config / test-connecti
     expect(repos.tasks.listByRequirement('r').length).toBe(0);
   });
 
-  it('settings.testAiProvider reports a diagnostic error without an API key (no secret leaked)', async () => {
-    const r = (await call('settings', 'testAiProvider', { provider: 'anthropic', apiKey: '', model: 'claude-sonnet-5' })) as { ok: boolean; error?: string };
-    expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/API Key/);
+  it('providers.reorder rejects missing or duplicate ids', async () => {
+    const p1 = await call('providers', 'save', { id: 'p1', kind: 'openai', displayName: 'A', enabled: true, priority: 0, authType: 'api_key', apiKey: 'k', revision: 1 });
+    await call('providers', 'save', { id: 'p2', kind: 'anthropic', displayName: 'B', enabled: true, priority: 1, authType: 'api_key', apiKey: 'k', revision: 1 });
+    await expect(call('providers', 'reorder', [(p1 as { id: string }).id])).rejects.toThrow();
+    await expect(call('providers', 'reorder', [(p1 as { id: string }).id, (p1 as { id: string }).id])).rejects.toThrow();
   });
 
   it('updates.installUpdate returns a visible result (no silent no-op)', async () => {

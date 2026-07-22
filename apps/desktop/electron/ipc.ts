@@ -17,7 +17,6 @@ import {
   validateProposalDag,
   topoSortProposals,
 } from '@ai-devflow/core';
-import { chatStream, proposeTasks, proposeRequirement, testConnection } from './ai.js';
 
 const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
 
@@ -385,44 +384,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('settings', 'setLocale'), (_e, locale) => {
     repos.credentials.upsert('locale', locale);
   });
-  ipcMain.handle(channel('settings', 'getAiProvider'), () => {
-    const raw = repos.credentials.get('ai_provider');
-    if (!raw) return undefined;
-    try {
-      const cfg = JSON.parse(decryptSecret(raw)) as { provider: 'anthropic' | 'openai'; apiKey: string; baseURL?: string; model: string };
-      // 密钥不回传明文（与 webhook secret 一致）；Renderer 用 apiKey 留空表示不修改。
-      return { provider: cfg.provider, apiKey: '', baseURL: cfg.baseURL, model: cfg.model };
-    } catch {
-      return undefined;
-    }
-  });
-  ipcMain.handle(channel('settings', 'setAiProvider'), (_e, cfg) => {
-    if (!cfg) {
-      repos.credentials.delete('ai_provider');
-      return;
-    }
-    // apiKey 为空表示沿用既有密钥。
-    let apiKey = cfg.apiKey;
-    if (!apiKey) {
-      const raw = repos.credentials.get('ai_provider');
-      if (raw) {
-        try { apiKey = (JSON.parse(decryptSecret(raw)) as { apiKey: string }).apiKey ?? ''; } catch { /* ignore */ }
-      }
-    }
-    repos.credentials.upsert('ai_provider', encryptSecret(JSON.stringify({ ...cfg, apiKey })));
-  });
-  // 测试连接：用最小请求探测最终地址，返回 HTTP 状态与脱敏后的服务端摘要（绝不记录 API Key）。
-  ipcMain.handle(channel('settings', 'testAiProvider'), async (_e, cfg) => {
-    // apiKey 为空时沿用已存密钥（与 setAiProvider 一致），便于保存后直接测试。
-    let apiKey = cfg?.apiKey;
-    if (!apiKey) {
-      const raw = repos.credentials.get('ai_provider');
-      if (raw) {
-        try { apiKey = (JSON.parse(decryptSecret(raw)) as { apiKey: string }).apiKey ?? ''; } catch { /* ignore */ }
-      }
-    }
-    return testConnection({ ...(cfg ?? {}), apiKey: apiKey ?? '' });
-  });
   ipcMain.handle(channel('settings', 'getProjectSettings'), (_e, projectId) => repos.projects.get(projectId)?.settings ?? {});
   ipcMain.handle(channel('settings', 'updateProjectSettings'), (_e, projectId, settings) => repos.projects.updateSettings(projectId, settings));
   ipcMain.handle(channel('settings', 'getTheme'), () => readThemeMode());
@@ -438,7 +399,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- AI 服务商（有序提供商列表，Pi-only；脱敏契约，不暴露模型/密钥/credentialRef） ----
   const providerStore = services.providerStore;
-  const piRouter = services.piRuntime?.router;
   const healthView = (providerId: string): 'available' | 'untested' | 'cooldown' | 'configuration_error' => {
     const hs = repos.providerHealth.listByProvider(providerId);
     if (hs.length === 0) return 'untested';
@@ -464,13 +424,10 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('providers', 'health'), () =>
     (providerStore?.listConfigs() ?? []).map((p) => ({ providerId: p.id, status: healthView(p.id) })),
   );
-  // 测试连接：经 ProviderRouter 解析该提供商的可用路线（校验启用/密钥/熔断状态）。
+  // 测试连接：经 ProviderRouter 解析该提供商的可用路线并做一次最小 Pi 探测。
   ipcMain.handle(channel('providers', 'test'), (_e, id: string) => {
-    if (!piRouter) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };
-    const routes = piRouter.routesFor('task_chat');
-    return routes.some((r) => r.providerId === id)
-      ? { ok: true, providerId: id, status: 200 }
-      : { ok: false, providerId: id, status: 0, error: '无可用路线（检查启用状态与 API Key）' };
+    if (!services.piAi) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };
+    return services.piAi.testConnection(id);
   });
 
   // ---- 自动更新 ----
@@ -480,31 +437,32 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- AI 沟通：流式对话 + 结构化草稿（任务 / 需求） ----
   ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement'; context?: string }) => {
-    const raw = repos.credentials.get('ai_provider');
-    if (!raw) {
+    if (!services.piAi) {
+      sendAi({ type: 'error', sessionId: payload.sessionId, error: '应用运行组件未就绪' });
+      return;
+    }
+    if (!providerStore?.list().length) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: '尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。' });
       return;
     }
-    let cfg;
     try {
-      cfg = JSON.parse(decryptSecret(raw));
-    } catch {
-      sendAi({ type: 'error', sessionId: payload.sessionId, error: 'AI 服务商配置损坏，请重新填写。' });
-      return;
+      await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
+        mode: payload.mode,
+        context: payload.context,
+      });
+    } catch (e) {
+      sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
     }
-    await chatStream(cfg, payload.sessionId, payload.messages, sendAi, { mode: payload.mode, context: payload.context });
   });
   ipcMain.handle(channel('ai', 'propose'), async (_e, messages: AiChatMessage[], context?: string) => {
-    const raw = repos.credentials.get('ai_provider');
-    if (!raw) throw new Error('尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。');
-    const cfg = JSON.parse(decryptSecret(raw));
-    return proposeTasks(cfg, messages, context);
+    if (!services.piAi) throw new Error('应用运行组件未就绪');
+    if (!providerStore?.list().length) throw new Error('尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。');
+    return services.piAi.propose(messages, context);
   });
   ipcMain.handle(channel('ai', 'proposeRequirement'), async (_e, messages: AiChatMessage[]) => {
-    const raw = repos.credentials.get('ai_provider');
-    if (!raw) throw new Error('尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。');
-    const cfg = JSON.parse(decryptSecret(raw));
-    return proposeRequirement(cfg, messages);
+    if (!services.piAi) throw new Error('应用运行组件未就绪');
+    if (!providerStore?.list().length) throw new Error('尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。');
+    return services.piAi.proposeRequirement(messages);
   });
 
   timeoutEngine.start();
