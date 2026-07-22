@@ -206,6 +206,11 @@ export interface DesktopApi {
     migrationStatus(): Promise<ProviderMigrationStatus>;
     /** Atomically replaces an unreadable legacy record with an explicitly re-entered provider. */
     completeReentry(input: ProviderInput): Promise<ProviderSummary>;
+    /**
+     * 列出兼容网关可用模型（仅 openai_compatible / anthropic_compatible 会真正请求 /v1/models；
+     * 标准提供商返回空数组）。不回显密钥；仅返回 `{ id }` 列表供 Renderer 选择默认模型。
+     */
+    listModels(providerId: string): Promise<{ id: string }[]>;
   };
   // ---- 自动更新（Part 6，仅 app.isPackaged 时可用） ----
   updates: {

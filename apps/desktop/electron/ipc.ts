@@ -453,6 +453,16 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (!services.piAi) return { ok: false, providerId: id, status: 0, error: 'provider 未就绪' };
     return services.piAi.testConnection(id);
   });
+  // 列出兼容网关可用模型：解析 provider 配置与密钥后调用 fetchCompatibleModels。
+  // 标准提供商返回空数组；密钥仅在 Main 进程内使用，不进入 Renderer。
+  ipcMain.handle(channel('providers', 'listModels'), async (_e, id: string) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    const config = providerStore.listConfigs().find((p) => p.id === id);
+    if (!config) throw new Error('提供商不存在');
+    const secret = providerStore.resolveSecret(id) ?? '';
+    if (!services.piAi) throw new Error('AI 服务未就绪');
+    return services.piAi.listModels(config, secret);
+  });
 
   // ---- 自动更新 ----
   ipcMain.handle(channel('updates', 'check'), () => updater.check());

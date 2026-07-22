@@ -421,6 +421,20 @@ describe('new IPC channels (reject / createBatch / global config / test-connecti
     await expect(call('providers', 'reorder', [(p1 as { id: string }).id, (p1 as { id: string }).id])).rejects.toThrow();
   });
 
+  it('providers.listModels returns empty for standard providers', async () => {
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+      defaultModel: 'm',
+    });
+    const models = await call('providers', 'listModels', 'p1') as unknown[];
+    expect(models).toEqual([]);
+  });
+
+  it('providers.listModels rejects unknown provider id', async () => {
+    await expect(call('providers', 'listModels', 'missing')).rejects.toThrow();
+  });
+
   it('updates.installUpdate returns a visible result (no silent no-op)', async () => {
     const r = (await call('updates', 'installUpdate')) as { ok: boolean; error?: string };
     expect(r.ok).toBe(false);

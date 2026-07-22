@@ -101,6 +101,7 @@ const api: DesktopApi = {
     health: () => invoke('providers', 'health')(),
     migrationStatus: () => invoke('providers', 'migrationStatus')(),
     completeReentry: (input) => invoke('providers', 'completeReentry')(input),
+    listModels: (id) => invoke('providers', 'listModels')(id),
   },
   updates: {
     check: () => invoke('updates', 'check')(),
