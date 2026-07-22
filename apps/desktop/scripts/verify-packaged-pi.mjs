@@ -280,7 +280,13 @@ function minimalProbeEnv() {
 }
 
 function verifyHostExecutable(app, entry) {
-  if (!existsSync(app.executable)) fail(`Electron 可执行文件不存在：${app.executable}`);
+  if (!existsSync(app.executable)) {
+    // 诊断：列出目录内容，便于定位 electron-builder 在 Linux 上的实际可执行文件名。
+    const listing = (() => {
+      try { return readdirSync(app.dir).join(', '); } catch { return '(无法读取)'; }
+    })();
+    fail(`Electron 可执行文件不存在：${app.executable}（${app.dir} 内容：${listing}）`);
+  }
   const result = spawnSync(app.executable, [entry, '--version'], {
     env: minimalProbeEnv(),
     encoding: 'utf8',
