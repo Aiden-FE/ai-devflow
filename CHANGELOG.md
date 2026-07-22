@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- add libsecret-1-0, improve safeStorage diagnostics on Linux CI（79af6c4）
 - only normalize absolute symlinks on Windows（7a69452）
 - normalize absolute symlinks in staged Pi runtime for Windows（1f68f11）
 - set explicit executableName for deterministic Linux executable（a733176）
