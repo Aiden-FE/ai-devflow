@@ -29,7 +29,6 @@ vi.mock('electron', () => ({
 }));
 
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import { AgentRegistry, ControllableTestAdapter, ClaudeCodeAdapter, CodexAdapter, PiAdapter, type AgentAdapter, type AgentRun } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, NullNotifier } from '@ai-devflow/notifications';
 import { encryptSecret, decryptSecret } from '../credentials.js';
@@ -39,23 +38,6 @@ import type { Updater } from '../updater.js';
 import type { StreamEvent } from '../api.js';
 import type { DatabaseSync } from '@ai-devflow/persistence';
 import { now } from '@ai-devflow/core';
-import type { AgentType, AgentDetection, AgentRunRequest, AgentCapabilitySupport } from '@ai-devflow/core';
-
-// 假适配器：detect 恒可用，run 产出 done（含审查 PASS 标记，使 reviewer 桩审查通过）。
-class FakeAdapter implements AgentAdapter {
-  constructor(readonly id: AgentType) {}
-  async detect(): Promise<AgentDetection> { return { agentType: this.id, available: true, version: 'fake' }; }
-  async run(_req: AgentRunRequest): Promise<AgentRun> {
-    return {
-      events: (async function* () {
-        yield { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 } as import('@ai-devflow/core').AgentEvent;
-      })(),
-      cancel: async () => {},
-      done: async () => ({ exitCode: 0, ok: true }),
-    };
-  }
-  capabilities(): AgentCapabilitySupport { return { tools: false, plugins: false, skills: false, approval: false }; }
-}
 
 // no-op 更新器（dev 下 createUpdater 也返回 no-op，这里显式构造供测试装配）。
 const noopUpdater: Updater = {
@@ -72,9 +54,6 @@ let workdir: string;
 let sent: StreamEvent[];
 
 function buildServices() {
-  const registry = new AgentRegistry();
-  registry.register(new ControllableTestAdapter({ script: () => [{ type: 'done', summary: 'ok', t: 0 }] }));
-  for (const t of ['claude_code', 'codex', 'pi'] as AgentType[]) registry.register(new FakeAdapter(t));
   // Pi-only 编排器使用单一 AgentRunner；reviewer 与 dev 均产出含 PASS 结论的 done（供审查解析）。
   const runner: import('@ai-devflow/agents').AgentRunner = {
     async verifyRuntime() {
@@ -93,7 +72,7 @@ function buildServices() {
   const orchestrator = new Orchestrator(repos, runner, { worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false });
   const webhooks = new WebhookSender(repos, { maxAttempts: 1, timeoutMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, new NullNotifier(), webhooks, { intervalMs: 999_999_999 });
-  return { registry, orchestrator, webhooks, timeoutEngine } satisfies Partial<Services>;
+  return { orchestrator, webhooks, timeoutEngine } satisfies Partial<Services>;
 }
 
 beforeEach(() => {
@@ -105,7 +84,6 @@ beforeEach(() => {
   const built = buildServices();
   services = {
     repos,
-    registry: built.registry,
     orchestrator: built.orchestrator,
     webhooks: built.webhooks,
     timeoutEngine: built.timeoutEngine,
@@ -177,12 +155,6 @@ describe('typed IPC wiring', () => {
     expect(repos.tasks.get(t.id)!.status).toBe('in_review');
     // 事件被转发
     expect(sent.some((e) => e.kind === 'task-status')).toBe(true);
-  });
-
-  it('agents.detectAll returns all three agent detections', async () => {
-    const list = (await call('agents', 'detectAll')) as Array<{ agentType: string }>;
-    const types = list.map((d) => d.agentType).sort();
-    expect(types).toEqual(['claude_code', 'codex', 'pi']);
   });
 
   it('webhooks.create encrypts secret and list returns masked', async () => {
@@ -306,18 +278,6 @@ describe('typed IPC wiring', () => {
     // 非待验收任务验收拒绝
     repos.tasks.insert({ id: 't2', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T2', description: '', status: 'ready', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
     await expect(call('tasks', 'accept', 't2')).rejects.toThrow(/待验收/);
-  });
-
-  it('agents.capabilities returns per-adapter support', async () => {
-    // 用真实适配器验证能力声明（capabilities 不调 detect，安全）。
-    services.registry.register(new ClaudeCodeAdapter());
-    services.registry.register(new CodexAdapter());
-    services.registry.register(new PiAdapter());
-    const caps = (await call('agents', 'capabilities')) as Record<string, { tools: boolean; approval: boolean }>;
-    expect(caps['claude_code']!.tools).toBe(true);
-    expect(caps['claude_code']!.approval).toBe(true);
-    expect(caps['codex']!.tools).toBe(false);
-    expect(caps['pi']!.approval).toBe(false);
   });
 
   it('settings theme round-trips and persists', async () => {

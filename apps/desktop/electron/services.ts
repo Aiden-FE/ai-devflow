@@ -1,9 +1,9 @@
 // 装配主进程服务：数据库、内置 Pi 运行时（Provider 存储 + 路由 + Runner）、编排器、超时引擎、
-// Webhook 投递器、通知器、自动更新。旧 Agent 注册表暂留供尚未移除的 Agent IPC 使用（删除阶段移除）。
+// Webhook 投递器、通知器、自动更新。Pi-only：不再有 Agent 注册表/适配器。
 import { app } from 'electron';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import { createDefaultRegistry, type AgentRegistry, type AgentRunner } from '@ai-devflow/agents';
+import type { AgentRunner } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
@@ -13,8 +13,6 @@ import type { ProviderStore } from './provider-store.js';
 
 export interface Services {
   repos: Repositories;
-  /** @deprecated 仅供尚未移除的 Agent IPC（detect/capabilities）使用；删除阶段移除。 */
-  registry: AgentRegistry;
   runner?: AgentRunner;
   providerStore?: ProviderStore;
   piRuntime?: PiRuntimeServices;
@@ -34,8 +32,6 @@ export function createServices(notifier: Notifier): Services {
   const worktreesBaseDir = join(userData, 'worktrees');
   const db = openDatabase(dbPath);
   const repos = createRepositories(db);
-  // 旧 Agent 注册表暂留（删除阶段移除）；编排器已切换到内置 Pi Runner。
-  const registry = createDefaultRegistry();
   const piRuntime = createPiRuntime(repos, userData);
   const orchestrator = new Orchestrator(repos, piRuntime.runner, {
     worktreesBaseDir,
@@ -49,7 +45,6 @@ export function createServices(notifier: Notifier): Services {
 
   return {
     repos,
-    registry,
     runner: piRuntime.runner,
     providerStore: piRuntime.providerStore,
     piRuntime,

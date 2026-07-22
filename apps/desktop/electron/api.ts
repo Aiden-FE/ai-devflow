@@ -8,7 +8,6 @@ import type {
   TaskStatus,
   TaskRole,
   AgentType,
-  AgentDetection,
   LogEntry,
   ExecutionRecord,
   NotificationRule,
@@ -167,13 +166,6 @@ export interface DesktopApi {
     messages(id: string): Promise<TaskMessage[]>;
     /** 待处理交互列表。 */
     interactions(id: string): Promise<PendingInteraction[]>;
-  };
-  // ---- Agent ----
-  agents: {
-    detectAll(): Promise<AgentDetection[]>;
-    detect(type: AgentType): Promise<AgentDetection>;
-    /** 各适配器声明支持的能力（UI 据此启用/禁用配置项）。 */
-    capabilities(): Promise<Partial<Record<AgentType, import('@ai-devflow/core').AgentCapabilitySupport>>>;
   };
   // ---- 通知规则 ----
   notificationRules: {

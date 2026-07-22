@@ -1,16 +1,4 @@
-export * from './types.js';
-export * from './registry.js';
-export * from './detect.js';
-export { resolveAgentPath, envWithAgentPath, envWithCliPriority, resolveCommand, _resetResolvedPath } from './resolve-path.js';
-export { ClaudeCodeAdapter, parseClaudeLine, claudeCapabilityArgs, claudePermissionMode } from './adapters/claude-code.js';
-export { CodexAdapter, parseCodexLine } from './adapters/codex.js';
-export { PiAdapter, type PiAdapterOptions } from './adapters/pi.js';
-export {
-  ControllableTestAdapter,
-  type ControllableTestOptions,
-  type TestEventSpec,
-} from './adapters/test.js';
-export { spawnAgentProcess, type RawLine, type SpawnedProcess } from './process-runner.js';
+// Pi-only 运行时导出（设计 §17.2：已删除 Claude Code/Codex/旧 Pi 适配器、注册表、检测与路径解析）。
 export {
   ProviderRouter,
   ProviderExecutionError,

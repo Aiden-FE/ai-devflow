@@ -49,7 +49,7 @@ export function deriveProjectName(input: string): string {
 
 export function registerIpc(services: Services, send: (e: StreamEvent) => void, sendAi: (e: AiStreamEvent) => void): void {
   servicesRef = services;
-  const { repos, orchestrator, timeoutEngine, webhooks, registry, encryptSecret, decryptSecret, updater } = services;
+  const { repos, orchestrator, timeoutEngine, webhooks, encryptSecret, decryptSecret, updater } = services;
 
   // ---- 主题：启动时应用持久化模式 ----
   nativeTheme.themeSource = readThemeMode();
@@ -331,18 +331,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('tasks', 'pendingQuestion'), (_e, id) => repos.pendingQuestions.get(id));
   ipcMain.handle(channel('tasks', 'messages'), (_e, id) => repos.taskMessages.listByTask(id));
   ipcMain.handle(channel('tasks', 'interactions'), (_e, id) => repos.pendingInteractions.listByTask(id));
-
-  // ---- Agent ----
-  ipcMain.handle(channel('agents', 'detectAll'), async () => {
-    const types = ['claude_code', 'codex', 'pi'] as const;
-    return Promise.all(types.map((t) => registry.require(t).detect()));
-  });
-  ipcMain.handle(channel('agents', 'detect'), (_e, type) => registry.require(type).detect());
-  ipcMain.handle(channel('agents', 'capabilities'), () => {
-    const out: Record<string, unknown> = {};
-    for (const a of registry.list()) out[a.id] = a.capabilities();
-    return out;
-  });
 
   // ---- 通知规则 ----
   ipcMain.handle(channel('notificationRules', 'list'), () => repos.notificationRules.list());

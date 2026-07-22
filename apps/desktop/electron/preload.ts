@@ -63,11 +63,6 @@ const api: DesktopApi = {
     messages: (id) => invoke('tasks', 'messages')(id),
     interactions: (id) => invoke('tasks', 'interactions')(id),
   },
-  agents: {
-    detectAll: () => invoke('agents', 'detectAll')(),
-    detect: (type) => invoke('agents', 'detect')(type),
-    capabilities: () => invoke('agents', 'capabilities')(),
-  },
   notificationRules: {
     list: () => invoke('notificationRules', 'list')(),
     create: (rule) => invoke('notificationRules', 'create')(rule),
