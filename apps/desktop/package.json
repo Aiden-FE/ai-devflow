@@ -1,6 +1,6 @@
 {
   "name": "@ai-devflow/desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "本地优先的 AI 开发工作台：泳道看板 + 本地 Agent 桥接器在隔离 Git worktree 中真实执行任务。",
   "author": "Aiden-FE",
   "private": true,

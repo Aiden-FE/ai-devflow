@@ -6,6 +6,13 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.2.1
+
+变更范围：[v0.2.0...v0.2.1](https://github.com/Aiden-FE/ai-devflow/compare/v0.2.0...v0.2.1)
+
+### 新功能
+- configurable provider models with compatible gateway model list (#6)（c458628）
+
 ## v0.2.0
 
 变更范围：[v0.1.2...v0.2.0](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.2...v0.2.0)
