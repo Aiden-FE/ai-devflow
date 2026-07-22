@@ -222,7 +222,7 @@ describe('typed IPC wiring', () => {
     });
     repos.providerHealth.upsert({
       providerId: 'auth-broken',
-      routeId: 'auth-broken:coder:primary',
+      routeId: 'auth-broken:coder',
       state: 'open',
       consecutiveFailures: 1,
       lastFailureKind: 'authentication',

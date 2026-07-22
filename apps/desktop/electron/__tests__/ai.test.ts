@@ -104,9 +104,9 @@ const ROUTE: ProviderRoute = {
   providerRevision: 3,
   providerKind: 'openai',
   providerName: 'openai',
-  routeId: 'p1:task_chat:primary',
+  routeId: 'p1:task_chat',
   model: 'gpt-5.6-luna',
-  models: ['gpt-5.6-luna', 'gpt-5.4-mini'],
+  models: ['gpt-5.6-luna'],
   thinking: 'medium',
   secret: 'route-secret',
 };

@@ -23,9 +23,8 @@ import type { ProviderKind, TaskRole } from '@ai-devflow/core';
  * 与设计 §7.1 契约的等价取舍（显式注明，非偏差）：
  * - `extensions` 未列入本接口：四角色共用同一组仓库内维护的内置扩展，已抽到模块常量
  *   `BUILTIN_EXTENSIONS`（§7.4），不随角色变化，故不再逐角色重复声明。
- * - `providerModels` 未列入本接口：内置模型表是跨角色、跨提供商的全局映射，已抽到
- *   `provider-router.ts` 的 `MODEL_TABLE`（§7.2），由 ProviderRouter 按 workload 取用，
- *   不挂在单角色 profile 上。
+ * - `providerModels` 未列入本接口：模型由用户在 ProviderConfig 中配置（defaultModel/
+ *   workloadModels，§7.2），由 ProviderRouter 按 workload 解析取用，不挂在单角色 profile 上。
  * RoleProfile 只保留角色间确有差异的维度：工具清单、排除工具、skills、超时。
  */
 export interface RoleProfile {
@@ -130,7 +129,7 @@ export interface MaterializeInput {
   baseURL?: string;
   /** 生成的 Pi provider 名（兼容网关为 ai-devflow-<hash>；标准提供商为 catalog 名）。 */
   providerName: string;
-  /** 该角色在此提供商下需要声明的模型 ID（primary + fallback）。 */
+  /** 该角色在此提供商下解析出的模型 ID（单元素：用户配置解析出的唯一模型）。 */
   models: string[];
 }
 

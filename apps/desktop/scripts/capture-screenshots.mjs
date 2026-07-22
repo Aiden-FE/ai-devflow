@@ -45,6 +45,7 @@ try {
       enabled: true, priority: 0, authType: 'api_key',
       baseURL: 'https://api.openai.com/v1', revision: 0,
       apiKey: 'sk-shot-demo-key-do-not-use', allowInsecureLocal: false,
+      defaultModel: 'gpt-4',
     });
     const project = await window.api.projects.create({ name: 'ai-devflow', path: repoPath, defaultBranch: 'main' });
     const iteration = await window.api.iterations.create(project.id, '2026 Q3', '0.1.2');
