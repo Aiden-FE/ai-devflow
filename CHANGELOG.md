@@ -41,6 +41,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
 
 ### 其他变更
+- print expected/actual symlink target on verify mismatch（46c155f）
 - add directory listing diagnostics to verify-packaged-pi on missing executable（202e9af）
 - harden real Pi secret and planner gates（43c7876）
 - require real reviewer policy denial（ef3174b）
