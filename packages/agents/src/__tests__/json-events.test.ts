@@ -38,7 +38,7 @@ describe('createPiEventTranslator', () => {
     expect(() => translator.finish()).toThrow(/结构化结果/);
   });
 
-  it('accepts a valid ai_devflow_report_result and emits done', () => {
+  it('accepts a valid ai_devflow_report_result but leaves done emission to the role gate', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     translator.push(JSON.stringify({ type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', args: {} }));
     const events = translator.push(JSON.stringify({
@@ -47,8 +47,9 @@ describe('createPiEventTranslator', () => {
       isError: false,
     }));
     translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
-    expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
     expect(translator.hasStructuredResult()).toBe(true);
+    expect(translator.structuredResult()?.verification).toEqual(['t pass']);
     expect(() => translator.finish()).not.toThrow();
   });
 

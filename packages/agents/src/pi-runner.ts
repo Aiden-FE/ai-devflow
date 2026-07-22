@@ -6,9 +6,9 @@
 // 事件经异步队列桥接给调度器；活跃路线密钥全程脱敏。
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentEvent } from '@ai-devflow/core';
+import type { AgentEvent, TaskRole } from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
-import { createPiEventTranslator } from './json-events.js';
+import { createPiEventTranslator, type StructuredResult } from './json-events.js';
 import type { MaterializeInput } from './profiles.js';
 import { ROLE_PROFILES } from './profiles.js';
 import type { PiProcessSupervisor, SpawnedPi } from './process-supervisor.js';
@@ -206,7 +206,18 @@ export class PiRunner implements AgentRunner {
     const journal = translator.journal();
 
     if (translator.hasStructuredResult() && exitInfo.exitCode === 0) {
+      const structured = translator.structuredResult()!;
+      const invalid = validateRoleCompletion(request.role, structured);
+      if (invalid) {
+        this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+        return {
+          ok: false,
+          journal,
+          error: new ProviderExecutionError(invalid, 'task_result'),
+        };
+      }
       this.deps.attempts?.finish(attemptId, 'succeeded', Date.now());
+      queue.push({ type: 'done', summary: structured.summary, t: Date.now() });
       return { ok: true, journal };
     }
 
@@ -231,6 +242,22 @@ export class PiRunner implements AgentRunner {
     }
     return { ok: false, journal, error };
   }
+}
+
+/** Narrow enforceable completion evidence required by the built-in role contracts. */
+export function validateRoleCompletion(role: TaskRole, result: StructuredResult): string | undefined {
+  if (!result.verification.some((entry) => entry.trim().length > 0)) {
+    return '任务结果缺少角色要求的验证证据';
+  }
+  if (role === 'reviewer') {
+    if (!/REVIEW_VERDICT:\s*(PASS|FAIL)\b/.test(result.summary)) {
+      return '审查结果缺少 REVIEW_VERDICT: PASS|FAIL';
+    }
+    if (result.changedFiles.length > 0) {
+      return 'reviewer 结果不得报告变更文件';
+    }
+  }
+  return undefined;
 }
 
 /** 是否需要把前一尝试作为接管上下文传给下一路线（产生副作用或存在不确定工具）。 */

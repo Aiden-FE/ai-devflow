@@ -1,92 +1,323 @@
-// execution-policy：拦截工具调用，实施路径/命令/角色权限/敏感文件规则（设计 §7.4/§10.7）。
-// 返回稳定的 block reason（policy:* 前缀），使 Main 翻译器把策略拦截归为 task_result 而非 provider 失败。
-// 规则要点：
-// - 写工具路径规范化（最近存在父目录 realpath）后必须落在 AI_DEVFLOW_WORKTREE 内；禁止符号链接逃逸、
-//   .env*、凭证存储、staged 运行时与 profile/session 策略文件。
-// - 所有角色禁止递归删除与系统级/全局安装。
-// - reviewer：edit/write 全禁；bash 仅允许只读/验证命令（git diff/status/show/log、grep/rg/find/ls/pwd 等），
-//   拒绝重定向/命令替换/后台/链接/tee/变更型 git/安装/shell 逃逸。
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+// execution-policy：拦截工具调用，实施路径/命令/角色权限和 reviewer 完整性规则。
+// 所有拒绝原因使用稳定的 policy:* 前缀；不得包含命令输出、文件内容或凭证。
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
 
-const ROLE = process.env.AI_DEVFLOW_ROLE ?? "";
-const WORKTREE = process.env.AI_DEVFLOW_WORKTREE ?? "";
+type PolicyRole = 'planner' | 'coder' | 'reviewer' | 'tester' | string;
 
-function nearestRealpath(p: string): string {
-  let cur = resolve(p);
-  while (!existsSync(cur)) {
-    const parent = dirname(cur);
-    if (parent === cur) return cur;
-    cur = parent;
+export interface ExecutionPolicyContext {
+  role: PolicyRole;
+  worktree: string;
+}
+
+interface ToolCallLike {
+  type?: string;
+  toolCallId: string;
+  toolName: string;
+  input?: Record<string, unknown>;
+}
+
+interface ToolResultLike extends ToolCallLike {
+  content?: Array<{ type: string; text?: string }>;
+  isError?: boolean;
+  details?: unknown;
+}
+
+interface BlockResult {
+  block: true;
+  reason: string;
+}
+
+interface ToolResultOverride {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: true;
+}
+
+const SENSITIVE = new Set([
+  '.env', 'credentials', 'runtime-manifest.json', 'settings.json', 'system.md', 'models.json',
+]);
+const INSTALL_ACTIONS = new Set(['add', 'install', 'i', 'publish', 'link', 'unlink', 'update', 'upgrade']);
+const DESTRUCTIVE_GIT = new Set([
+  'clean', 'reset', 'checkout', 'restore', 'rebase', 'merge', 'cherry-pick', 'revert', 'commit',
+  'push', 'fetch', 'pull', 'worktree', 'gc', 'prune', 'reflog', 'update-ref', 'symbolic-ref',
+]);
+const INTERPRETERS = new Set(['node', 'python', 'python3', 'perl', 'ruby', 'php']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'cmd.exe', 'powershell', 'pwsh']);
+
+function block(code: string, detail: string): BlockResult {
+  return { block: true, reason: `policy:${code}: ${detail}` };
+}
+
+function canonicalPath(worktree: string, raw: string): string {
+  const absolute = isAbsolute(raw) ? resolve(raw) : resolve(worktree, raw);
+  let existing = absolute;
+  const suffix: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    suffix.unshift(basename(existing));
+    existing = parent;
   }
-  return realpathSync(cur);
+  const realBase = existsSync(existing) ? realpathSync(existing) : existing;
+  return resolve(realBase, ...suffix);
 }
 
-function isWithin(root: string, target: string): boolean {
-  if (!root) return false;
-  const r = realpathSync(root);
-  return target === r || target.startsWith(r + sep);
+function isWithin(worktree: string, target: string): boolean {
+  if (!worktree || !existsSync(worktree)) return false;
+  const root = realpathSync(worktree);
+  return target === root || target.startsWith(root + sep);
 }
 
-const SENSITIVE = [".env", "credentials", "runtime-manifest.json", "settings.json", "system.md", "models.json"];
-const READ_ONLY_FIRST = ["git", "grep", "rg", "find", "ls", "pwd", "cat", "head", "tail", "wc", "diff", "stat", "file"];
-const GIT_READ_ONLY = ["diff", "status", "show", "log", "ls-files", "rev-parse", "branch", "config"];
-const DANGEROUS = ["rm -rf", "rm -fr", "sudo", "mkfs", "dd if=", ":(){", "shutdown", "reboot", "format ", "del /f"];
-const PKG_INSTALL = ["npm install", "npm i ", "pnpm install", "pnpm add", "yarn add", "pip install", "pip3 install", "brew install", "apt install", "apt-get", "cargo install", "go install"];
-
-function firstToken(cmd: string): string {
-  return cmd.trim().split(/\s+/)[0] ?? "";
+function isSensitivePath(target: string): boolean {
+  return target
+    .toLowerCase()
+    .split(/[\\/]/)
+    .some((part) => part.startsWith('.env') || SENSITIVE.has(part));
 }
 
-export default function (pi: ExtensionAPI) {
-  pi.on("tool_call", async (event) => {
-    const name = event.toolName;
-    const input = (event.input ?? {}) as Record<string, unknown>;
-    const isReviewer = ROLE === "reviewer";
-
-    if (isReviewer && (name === "write" || name === "edit")) {
-      return { block: true, reason: "policy:reviewer-read-only: reviewer 角色禁止写文件" };
+function shellTokens(command: string): string[] | undefined {
+  const tokens: string[] = [];
+  let token = '';
+  let quote = '';
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i]!;
+    if (quote) {
+      if (char === quote) quote = '';
+      else if (char === '\\') {
+        i += 1;
+        if (i >= command.length) return undefined;
+        token += command[i]!;
+      } else token += char;
+      continue;
     }
-
-    if (name === "write" || name === "edit") {
-      const raw = typeof input.path === "string" ? input.path : "";
-      if (!raw) return { block: true, reason: "policy:missing-path: 缺少写入路径" };
-      const real = resolve(nearestRealpath(raw), raw.split(sep).pop() ?? "");
-      if (!isWithin(WORKTREE, real)) {
-        return { block: true, reason: "policy:outside-worktree: 禁止写出任务工作区或符号链接逃逸" };
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      if (token) {
+        tokens.push(token);
+        token = '';
       }
-      const lower = real.toLowerCase();
-      if (SENSITIVE.some((s) => lower.includes(s))) {
-        return { block: true, reason: "policy:sensitive-file: 禁止修改敏感/凭证/策略文件" };
-      }
+    } else if (char === '\\') {
+      i += 1;
+      if (i >= command.length) return undefined;
+      token += command[i]!;
+    } else {
+      token += char;
     }
+  }
+  if (quote) return undefined;
+  if (token) tokens.push(token);
+  return tokens;
+}
 
-    if (name === "bash") {
-      const cmd = typeof input.command === "string" ? input.command : "";
-      const low = cmd.toLowerCase();
-      for (const d of DANGEROUS) {
-        if (low.includes(d)) return { block: true, reason: `policy:dangerous-command: 禁止破坏性命令 (${d.trim()})` };
+function commandName(token: string | undefined): string {
+  return basename((token ?? '').toLowerCase());
+}
+
+function pathFromArg(arg: string): string | undefined {
+  const value = arg.startsWith('-') && arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : arg;
+  if (!value || value.startsWith('-') || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return undefined;
+  return isAbsolute(value) || value.startsWith('.') || value.includes('/') || value.includes('\\')
+    ? value
+    : undefined;
+}
+
+function firstOutsidePath(worktree: string, argv: string[]): string | undefined {
+  for (let i = 1; i < argv.length; i += 1) {
+    const path = pathFromArg(argv[i]!);
+    if (!path) continue;
+    try {
+      if (!isWithin(worktree, canonicalPath(worktree, path))) return path;
+    } catch {
+      return path;
+    }
+  }
+  return undefined;
+}
+
+function packageAction(argv: string[]): string | undefined {
+  const first = commandName(argv[0]);
+  if (!['pnpm', 'npm', 'yarn', 'bun'].includes(first)) return undefined;
+  for (const arg of argv.slice(1)) {
+    const action = arg.toLowerCase();
+    if (INSTALL_ACTIONS.has(action)) return action;
+  }
+  return undefined;
+}
+
+function gitSubcommand(argv: string[]): string | undefined {
+  if (commandName(argv[0]) !== 'git') return undefined;
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (arg === '-C') {
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('-')) continue;
+    return arg.toLowerCase();
+  }
+  return undefined;
+}
+
+function hasForbiddenInterpreterEscape(argv: string[]): boolean {
+  const first = commandName(argv[0]);
+  if (SHELLS.has(first)) return true;
+  if (!INTERPRETERS.has(first)) return false;
+  return argv.slice(1).some((arg) => ['-e', '--eval', '-c', '-command'].includes(arg.toLowerCase()));
+}
+
+function hasFindMutation(argv: string[]): boolean {
+  return commandName(argv[0]) === 'find' && argv.some((arg) =>
+    ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprintf'].includes(arg.toLowerCase()),
+  );
+}
+
+const REVIEWER_GIT_FLAGS: Record<string, Set<string>> = {
+  diff: new Set(['--check', '--stat', '--shortstat', '--name-only', '--name-status', '--numstat', '--cached', '--staged', '--no-ext-diff', '--', '-w']),
+  status: new Set(['--short', '-s', '--branch', '-b', '--porcelain', '--porcelain=v1', '--porcelain=v2', '--untracked-files=no', '--untracked-files=normal', '--untracked-files=all']),
+  show: new Set(['--stat', '--shortstat', '--name-only', '--name-status', '--oneline', '--no-ext-diff', '--format=fuller', '--']),
+  log: new Set(['--oneline', '--stat', '--shortstat', '--name-only', '--name-status', '--decorate', '--all', '--graph', '--no-merges']),
+  grep: new Set(['-n', '--line-number', '-i', '--ignore-case', '-w', '--word-regexp', '-F', '--fixed-strings', '--cached', '--untracked', '--']),
+};
+
+function reviewerGitAllowed(argv: string[]): boolean {
+  if (argv[0] !== 'git' || argv[1]?.startsWith('-')) return false;
+  const sub = argv[1] ?? '';
+  const flags = REVIEWER_GIT_FLAGS[sub];
+  if (!flags) return false;
+  for (const arg of argv.slice(2)) {
+    if (!arg.startsWith('-') || /^-[0-9]+$/.test(arg)) continue;
+    if (flags.has(arg)) continue;
+    if (sub === 'log' && /^--max-count=[0-9]+$/.test(arg)) continue;
+    if ((sub === 'diff' || sub === 'show') && /^--unified=[0-9]+$/.test(arg)) continue;
+    return false;
+  }
+  return true;
+}
+
+function reviewerPackageTestAllowed(argv: string[]): boolean {
+  const first = commandName(argv[0]);
+  if (first === 'cargo') return argv[1] === 'test';
+  if (first === 'go') return argv[1] === 'test';
+  if (!['pnpm', 'npm', 'yarn', 'bun'].includes(first)) return false;
+  const actions = argv.filter((arg) => !arg.startsWith('-'));
+  if (actions[0] === first) actions.shift();
+  return actions.some((arg) => ['test', 'typecheck', 'lint', 'verify', 'vitest', 'tsc'].includes(arg));
+}
+
+function reviewerCommandAllowed(argv: string[]): boolean {
+  const first = commandName(argv[0]);
+  if (first === 'git') return reviewerGitAllowed(argv);
+  if (['rg', 'grep', 'find', 'ls', 'pwd'].includes(first)) return true;
+  return reviewerPackageTestAllowed(argv);
+}
+
+export function snapshotTrackedFiles(worktree: string): string {
+  const listed = execFileSync('git', ['-C', worktree, 'ls-files', '-z'], {
+    encoding: 'utf8',
+    maxBuffer: 2 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const hash = createHash('sha256');
+  for (const relative of listed.split('\0').filter(Boolean).sort()) {
+    const target = canonicalPath(worktree, relative);
+    if (!isWithin(worktree, target)) throw new Error('tracked file escaped worktree');
+    hash.update(`${relative}\0`);
+    hash.update(existsSync(target) ? readFileSync(target) : Buffer.from('<missing>'));
+  }
+  return hash.digest('hex');
+}
+
+export function createExecutionPolicy(context: ExecutionPolicyContext) {
+  const reviewerHashes = new Map<string, string>();
+
+  return {
+    onToolCall(event: ToolCallLike): BlockResult | undefined {
+      const name = event.toolName;
+      const input = event.input ?? {};
+      const reviewer = context.role === 'reviewer';
+
+      if (reviewer && (name === 'write' || name === 'edit')) {
+        return block('reviewer-read-only', 'reviewer 角色禁止写文件');
       }
-      for (const p of PKG_INSTALL) {
-        if (low.includes(p)) return { block: true, reason: "policy:install-forbidden: 禁止系统级/全局安装" };
+
+      if (name === 'write' || name === 'edit') {
+        const raw = typeof input.path === 'string' ? input.path : '';
+        if (!raw) return block('missing-path', '缺少写入路径');
+        let target: string;
+        try {
+          target = canonicalPath(context.worktree, raw);
+        } catch {
+          return block('invalid-path', '写入路径无法安全解析');
+        }
+        if (!isWithin(context.worktree, target)) {
+          return block('outside-worktree', '禁止写出任务工作区或符号链接逃逸');
+        }
+        if (isSensitivePath(target)) return block('sensitive-file', '禁止修改敏感/凭证/策略文件');
       }
-      const isGit = /^git\b/.test(cmd.trim());
-      if (!isGit && /[;&|`]|\$\(|>>?|<|\btee\b/.test(cmd)) {
-        return { block: true, reason: "policy:shell-escape: 禁止重定向/命令替换/链接/后台执行" };
+
+      if (name !== 'bash') return undefined;
+      const command = typeof input.command === 'string' ? input.command.trim() : '';
+      if (!command) return block('missing-command', '缺少命令');
+      // This check is deliberately first and applies to every role, including commands beginning with git.
+      if (/[\r\n;&|`<>]|\$\(|\$\{|\btee\b/.test(command)) {
+        return block('shell-escape', '禁止重定向/命令替换/链接/后台执行');
       }
-      if (isReviewer) {
-        const first = firstToken(cmd);
-        if (isGit) {
-          const sub = cmd.trim().split(/\s+/)[1] ?? "";
-          if (!GIT_READ_ONLY.includes(sub)) {
-            return { block: true, reason: `policy:git-mutation: 审查仅允许只读 git (${GIT_READ_ONLY.join("/")})` };
-          }
-        } else if (!READ_ONLY_FIRST.includes(first)) {
-          return { block: true, reason: "policy:reviewer-bash-allowlist: 审查 bash 仅允许只读/验证命令" };
+      const argv = shellTokens(command);
+      if (!argv?.length) return block('shell-parse', '命令参数无法安全解析');
+
+      if (hasFindMutation(argv)) return block('find-mutation', '禁止 find 删除或执行子命令');
+      if (hasForbiddenInterpreterEscape(argv)) return block('interpreter-escape', '禁止 shell/interpreter 逃逸');
+      const action = packageAction(argv);
+      if (action) return block('install-forbidden', '禁止安装/发布依赖');
+      const subcommand = gitSubcommand(argv);
+      if (subcommand && DESTRUCTIVE_GIT.has(subcommand)) {
+        return block('git-mutation', '禁止破坏性或变更型 git 命令');
+      }
+      if (firstOutsidePath(context.worktree, argv)) {
+        return block('outside-worktree', '命令路径参数不得逃出任务工作区');
+      }
+
+      if (reviewer) {
+        if (!reviewerCommandAllowed(argv)) {
+          return block('reviewer-bash-allowlist', '审查 bash 仅允许精确的只读/验证命令');
+        }
+        try {
+          reviewerHashes.set(event.toolCallId, snapshotTrackedFiles(context.worktree));
+        } catch {
+          return block('reviewer-hash-unavailable', '无法建立 reviewer 受跟踪文件完整性基线');
         }
       }
-    }
-    return undefined;
+      return undefined;
+    },
+
+    onToolResult(event: ToolResultLike): ToolResultOverride | undefined {
+      if (context.role !== 'reviewer' || event.toolName !== 'bash') return undefined;
+      const before = reviewerHashes.get(event.toolCallId);
+      reviewerHashes.delete(event.toolCallId);
+      let changed = before === undefined;
+      try {
+        changed ||= snapshotTrackedFiles(context.worktree) !== before;
+      } catch {
+        changed = true;
+      }
+      if (!changed) return undefined;
+      return {
+        content: [{ type: 'text', text: 'policy:reviewer-tracked-files-changed: reviewer 命令改变了受跟踪文件' }],
+        isError: true,
+      };
+    },
+  };
+}
+
+export default function executionPolicyExtension(pi: ExtensionAPI) {
+  const policy = createExecutionPolicy({
+    role: process.env.AI_DEVFLOW_ROLE ?? '',
+    worktree: process.env.AI_DEVFLOW_WORKTREE ?? '',
   });
+  pi.on('tool_call', async (event) => policy.onToolCall(event));
+  pi.on('tool_result', async (event) => policy.onToolResult(event));
 }

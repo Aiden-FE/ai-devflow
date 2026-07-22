@@ -18,6 +18,9 @@ function reportResult(summary, extra = {}) {
 }
 
 function succeed(summary = 'done') {
+  if (process.env.AI_DEVFLOW_ROLE === 'reviewer' && !summary.includes('REVIEW_VERDICT:')) {
+    summary += '\nREVIEW_VERDICT: PASS';
+  }
   reportResult(summary);
   emit({ type: 'agent_end', messages: [] });
   process.exit(0);
@@ -91,6 +94,12 @@ switch (scenario) {
     emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pnpm test' } });
     emit({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: true, result: { content: [{ type: 'text', text: 'test failed' }] } });
     reportResult('tests failed', { unresolved: ['failing test'] });
+    emit({ type: 'agent_end', messages: [] });
+    process.exit(0);
+    break;
+
+  case 'missing-verification':
+    reportResult('unverified result', { verification: [] });
     emit({ type: 'agent_end', messages: [] });
     process.exit(0);
     break;

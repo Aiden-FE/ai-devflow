@@ -66,6 +66,17 @@ describe('ProviderRouter', () => {
     expect(calls).toBeLessThanOrEqual(8);
   });
 
+  it('does not fail over or open health for a task-result failure', async () => {
+    const harness = makeRouterHarness(['p1', 'p2']);
+    let calls = 0;
+    await expect(harness.router.execute('reviewer', async () => {
+      calls += 1;
+      throw new ProviderExecutionError('review evidence invalid', 'task_result');
+    })).rejects.toThrow(/review evidence invalid/);
+    expect(calls).toBe(1);
+    expect(harness.health.listByProvider('p1')).toEqual([]);
+  });
+
   it('retries a transient route once before degrading', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     const visited: string[] = [];

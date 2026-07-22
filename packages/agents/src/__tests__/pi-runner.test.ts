@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import { validateRoleCompletion } from '../pi-runner.js';
 import { createPiRunnerHarness } from './helpers/pi-runner-harness.js';
 
 async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
@@ -6,6 +7,23 @@ async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
   for await (const event of events) values.push(event);
   return values;
 }
+
+it('enforces the narrow role-specific structured-result evidence contract', () => {
+  const base = { summary: 'done', verification: ['pnpm test: pass'], changedFiles: [], unresolved: [] };
+  expect(validateRoleCompletion('planner', base)).toBeUndefined();
+  expect(validateRoleCompletion('coder', { ...base, verification: [] })).toMatch(/验证证据/);
+  expect(validateRoleCompletion('tester', { ...base, verification: ['   '] })).toMatch(/验证证据/);
+  expect(validateRoleCompletion('reviewer', { ...base, summary: 'reviewed' })).toMatch(/REVIEW_VERDICT/);
+  expect(validateRoleCompletion('reviewer', {
+    ...base,
+    summary: 'reviewed\nREVIEW_VERDICT: PASS',
+    changedFiles: ['src/changed.ts'],
+  })).toMatch(/不得报告变更文件/);
+  expect(validateRoleCompletion('reviewer', {
+    ...base,
+    summary: 'reviewed\nREVIEW_VERDICT: PASS',
+  })).toBeUndefined();
+});
 
 it('uses the absolute fake Pi entry and emits done only after report_result', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
@@ -81,6 +99,18 @@ it('does not fail over on a task-result failure (structured result received)', a
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
   expect(harness.spawnedCommands).toHaveLength(1);
+});
+
+it('rejects a role result without verification evidence and does not fail over', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'missing-verification' });
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'e1', role: 'coder', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  expect(harness.spawnedCommands).toHaveLength(1);
+  expect((await run.done()).ok).toBe(false);
 });
 
 it('verifies the runtime via the locator', async () => {

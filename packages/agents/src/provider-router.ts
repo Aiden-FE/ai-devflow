@@ -277,6 +277,9 @@ export class ProviderRouter {
         } catch (err) {
           const kind = err instanceof ProviderExecutionError ? err.kind : classifyProviderFailure(err);
           const retryAfterMs = err instanceof ProviderExecutionError ? err.retryAfterMs : undefined;
+          if (kind === 'task_result' || kind === 'interaction') {
+            throw err;
+          }
           this.recordFailure(route, kind, retryAfterMs);
           const retryableSame = kind === 'transient_provider' || kind === 'runtime' || kind === 'protocol';
           if (retryableSame && !retriedSame.has(route.routeId)) {

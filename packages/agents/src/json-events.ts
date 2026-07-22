@@ -134,8 +134,12 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
           if (name === REPORT_TOOL) {
             const structured = extractStructuredResult(ev.result);
             if (structured) {
-              result = structured;
-              events.push({ type: 'done', summary: redact(structured.summary), t: t() });
+              result = {
+                summary: redact(structured.summary),
+                verification: structured.verification.map(redact),
+                changedFiles: structured.changedFiles.map(redact),
+                unresolved: structured.unresolved.map(redact),
+              };
             }
           } else if (name === INTERACTION_TOOL) {
             const input = (args as { kind?: string; title?: string; detail?: string }) ?? {};
