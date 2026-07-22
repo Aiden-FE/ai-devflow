@@ -15,7 +15,9 @@ import type {
 } from '@ai-devflow/agents';
 import {
   ACTIVE_API_KEY_ENV,
+  ProviderExecutionError,
   buildCompatibleModelsJson,
+  classifyProviderFailure,
   isCompatibleKind,
 } from '@ai-devflow/agents';
 import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_TASK_SYSTEM } from './pi-ai-prompts.js';
@@ -23,7 +25,12 @@ import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
 export interface PiTextExecutor {
-  (workload: ChatWorkload, messages: AiChatMessage[], onDelta?: (text: string) => void): Promise<string>;
+  (
+    workload: ChatWorkload,
+    messages: AiChatMessage[],
+    onDelta?: (text: string) => void,
+    options?: { onlyProviderId?: string },
+  ): Promise<string>;
 }
 
 export interface PiAiService {
@@ -148,7 +155,7 @@ function buildChatPlan(
   let modelsJson: string | undefined;
   if (isCompatibleKind(route.providerKind)) {
     env[ACTIVE_API_KEY_ENV] = route.secret;
-    modelsJson = buildCompatibleModelsJson(route.providerName, route.providerKind, route.baseURL, [route.model]);
+    modelsJson = buildCompatibleModelsJson(route.providerName, route.providerKind, route.baseURL, route.models);
   } else {
     const keyEnv = STANDARD_KEY_ENV[route.providerKind];
     if (keyEnv) env[keyEnv] = route.secret;
@@ -191,36 +198,69 @@ async function executeTextOnRoute(
 
   let full = '';
   let sawAgentEnd = false;
+  let malformedStdout = false;
+  let streamError: unknown;
+  let providerError: { status: number; message: string } | undefined;
+  const deltas: string[] = [];
+  let exitInfo: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
+  let doneError: unknown;
   try {
-    for await (const line of spawned.lines) {
-      if (line.stream !== 'stdout') continue;
-      let event: { type?: string; delta?: string; text?: string } | undefined;
-      try {
-        event = JSON.parse(line.text) as { type?: string; delta?: string; text?: string };
-      } catch {
-        continue;
+    try {
+      for await (const line of spawned.lines) {
+        if (line.stream !== 'stdout') continue;
+        let event: { type?: string; delta?: string; text?: string; status?: number; message?: string };
+        try {
+          event = JSON.parse(line.text) as typeof event;
+        } catch {
+          malformedStdout = true;
+          continue;
+        }
+        if (event.type === 'message_update') {
+          const delta = typeof event.delta === 'string' ? event.delta : typeof event.text === 'string' ? event.text : '';
+          if (delta) {
+            full += delta;
+            deltas.push(delta);
+          }
+        } else if (event.type === 'agent_end') {
+          sawAgentEnd = true;
+        } else if (event.type === 'error' || event.type === 'provider_error') {
+          providerError = {
+            status: typeof event.status === 'number' ? event.status : 0,
+            message: typeof event.message === 'string' ? event.message : '',
+          };
+        }
       }
-      if (event?.type === 'message_update') {
-        const delta = typeof event.delta === 'string' ? event.delta : typeof event.text === 'string' ? event.text : '';
-        full += delta;
-        onDelta?.(delta);
-      } else if (event?.type === 'agent_end') {
-        sawAgentEnd = true;
-      }
+    } catch (error) {
+      streamError = error;
+    }
+    try {
+      exitInfo = await spawned.done();
+    } catch (error) {
+      doneError = error;
     }
   } finally {
-    await spawned.done().catch(() => ({}));
     rmSync(sessionDir, { recursive: true, force: true });
   }
 
-  if (!sawAgentEnd && full === '') {
-    throw new Error('Pi 未返回有效文本');
+  if (providerError) {
+    throw new ProviderExecutionError(
+      'AI 服务请求失败',
+      classifyProviderFailure({ status: providerError.status, message: providerError.message }),
+      providerError.status,
+    );
   }
+  if (doneError || !exitInfo || exitInfo.exitCode !== 0) {
+    throw new ProviderExecutionError('Pi 运行进程异常退出', 'runtime', exitInfo?.exitCode ?? 0);
+  }
+  if (streamError || malformedStdout || !sawAgentEnd || full.length === 0) {
+    throw new ProviderExecutionError('Pi 返回的终止协议无效', 'protocol');
+  }
+  for (const delta of deltas) onDelta?.(delta);
   return full;
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
-  return async (workload, messages, onDelta) => {
+  return async (workload, messages, onDelta, options) => {
     const result = await deps.router.execute(
       workload,
       async (route) => {
@@ -229,11 +269,12 @@ export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTe
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
-            throw Object.assign(new Error((err as Error).message), { kind: 'runtime' });
+            throw new ProviderExecutionError('应用运行组件损坏', 'runtime');
           }
           throw err;
         }
       },
+      options,
     );
     return result;
   };
@@ -346,7 +387,7 @@ async function testConnectionWithRouter(
 ): Promise<ProviderTestResult> {
   try {
     // 用一次极短对话探测路线；成功即认为可用。
-    await executeText('task_chat', [{ role: 'user', content: 'ping' }]);
+    await executeText('task_chat', [{ role: 'user', content: 'ping' }], undefined, { onlyProviderId: providerId });
     return { ok: true, providerId, status: 200 };
   } catch (err) {
     const message = (err as Error).message || String(err);
