@@ -3,6 +3,7 @@
 import { app } from 'electron';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
+import type { ProviderSummary } from '@ai-devflow/core';
 import { PiProcessSupervisor, type AgentRunner } from '@ai-devflow/agents';
 import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
@@ -32,6 +33,13 @@ export interface Services {
 export interface ServiceInitializationStatus {
   credentialMigration: 'not_needed' | 'migrated' | 'needs_reentry' | 'failed';
   runtime: 'ready' | 'unavailable';
+}
+
+export function hasUsableProvider(
+  providers: ReadonlyArray<Pick<ProviderSummary, 'enabled' | 'hasCredential'>>,
+  runtime: ServiceInitializationStatus['runtime'] | undefined,
+): boolean {
+  return runtime === 'ready' && providers.some((provider) => provider.enabled && provider.hasCredential);
 }
 
 interface InitializableServices {
@@ -93,17 +101,21 @@ export function createServices(notifier: Notifier): Services {
       projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
     }),
   );
+  let services: Services | undefined;
   const orchestrator = new Orchestrator(repos, piRuntime.runner, {
     worktreesBaseDir,
     maxConcurrent: 2,
     autoRetry: true,
-    hasProvider: () => piRuntime.providerStore.list().length > 0,
+    hasProvider: () => hasUsableProvider(
+      piRuntime.providerStore.list(),
+      services?.initializationStatus?.runtime,
+    ),
   });
   const webhooks = new WebhookSender(repos, { maxAttempts: 3, timeoutMs: 10_000, baseDelayMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, notifier, webhooks, { intervalMs: 30_000 });
   const updater = createUpdater();
 
-  return {
+  services = {
     repos,
     runner: piRuntime.runner,
     providerStore: piRuntime.providerStore,
@@ -118,4 +130,5 @@ export function createServices(notifier: Notifier): Services {
     decryptSecret,
     updater,
   };
+  return services;
 }

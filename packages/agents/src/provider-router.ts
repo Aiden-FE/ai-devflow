@@ -135,6 +135,7 @@ function providerNameFor(provider: ProviderConfig): string {
 
 const MAX_ATTEMPTS = 8;
 const MINUTE = 60_000;
+const PROVIDER_AUTH_ROUTE_ID = 'provider:authentication';
 
 /** 故障分类：把任意错误映射为 FailureKind（ProviderExecutionError 自带 kind，不经此函数）。 */
 export function classifyProviderFailure(err: unknown): FailureKind {
@@ -200,6 +201,8 @@ export class ProviderRouter {
     }
     const candidates: Candidate[] = [];
     for (const provider of providers) {
+      const authHealth = this.deps.health.get(provider.id, PROVIDER_AUTH_ROUTE_ID);
+      if (authHealth?.state === 'open' || authHealth?.state === 'half_open') continue;
       const secret = this.deps.resolveSecret(provider.id);
       if (!secret) continue;
       const base = baseKindOf(provider.kind);
@@ -290,11 +293,7 @@ export class ProviderRouter {
           }
           if (kind === 'authentication') {
             authenticationFailures.add(route.providerId);
-            for (const providerRoute of routes) {
-              if (providerRoute.providerId === route.providerId) {
-                this.recordFailure(providerRoute, kind, retryAfterMs);
-              }
-            }
+            this.recordAuthenticationFailure(route.providerId);
             break;
           }
           this.recordFailure(route, kind, retryAfterMs);
@@ -335,13 +334,26 @@ export class ProviderRouter {
     });
   }
 
+  private recordAuthenticationFailure(providerId: string): void {
+    const existing = this.deps.health.get(providerId, PROVIDER_AUTH_ROUTE_ID);
+    this.deps.health.upsert({
+      providerId,
+      routeId: PROVIDER_AUTH_ROUTE_ID,
+      state: 'open',
+      consecutiveFailures: (existing?.consecutiveFailures ?? 0) + 1,
+      cooldownUntil: undefined,
+      lastFailureKind: 'authentication',
+      updatedAt: this.deps.now(),
+    });
+  }
+
   private recordFailure(route: ProviderRoute, kind: FailureKind, retryAfterMs?: number): void {
     const existing = this.deps.health.get(route.providerId, route.routeId);
     const failures = (existing?.consecutiveFailures ?? 0) + 1;
     const now = this.deps.now();
     let cooldownUntil: number | undefined;
-    if (kind === 'authentication' || kind === 'model_unavailable') {
-      cooldownUntil = undefined; // 开到 revision 变更（由 ProviderStore.clearHealth 清除）
+    if (kind === 'model_unavailable') {
+      cooldownUntil = undefined; // 当前模型路线开到 revision 变更（由 ProviderStore.clearHealth 清除）
     } else if (kind === 'rate_limit') {
       cooldownUntil = now + rateLimitCooldownMs(failures, retryAfterMs);
     } else {

@@ -69,10 +69,22 @@ describe('ProviderRouter', () => {
       return 'ok';
     });
     expect(visited).toEqual(['p1:tester:primary', 'p2:tester:primary']);
-    expect(harness.health.get('p1', 'p1:tester:primary')?.state).toBe('open');
-    expect(harness.health.get('p1', 'p1:tester:fallback')?.state).toBe('open');
-    // Authentication routes stay open without a cooldown expiry (until revision change).
-    expect(harness.health.get('p1', 'p1:tester:primary')?.cooldownUntil).toBeUndefined();
+    const authHealth = harness.health.listByProvider('p1')
+      .filter((entry) => entry.lastFailureKind === 'authentication');
+    expect(authHealth).toHaveLength(1);
+    expect(authHealth[0]).toMatchObject({ state: 'open', cooldownUntil: undefined });
+    // The same provider is quarantined for every workload until its revision changes.
+    expect(harness.router.routesFor('coder').map((route) => route.providerId)).not.toContain('p1');
+  });
+
+  it('keeps model-unavailable health route-local across workloads', async () => {
+    const harness = makeRouterHarness(['p1', 'p2']);
+    await harness.router.execute('coder', async (route) => {
+      if (route.providerId === 'p1') throw new ProviderExecutionError('model unavailable', 'model_unavailable', 404);
+      return 'ok';
+    });
+
+    expect(harness.router.routesFor('tester').map((route) => route.providerId)).toContain('p1');
   });
 
   it('never exceeds eight operation calls', async () => {

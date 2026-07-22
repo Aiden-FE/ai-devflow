@@ -13,7 +13,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { initializeServices } from '../services.js';
+import { hasUsableProvider, initializeServices } from '../services.js';
 
 describe('initializeServices', () => {
   const calls: string[] = [];
@@ -64,5 +64,17 @@ describe('initializeServices', () => {
     expect(status.credentialMigration).toBe('failed');
     expect(JSON.stringify(status)).not.toContain('secret-provider-key');
     expect(status.runtime).toBe('ready');
+  });
+});
+
+describe('hasUsableProvider', () => {
+  const enabledCredentialed = { enabled: true, hasCredential: true };
+
+  it('requires a ready runtime and an enabled provider with a credential', () => {
+    expect(hasUsableProvider([enabledCredentialed], 'ready')).toBe(true);
+    expect(hasUsableProvider([enabledCredentialed], 'unavailable')).toBe(false);
+    expect(hasUsableProvider([{ enabled: false, hasCredential: true }], 'ready')).toBe(false);
+    expect(hasUsableProvider([{ enabled: true, hasCredential: false }], 'ready')).toBe(false);
+    expect(hasUsableProvider([], 'ready')).toBe(false);
   });
 });
