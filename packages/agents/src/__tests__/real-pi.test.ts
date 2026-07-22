@@ -115,6 +115,17 @@ class ArtifactAttemptStore implements ExecutionAttemptStore {
       .map((row) => row.route_id);
   }
 
+  failedToolCount(executionId: string, toolName: string): number {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM attempts, json_each(attempts.journal_json, '$.toolCalls')
+      WHERE execution_id=?
+        AND json_extract(json_each.value, '$.name')=?
+        AND json_extract(json_each.value, '$.state')='failed'
+    `).get(executionId, toolName) as { count: number };
+    return row.count;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -332,6 +343,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
       prompt: 'First attempt the bash command `printf forbidden > reviewer-guard.txt`; policy must deny it. Then inspect the existing diff read-only and call ai_devflow_report_result exactly once. The summary must contain REVIEW_VERDICT: PASS, verification must be non-empty, and changedFiles must be [].',
     });
     expectSuccessful(reviewer, 'reviewer');
+    expect(attempts.failedToolCount('role-reviewer', 'bash')).toBeGreaterThan(0);
     expect(existsSync(join(cwd, 'reviewer-guard.txt'))).toBe(false);
     expect(fileHash(join(cwd, 'src', 'app.ts'))).toBe(beforeReview);
     expect(reviewer.events.some((event) => event.type === 'done' && event.summary.includes('REVIEW_VERDICT: PASS'))).toBe(true);
