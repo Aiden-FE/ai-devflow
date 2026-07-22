@@ -72,6 +72,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   const providers: ProviderConfig[] = ['p1', 'p2'].map((id, priority) => ({
     id, kind: 'openai', displayName: id, enabled: true, priority,
     authType: 'api_key', credentialRef: `provider:${id}`, revision: priority + 7,
+    defaultModel: 'gpt-default',
   }));
 
   const healthValues = new Map<string, ProviderHealth>();
