@@ -176,4 +176,35 @@ describe('ProviderStore', () => {
     expect(harness.store.resolveSecret('a')).toBeUndefined();
     expect(harness.cleared).toContain('a');
   });
+
+  it('lists provider without models as configuration_error', () => {
+    const harness = makeProviderStoreHarness();
+    harness.store.save({
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+      defaultModel: 'm',
+    });
+    // simulate legacy provider with no models by directly editing config
+    const config = harness.store.listConfigs()[0]!;
+    delete (config as Partial<typeof config>).defaultModel;
+    harness.store.save({ ...config, apiKey: 'k2' });
+    expect(harness.store.list()[0]!.health).toBe('configuration_error');
+  });
+
+  it('bumps revision and clears health when model config changes', () => {
+    const harness = makeProviderStoreHarness();
+    harness.store.save({
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+      defaultModel: 'm1',
+    });
+    expect(harness.store.list()[0]!.revision).toBe(1);
+    harness.store.save({
+      id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+      defaultModel: 'm2',
+    });
+    expect(harness.store.list()[0]!.revision).toBe(2);
+    expect(harness.cleared).toContain('p1');
+  });
 });

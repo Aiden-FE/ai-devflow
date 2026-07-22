@@ -30,6 +30,13 @@ function secretKey(id: string): string {
   return `provider-secret:${id}`;
 }
 
+/** 提供商是否配置了任何可用模型（默认模型或任一 workload 覆盖）。无模型时报告 configuration_error。 */
+function hasModelConfig(config: ProviderConfig): boolean {
+  if (config.defaultModel?.trim()) return true;
+  if (!config.workloadModels) return false;
+  return Object.values(config.workloadModels).some((v) => v?.trim());
+}
+
 interface LegacyAiProvider {
   provider: 'anthropic' | 'openai';
   apiKey: string;
@@ -86,7 +93,7 @@ export class ProviderStore {
     this.credentials.upsert(PROVIDERS_KEY, this.crypto.encrypt(JSON.stringify(configs)));
   }
 
-  /** 脱敏摘要：hasCredential 布尔，无密文/明文/credentialRef。health 缺省 untested（路由层合并真实健康）。 */
+  /** 脱敏摘要：hasCredential 布尔，无密文/明文/credentialRef。无模型配置时 health 为 configuration_error；否则 untested（路由层合并真实健康）。 */
   list(): ProviderSummary[] {
     return this.listConfigs().map((c) => ({
       id: c.id,
@@ -98,12 +105,12 @@ export class ProviderStore {
       baseURL: c.baseURL,
       revision: c.revision,
       hasCredential: this.credentials.get(secretKey(c.id)) !== undefined,
-      health: 'untested',
+      health: hasModelConfig(c) ? 'untested' : 'configuration_error',
     }));
   }
 
   /**
-   * 保存（新增或更新）一个提供商。revision 在 kind/Base URL/启用状态变化或提供新密钥时递增；
+   * 保存（新增或更新）一个提供商。revision 在 kind/Base URL/启用状态/模型配置变化或提供新密钥时递增；
    * 更新已存在提供商时于提交后 clearHealth(id)。密钥只在提供时写入，空密钥不覆盖既有密钥。
    */
   save(input: ProviderInput): ProviderSummary {
@@ -117,6 +124,8 @@ export class ProviderStore {
         existing.kind !== config.kind ||
         (existing.baseURL ?? '') !== (config.baseURL ?? '') ||
         existing.enabled !== config.enabled ||
+        existing.defaultModel !== config.defaultModel ||
+        JSON.stringify(existing.workloadModels ?? {}) !== JSON.stringify(config.workloadModels ?? {}) ||
         secret !== undefined;
       revision = changed ? existing.revision + 1 : existing.revision;
     } else {
