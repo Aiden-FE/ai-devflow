@@ -17,7 +17,7 @@ export function validateProjectName(name: string): ValidationResult {
 export function validateLocalPath(path: string): ValidationResult {
   const errors: string[] = [];
   if (path.trim().length === 0) errors.push('路径不能为空');
-  if (!path.startsWith('/')) errors.push('必须是绝对路径');
+  if (!path.startsWith('/') && !/^[A-Za-z]:[/\\]/.test(path)) errors.push('必须是绝对路径');
   if (path.includes('\n')) errors.push('路径含换行');
   return { ok: errors.length === 0, errors };
 }
