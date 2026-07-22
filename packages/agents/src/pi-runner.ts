@@ -231,8 +231,10 @@ export class PiRunner implements AgentRunner {
       finishError = err;
     }
     const journal = translator.journal();
+    const pe = translator.lastProviderError();
+    const hadInteraction = translator.hadInteraction();
 
-    if (translator.hasStructuredResult() && exitInfo.exitCode === 0) {
+    if (!finishError && !pe && !hadInteraction && translator.hasStructuredResult() && exitInfo.exitCode === 0) {
       const structured = translator.structuredResult()!;
       const invalid = validateRoleCompletion(request.role, structured);
       if (invalid) {
@@ -249,13 +251,23 @@ export class PiRunner implements AgentRunner {
     }
 
     // 澄清/确认：暂停而非降级（§9.4 interaction）。orchestrator 已收到 ask_user 事件并转 awaiting_input。
-    if (translator.hadInteraction()) {
-      this.deps.attempts?.finish(attemptId, 'canceled', Date.now());
-      return { ok: true, journal };
+    if (hadInteraction) {
+      if (!finishError && !translator.hasStructuredResult() && !pe && exitInfo.exitCode === 0) {
+        this.deps.attempts?.finish(attemptId, 'canceled', Date.now());
+        return { ok: true, journal };
+      }
+      this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+      return {
+        ok: false,
+        journal,
+        error: new ProviderExecutionError(
+          finishError instanceof Error ? finishError.message : 'interaction 终态无效',
+          'interaction',
+        ),
+      };
     }
 
     this.deps.attempts?.finish(attemptId, 'failed', Date.now());
-    const pe = translator.lastProviderError();
     let error: ProviderExecutionError;
     if (pe) {
       error = new ProviderExecutionError(pe.message || 'provider error', classifyProviderFailure(pe), pe.status);

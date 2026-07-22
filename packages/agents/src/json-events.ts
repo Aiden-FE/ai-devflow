@@ -27,7 +27,7 @@ export interface PiEventTranslator {
   push(line: string): AgentEvent[];
   /** 当前尝试日志快照。 */
   journal(): AttemptJournal;
-  /** 流结束：把未闭合工具标为 uncertain；agent_end 后缺少合法结构化结果则抛错（protocol failure）。 */
+  /** 流结束：要求 report_result 与 agent_end 成对出现；纯 interaction 是唯一非完成终态。 */
   finish(): void;
   hasStructuredResult(): boolean;
   structuredResult(): StructuredResult | undefined;
@@ -184,8 +184,20 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
       if (protocolFailure) {
         throw new Error('protocol failure：Pi stdout 包含非法 JSON');
       }
+      if (interactionOccurred) {
+        if (result || agentEnded) {
+          throw new Error('protocol failure：未解决的 interaction 不得同时报告任务完成');
+        }
+        return;
+      }
+      if (!agentEnded && result) {
+        throw new Error('protocol failure：收到结构化结果但缺少 agent_end');
+      }
       if (agentEnded && !result) {
         throw new Error('protocol failure：Pi 已结束但缺少有效的结构化结果（ai_devflow_report_result）');
+      }
+      if (!agentEnded && !result && !providerError) {
+        throw new Error('protocol failure：Pi 缺少终态事件');
       }
     },
     hasStructuredResult(): boolean {

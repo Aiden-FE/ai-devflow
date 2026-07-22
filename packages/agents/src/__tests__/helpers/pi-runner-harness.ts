@@ -26,7 +26,11 @@ export type FakeScenario =
   | 'protocol-corruption'
   | 'interaction'
   | 'task-result-failure'
-  | 'missing-verification';
+  | 'missing-verification'
+  | 'report-without-end'
+  | 'malformed-then-report'
+  | 'provider-error-then-report'
+  | 'interaction-then-report';
 
 export interface PiRunnerHarness {
   runner: AgentRunner;

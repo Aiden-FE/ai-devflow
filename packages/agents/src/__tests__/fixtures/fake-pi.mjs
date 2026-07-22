@@ -104,6 +104,27 @@ switch (scenario) {
     process.exit(0);
     break;
 
+  case 'report-without-end':
+    reportResult('report without end');
+    process.exit(0);
+    break;
+
+  case 'malformed-then-report':
+    process.stdout.write('MALFORMED BEFORE REPORT\n');
+    succeed('report after malformed output');
+    break;
+
+  case 'provider-error-then-report':
+    emit({ type: 'provider_error', status: 503, message: 'provider failed before report' });
+    succeed('report after provider failure');
+    break;
+
+  case 'interaction-then-report':
+    emit({ type: 'tool_execution_start', toolCallId: 'i1', toolName: 'ai_devflow_interaction', args: { kind: 'clarification', title: 'need input', detail: 'please clarify' } });
+    emit({ type: 'tool_execution_end', toolCallId: 'i1', toolName: 'ai_devflow_interaction', isError: false, result: { details: {} } });
+    succeed('report after unresolved interaction');
+    break;
+
   default:
     succeed('done');
 }

@@ -167,6 +167,22 @@ it('rejects a role result without verification evidence and does not fail over',
   expect((await run.done()).ok).toBe(false);
 });
 
+it.each([
+  'report-without-end',
+  'malformed-then-report',
+  'provider-error-then-report',
+  'interaction-then-report',
+] as const)('fails closed for invalid terminal protocol: %s', async (scenario) => {
+  const harness = createPiRunnerHarness({ scenario });
+  const run = await harness.runner.run({
+    taskId: 'terminal', executionId: `terminal-${scenario}`, role: 'coder', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  expect((await run.done()).ok).toBe(false);
+});
+
 it('verifies the runtime via the locator', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const verified = await harness.runner.verifyRuntime();

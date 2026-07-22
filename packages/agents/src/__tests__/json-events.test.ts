@@ -22,7 +22,7 @@ describe('createPiEventTranslator', () => {
   it('marks a started tool uncertain when the stream ends', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     translator.push(JSON.stringify({ type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'bash', args: { command: 'pnpm test' } }));
-    translator.finish();
+    expect(() => translator.finish()).toThrow(/缺少终态事件/);
     expect(translator.journal().toolCalls[0]?.state).toBe('uncertain');
   });
 
@@ -51,6 +51,15 @@ describe('createPiEventTranslator', () => {
     expect(translator.hasStructuredResult()).toBe(true);
     expect(translator.structuredResult()?.verification).toEqual(['t pass']);
     expect(() => translator.finish()).not.toThrow();
+  });
+
+  it('rejects a report result when agent_end is missing', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', isError: false,
+      result: { details: { aiDevflowResult: { summary: 'done', verification: ['ok'], changedFiles: [], unresolved: [] } } },
+    }));
+    expect(() => translator.finish()).toThrow(/agent_end/);
   });
 
   it('redacts the active route secret before emitting or journaling', () => {
