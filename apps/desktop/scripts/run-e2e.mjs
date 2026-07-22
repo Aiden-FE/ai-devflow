@@ -1,17 +1,30 @@
 // E2E：用 Playwright 的 _electron 启动打包后的应用，驱动关键 UI 流程并断言。
 // 需要 electron 二进制（已通过 .npmrc 镜像安装）。
 // 运行：node scripts/run-e2e.mjs
-import { spawnSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join, relative, resolve, sep } from 'node:path';
 
 const require = createRequire(import.meta.url);
 // require('electron') 返回 Electron 二进制路径（path.txt 已就位时）
 const electronPath = require('electron');
 const { _electron: electron } = await import('playwright');
+
+const EXPECTED_PI_VERSION = '0.80.10';
 
 function run(cmd, args) {
   const r = spawnSync(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
@@ -27,6 +40,283 @@ function initGitRepo(dir) {
   execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: dir, stdio: 'ignore' });
 }
 
+function isDirectory(path) {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
+function inferUnpackedArch(name) {
+  const value = name.toLowerCase();
+  if (value.includes('arm64') || value.includes('aarch64')) return 'arm64';
+  if (value.includes('universal')) return 'universal';
+  return 'x64';
+}
+
+function findHostUnpackedApp(releaseRoot) {
+  const apps = [];
+  const walk = (dir, depth) => {
+    if (depth > 3) return;
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (!isDirectory(path)) continue;
+      const macResources = join(path, 'Contents', 'Resources');
+      if (existsSync(join(macResources, 'app.asar'))) {
+        apps.push({
+          dir: path,
+          resourcesDir: macResources,
+          platform: 'darwin',
+          arch: inferUnpackedArch(relative(releaseRoot, path)),
+          executable: join(path, 'Contents', 'MacOS', 'ai-devflow'),
+        });
+        continue;
+      }
+      const resourcesDir = join(path, 'resources');
+      if (existsSync(join(resourcesDir, 'app.asar'))) {
+        const lower = name.toLowerCase();
+        const platform = lower.includes('win') ? 'win32' : lower.includes('linux') ? 'linux' : process.platform;
+        apps.push({
+          dir: path,
+          resourcesDir,
+          platform,
+          arch: inferUnpackedArch(relative(releaseRoot, path)),
+          executable: platform === 'win32' ? join(path, 'ai-devflow.exe') : join(path, 'ai-devflow'),
+        });
+        continue;
+      }
+      walk(path, depth + 1);
+    }
+  };
+  walk(releaseRoot, 0);
+  const matching = apps.filter((app) => app.platform === process.platform && app.arch === process.arch);
+  if (matching.length !== 1) {
+    throw new Error(`与主机 ${process.platform}/${process.arch} 匹配的 unpacked 应用必须恰好一个，实际 ${matching.length} 个`);
+  }
+  if (!existsSync(matching[0].executable)) throw new Error('未找到匹配主机架构的 Electron 可执行文件');
+  return matching[0];
+}
+
+function verifyPackagedManifest(app) {
+  const runtimeDir = join(app.resourcesDir, 'pi-runtime');
+  const manifestPath = join(runtimeDir, 'runtime-manifest.json');
+  if (!existsSync(manifestPath)) throw new Error('打包应用缺少 ASAR 外置 runtime-manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (manifest.piVersion !== EXPECTED_PI_VERSION) throw new Error(`打包 Pi 版本不匹配：${manifest.piVersion}`);
+  const entry = resolve(runtimeDir, manifest.entry);
+  if (entry !== runtimeDir && !entry.startsWith(`${runtimeDir}${sep}`)) throw new Error('runtime manifest entry 越界');
+  if (!existsSync(entry)) throw new Error('打包 Pi 入口缺失');
+  let count = 0;
+  for (const [rel, expected] of Object.entries(manifest.files ?? {})) {
+    const path = resolve(runtimeDir, rel);
+    if (path !== runtimeDir && !path.startsWith(`${runtimeDir}${sep}`)) throw new Error(`runtime manifest 路径越界：${rel}`);
+    if (!existsSync(path)) throw new Error(`runtime 依赖缺失：${rel}`);
+    const actual = createHash('sha256').update(readFileSync(path)).digest('hex');
+    if (actual !== expected) throw new Error(`runtime 摘要不匹配：${rel}`);
+    count++;
+  }
+  if (count === 0) throw new Error('runtime manifest 未列出依赖文件');
+  console.log(`[e2e:packaged] ✓ runtime manifest Pi ${manifest.piVersion}，${count} 个摘要通过`);
+}
+
+function writeHostilePiConfig(root, marker) {
+  const extensionDir = join(root, 'extensions');
+  mkdirSync(extensionDir, { recursive: true });
+  const extension = join(extensionDir, 'hostile.ts');
+  writeFileSync(
+    extension,
+    `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(marker)}, 'loaded');\nexport default function hostile() {}\n`,
+  );
+  writeFileSync(join(root, 'settings.json'), JSON.stringify({ extensions: [extension] }));
+}
+
+function createPiTrap(dir, marker) {
+  mkdirSync(dir, { recursive: true });
+  if (process.platform === 'win32') {
+    writeFileSync(join(dir, 'pi.cmd'), `@echo off\r\n> "${marker}" echo invoked\r\nexit /b 97\r\n`);
+  } else {
+    const trap = join(dir, 'pi');
+    writeFileSync(trap, `#!/bin/sh\nprintf invoked > ${JSON.stringify(marker)}\nexit 97\n`);
+    chmodSync(trap, 0o755);
+  }
+}
+
+function fakeCompletionChunk(model, delta, finishReason) {
+  return {
+    id: 'chatcmpl-packaged-isolation',
+    object: 'chat.completion.chunk',
+    created: 1,
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  };
+}
+
+async function startFakeProvider(fakeKey) {
+  const authorizations = [];
+  let requestCount = 0;
+  const server = createServer((request, response) => {
+    if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
+      response.writeHead(404).end();
+      return;
+    }
+    let raw = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { raw += chunk; });
+    request.on('end', () => {
+      requestCount++;
+      authorizations.push(request.headers.authorization ?? '');
+      let body;
+      try { body = JSON.parse(raw); } catch { body = {}; }
+      const hasToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool');
+      const model = typeof body.model === 'string' ? body.model : 'packaged-fake-model';
+      let chunk;
+      if (hasToolResult) {
+        chunk = fakeCompletionChunk(model, { role: 'assistant', content: 'Complete.' }, 'stop');
+      } else {
+        const args = JSON.stringify({
+          summary: 'packaged isolation complete\nREVIEW_VERDICT: PASS',
+          verification: ['bundled Pi isolation'],
+          changedFiles: [],
+          unresolved: [],
+        });
+        chunk = fakeCompletionChunk(model, {
+          role: 'assistant',
+          tool_calls: [{
+            index: 0,
+            id: `call_report_${requestCount}`,
+            type: 'function',
+            function: { name: 'ai_devflow_report_result', arguments: args },
+          }],
+        }, 'tool_calls');
+      }
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'close',
+      });
+      response.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('假提供商未获取 loopback 端口');
+  return {
+    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    authorizations,
+    get requestCount() { return requestCount; },
+    close: () => new Promise((resolveClose) => server.close(() => resolveClose())),
+  };
+}
+
+function assertPackaged(name, condition) {
+  if (!condition) throw new Error(name);
+  console.log(`  ✓ ${name}`);
+}
+
+async function runPackagedIsolation(releaseRoot) {
+  const appInfo = findHostUnpackedApp(releaseRoot);
+  console.log(`[e2e:packaged] 主机应用 ${appInfo.dir} (${appInfo.platform}/${appInfo.arch})`);
+  verifyPackagedManifest(appInfo);
+
+  const repo = mkdtempSync(join(tmpdir(), 'aidf-packaged-repo-'));
+  const userData = mkdtempSync(join(tmpdir(), 'aidf-packaged-userdata-'));
+  const hostileHome = mkdtempSync(join(tmpdir(), 'aidf-packaged-home-'));
+  const trapDir = mkdtempSync(join(tmpdir(), 'aidf-packaged-path-'));
+  const markerDir = mkdtempSync(join(tmpdir(), 'aidf-packaged-markers-'));
+  const trapMarker = join(markerDir, 'path-pi-invoked');
+  const userMarker = join(markerDir, 'user-extension-loaded');
+  const projectMarker = join(markerDir, 'project-extension-loaded');
+  const fakeKey = `packaged-fake-${randomBytes(18).toString('hex')}`;
+  let provider;
+  let app;
+  try {
+    initGitRepo(repo);
+    writeHostilePiConfig(hostileHome, userMarker);
+    writeHostilePiConfig(join(repo, '.pi'), projectMarker);
+    execFileSync('git', ['add', '.pi'], { cwd: repo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-q', '-m', 'hostile project pi config'], { cwd: repo, stdio: 'ignore' });
+    createPiTrap(trapDir, trapMarker);
+    provider = await startFakeProvider(fakeKey);
+
+    const env = {
+      ...process.env,
+      AI_DEVFLOW_USER_DATA: userData,
+      PI_CODING_AGENT_DIR: hostileHome,
+      PATH: `${trapDir}${delimiter}${process.env.PATH ?? ''}`,
+      OPENAI_API_KEY: 'hostile-parent-openai-key',
+      ANTHROPIC_API_KEY: 'hostile-parent-anthropic-key',
+    };
+    app = await electron.launch({ executablePath: appInfo.executable, args: [], env, cwd: repo });
+    const win = await app.firstWindow();
+    await win.waitForLoadState('domcontentloaded');
+    const result = await win.evaluate(async ({ repoPath, baseURL, apiKey }) => {
+      await window.api.providers.save({
+        id: 'packaged-isolation-provider',
+        kind: 'openai_compatible',
+        displayName: 'Packaged isolation provider',
+        enabled: true,
+        priority: 0,
+        authType: 'api_key',
+        baseURL,
+        revision: 0,
+        apiKey,
+        allowInsecureLocal: true,
+      });
+      const project = await window.api.projects.create({ name: 'Packaged isolation', path: repoPath, defaultBranch: 'main' });
+      const iteration = await window.api.iterations.create(project.id, 'Isolation', '1');
+      const requirement = await window.api.requirements.create(
+        iteration.id,
+        'Bundled Pi isolation',
+        'Complete through the bundled Pi runtime only.',
+        'high',
+        'The task reaches in_review.',
+      );
+      const task = await window.api.tasks.create({
+        requirementId: requirement.id,
+        title: 'Report deterministic packaged result',
+        description: 'Call ai_devflow_report_result with the deterministic result.',
+        role: 'coder',
+      });
+      await window.api.tasks.start(task.id);
+      return {
+        task: await window.api.tasks.get(task.id),
+        logs: await window.api.tasks.logs(task.id),
+        executions: await window.api.tasks.executions(task.id),
+      };
+    }, { repoPath: repo, baseURL: provider.baseURL, apiKey: fakeKey });
+
+    const diagnosticText = JSON.stringify({ logs: result.logs, executions: result.executions });
+    assertPackaged('任务通过真实内置 Pi 完成并进入待验收', result.task?.status === 'in_review');
+    assertPackaged('PATH 前置 pi 诱饵未被执行', !existsSync(trapMarker));
+    assertPackaged('未观察到诱饵退出码 97', !/(?:code|exit|status|退出码)[^\n]{0,12}97/i.test(diagnosticText));
+    assertPackaged('用户 Pi settings/extensions 未被加载', !existsSync(userMarker));
+    assertPackaged('项目 Pi settings/extensions 未被加载', !existsSync(projectMarker));
+    assertPackaged('假提供商收到了请求', provider.requestCount > 0);
+    assertPackaged('假提供商仅收到 IPC 保存的密钥', provider.authorizations.every((value) => value === `Bearer ${fakeKey}`));
+    console.log('[e2e:packaged] ALL PASSED');
+  } finally {
+    await app?.close().catch(() => {});
+    await provider?.close().catch(() => {});
+    for (const dir of [repo, userData, hostileHome, trapDir, markerDir]) rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const packagedIndex = process.argv.indexOf('--packaged');
+if (packagedIndex !== -1) {
+  const releaseArg = process.argv[packagedIndex + 1];
+  if (!releaseArg || packagedIndex + 2 !== process.argv.length) {
+    console.error('用法：node scripts/run-e2e.mjs --packaged <release-root>');
+    process.exit(1);
+  }
+  try {
+    await runPackagedIsolation(resolve(releaseArg));
+    process.exit(0);
+  } catch (error) {
+    console.error(`[e2e:packaged] error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
 console.log('[e2e] building app...');
 run('npx', ['vite', 'build']);
 run('node', ['build-electron.mjs']);
@@ -34,16 +324,12 @@ run('node', ['build-electron.mjs']);
 const repo = mkdtempSync(join(tmpdir(), 'aidf-e2e-repo-'));
 initGitRepo(repo);
 const userData = mkdtempSync(join(tmpdir(), 'aidf-e2e-userdata-'));
+const fakeKey = `development-fake-${randomBytes(18).toString('hex')}`;
+const provider = await startFakeProvider(fakeKey);
 
 const env = {
   ...process.env,
   AI_DEVFLOW_USER_DATA: userData,
-  // 让“测试适配器”任务产出 done；恢复时产出 done。
-  // done 摘要携带 REVIEW_VERDICT: PASS，使「测试中」阶段的审查 Agent（同样由测试适配器扮演）审查通过。
-  AI_DEVFLOW_TEST_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'working', t: 0 }, { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }]),
-  AI_DEVFLOW_TEST_RESUME_CONTROL: JSON.stringify([{ type: 'log', level: 'info', text: 'resumed', t: 0 }, { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }]),
-  // 强制审查 Agent 使用测试适配器，避免 E2E 调用真实 claude/codex/pi。
-  AI_DEVFLOW_REVIEW_AGENT: 'test',
 };
 
 let failures = 0;
@@ -58,6 +344,20 @@ try {
   win = await app.firstWindow();
   await win.waitForLoadState('domcontentloaded');
   const dialog = () => win.getByRole('dialog');
+  await win.evaluate(async ({ baseURL, apiKey }) => {
+    await window.api.providers.save({
+      id: 'development-e2e-provider',
+      kind: 'openai_compatible',
+      displayName: 'Development E2E provider',
+      enabled: true,
+      priority: 0,
+      authType: 'api_key',
+      baseURL,
+      revision: 0,
+      apiKey,
+      allowInsecureLocal: true,
+    });
+  }, { baseURL: provider.baseURL, apiKey: fakeKey });
 
   // 1. 导入本地项目（新建项目 -> 导入已有 tab）
   await win.getByRole('button', { name: '新建项目' }).click();
@@ -90,23 +390,19 @@ try {
   await win.getByText('Req1').first().waitFor();
   check('创建需求（含验收标准）', true);
 
-  // 4. 创建任务（指定测试适配器）-> 直接进入待开发泳道（需求池已移除）
+  // 4. 创建任务 -> 直接进入待开发泳道（需求池已移除）
   await win.getByRole('button', { name: '创建任务' }).click();
   await dialog().waitFor();
   await dialog().locator('input').nth(0).fill('Task1');
   await dialog().locator('textarea').nth(0).fill('做点事');
-  // 第二个 combobox 是 Agent
-  await dialog().getByRole('combobox').nth(1).click();
-  await win.getByRole('option', { name: '测试适配器' }).click();
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
   await win.locator('[data-lane="ready"] [data-task-card]').first().waitFor();
   check('创建任务直接进入待开发', true);
 
-  // 5. 配置并检测 Agent
+  // 5. 确认 Pi-only 提供商设置可达
   await win.getByRole('button', { name: '设置' }).click();
-  await win.getByText('Agent 桥接器检测').waitFor();
-  await win.getByText('Claude Code').first().waitFor({ timeout: 15000 });
-  check('检测 Agent（含 Claude Code/Codex/Pi）', await win.getByText('Claude Code').first().isVisible());
+  await win.getByText('AI 服务商').first().waitFor();
+  check('Pi-only AI 服务商设置可达', await win.getByText('AI 服务商').first().isVisible());
   await win.getByRole('button', { name: '工作台' }).click();
   await win.getByText('看板').first().waitFor({ timeout: 10000 });
 
@@ -172,8 +468,6 @@ try {
   await dialog().waitFor();
   await dialog().locator('input').nth(0).fill('Overflow ' + longWord);
   await dialog().locator('textarea').nth(0).fill('说明 ' + longUrl + ' 末 ' + longWord);
-  await dialog().getByRole('combobox').nth(1).click();
-  await win.getByRole('option', { name: '测试适配器' }).click();
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
   await win.locator('[data-lane="ready"] [data-task-card]').filter({ hasText: 'Overflow' }).first().waitFor();
   await win.locator('[data-lane="ready"] [data-task-card]').filter({ hasText: 'Overflow' }).first().click();
@@ -226,6 +520,7 @@ try {
   failures++;
 } finally {
   await app.close().catch(() => {});
+  await provider.close().catch(() => {});
   rmSync(repo, { recursive: true, force: true });
   rmSync(userData, { recursive: true, force: true });
 }

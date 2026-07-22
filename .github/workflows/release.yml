@@ -3,13 +3,14 @@ name: release
 # 手动触发发版：只允许基于 main 发布，输入 semver 版本号。
 # 触发方式：GitHub → Actions → release → Run workflow → 填写 version（如 0.1.0）。
 #
-# 流水线分三段，依赖关系明确，避免多个矩阵任务并发创建同一 GitHub Release：
+# 流水线分四段，依赖关系明确，避免多个矩阵任务并发创建同一 GitHub Release：
 #   1. prepare：校验 semver、拒绝重复 tag/release、质量门禁（typecheck+lint+test）、
 #      生成 CHANGELOG/Release Notes、版本号 bump、打 tag 并推送。唯一写 git 的阶段。
-#   2. build（matrix: macOS / Windows / Linux）：checkout 刚推送的 tag，构建应用与安装包，
+#   2. pi-runtime-smoke：四个 OS/架构组合只生成 unpacked 应用，校验内置 Pi 完整性与运行时隔离。
+#   3. build（matrix: macOS / Windows / Linux）：checkout 刚推送的 tag，构建应用与安装包，
 #      electron-builder --publish never（不创建 Release），校验本平台预期构件齐全后上传 artifact。
 #      任一预期构件缺失即失败（if-no-files-found: error + 显式校验），不以 ignore 掩盖。
-#   3. publish：汇总三平台 artifact，再次校验完整构件集，最后用 gh release create
+#   4. publish：汇总三平台 artifact，再次校验完整构件集，最后用 gh release create
 #      统一创建 Release（正文 = 生成的 Release Notes，与仓库 CHANGELOG 对应小节一致）并附全部构件。
 #
 # 必需 Secrets（仓库 Settings → Secrets → Actions）：
@@ -135,10 +136,89 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # 2. 各平台打包（matrix）。--publish never：只产出构件与 updater 元数据，不创建 Release。
+  # 2. 内置 Pi 运行时冒烟：四个发布架构分别检查包完整性与隔离。
+  # ---------------------------------------------------------------------------
+  pi-runtime-smoke:
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-13
+            arch: x64
+          - os: macos-14
+            arch: arm64
+          - os: windows-latest
+            arch: x64
+          - os: ubuntu-latest
+            arch: x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout prepared tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Linux keyring and display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 gnome-keyring xvfb
+
+      - name: Build desktop (renderer + electron + bundled Pi)
+        run: pnpm --filter @ai-devflow/desktop build
+
+      - name: Build unpacked application for matrix architecture
+        run: pnpm --filter @ai-devflow/desktop exec electron-builder --dir --${{ matrix.arch }}
+
+      - name: Inspect packaged Pi runtime
+        run: |
+          set -o pipefail
+          node apps/desktop/scripts/verify-packaged-pi.mjs apps/desktop/release | tee pi-runtime-inspection.log
+
+      - name: Run packaged Pi isolation E2E
+        if: runner.os != 'Linux'
+        run: node apps/desktop/scripts/run-e2e.mjs --packaged apps/desktop/release
+
+      - name: Run packaged Pi isolation E2E with Linux keyring
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            export XDG_CURRENT_DESKTOP=GNOME
+            eval "$(gnome-keyring-daemon --start --components=secrets)"
+            printf "%s" "ai-devflow-smoke" | gnome-keyring-daemon --unlock >/dev/null
+            xvfb-run -a node apps/desktop/scripts/run-e2e.mjs --packaged apps/desktop/release
+          '
+
+      - name: Upload redacted Pi inspection log
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-runtime-inspection-${{ matrix.os }}-${{ matrix.arch }}
+          path: pi-runtime-inspection.log
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. 各平台打包（matrix）。--publish never：只产出构件与 updater 元数据，不创建 Release。
   # ---------------------------------------------------------------------------
   build:
-    needs: prepare
+    needs: [prepare, pi-runtime-smoke]
     if: github.ref == 'refs/heads/main'
     # Windows runner 默认 shell 为 PowerShell；本 job 的 run 步骤均为 bash 语法，
     # 统一指定 bash（Windows 上用 Git Bash），避免 `if/fi` 等在 pwsh 下解析失败。
@@ -242,7 +322,7 @@ jobs:
           if-no-files-found: error # 任一平台构件缺失即失败，绝不静默放过
 
   # ---------------------------------------------------------------------------
-  # 3. 统一发布：汇总三平台构件并校验齐全后，创建唯一一个 GitHub Release。
+  # 4. 统一发布：汇总三平台构件并校验齐全后，创建唯一一个 GitHub Release。
   # ---------------------------------------------------------------------------
   publish:
     needs: [prepare, build]

@@ -18,6 +18,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node scripts/run-e2e.mjs",
+    "e2e:packaged": "node scripts/run-e2e.mjs --packaged release",
+    "verify:packaged:pi": "node scripts/verify-packaged-pi.mjs release",
     "package": "pnpm build && electron-builder --dir",
     "release": "pnpm build && electron-builder",
     "dist": "pnpm build && electron-builder --publish never"
@@ -36,6 +38,7 @@
       "dist/**",
       "dist-electron/**",
       "package.json",
+      "!**/__tests__/**",
       "!**/*.map"
     ],
     "extraResources": [
