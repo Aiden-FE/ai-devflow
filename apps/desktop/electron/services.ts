@@ -36,6 +36,7 @@ export interface ServiceInitializationStatus {
 
 interface InitializableServices {
   piRuntime?: {
+    cleanupOrphans?(): Promise<void>;
     providerStore: {
       migrateLegacy(): 'not_needed' | 'migrated' | 'needs_reentry';
     };
@@ -58,6 +59,12 @@ export async function initializeServices(
     credentialMigration = services.piRuntime?.providerStore.migrateLegacy() ?? 'not_needed';
   } catch {
     credentialMigration = 'failed';
+  }
+
+  try {
+    await services.piRuntime?.cleanupOrphans?.();
+  } catch {
+    // Cleanup is best-effort and deliberately silent; runtime verification still proceeds.
   }
 
   let runtime: ServiceInitializationStatus['runtime'] = 'unavailable';

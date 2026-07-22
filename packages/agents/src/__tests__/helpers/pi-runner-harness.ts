@@ -1,12 +1,13 @@
 // PiRunner 集成测试 harness（设计 §16.2）。用 fake Pi CLI 驱动真实 supervisor/translator/router 链路，
 // 无网络、无外部 CLI。注入 spawn 记录每次子进程调用的 args 与初始 message，并把场景注入子进程 env。
 import { spawn as nodeSpawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
 import { PiRunner } from '../../pi-runner.js';
+import { ProjectInstructionLoader } from '../../project-instructions.js';
 import type { MaterializeInput } from '../../profiles.js';
 import type { SpawnFn } from '../../process-supervisor.js';
 import { PiProcessSupervisor } from '../../process-supervisor.js';
@@ -31,7 +32,7 @@ export interface PiRunnerHarness {
   runner: AgentRunner;
   cwd: string;
   fakePiEntry: string;
-  spawnedCommands: Array<{ args: string[]; initialMessage: string }>;
+  spawnedCommands: Array<{ args: string[]; initialMessage: string; checkpoint?: unknown }>;
   sleeps: number[];
   attemptIds: string[];
   attemptCollisions: string[];
@@ -41,7 +42,7 @@ export interface PiRunnerHarness {
 export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunnerHarness {
   const cwd = mkdtempSync(join(tmpdir(), 'pi-runner-cwd-'));
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
-  const spawnedCommands: Array<{ args: string[]; initialMessage: string }> = [];
+  const spawnedCommands: Array<{ args: string[]; initialMessage: string; checkpoint?: unknown }> = [];
   const sleeps: number[] = [];
   const attemptIds: string[] = [];
   const attemptCollisions: string[] = [];
@@ -98,7 +99,12 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   };
 
   const spawnFn: SpawnFn = (command, args, opts) => {
-    spawnedCommands.push({ args: [...args], initialMessage: args[args.length - 1] ?? '' });
+    const checkpointPath = opts.env.AI_DEVFLOW_CHECKPOINT_PATH;
+    spawnedCommands.push({
+      args: [...args],
+      initialMessage: args[args.length - 1] ?? '',
+      checkpoint: checkpointPath ? JSON.parse(readFileSync(checkpointPath, 'utf8')) as unknown : undefined,
+    });
     return nodeSpawn(command, args, {
       cwd: opts.cwd,
       env: { ...opts.env, AI_DEVFLOW_FAKE_SCENARIO: input.scenario },
@@ -116,6 +122,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
     supervisor,
     sessionsBaseDir,
     projectToolPath: '/usr/bin:/bin',
+    instructionLoader: new ProjectInstructionLoader(),
     attempts,
   });
 

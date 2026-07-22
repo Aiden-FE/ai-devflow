@@ -4,6 +4,7 @@ import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { redactText } from '@ai-devflow/core';
 import type { PiRunPlan } from './run-plan.js';
+import { clearPiProcessMarker, recordPiProcessMarker } from './orphan-processes.js';
 
 export interface RawLine {
   stream: 'stdout' | 'stderr';
@@ -54,6 +55,17 @@ export class PiProcessSupervisor {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child.stdin?.end();
+    let processMarker: string | undefined;
+    try {
+      processMarker = recordPiProcessMarker(
+        plan.env.PI_CODING_AGENT_SESSION_DIR,
+        child.pid,
+        plan.args[0],
+      );
+    } catch (error) {
+      try { child.kill('SIGKILL'); } catch { /* spawn already failed */ }
+      throw error;
+    }
 
     let settled = false;
     let settleResolve!: (value: { exitCode: number | null; signal: NodeJS.Signals | null }) => void;
@@ -72,12 +84,14 @@ export class PiProcessSupervisor {
     child.once('close', (code, signal) => {
       if (settled) return;
       settled = true;
+      clearPiProcessMarker(processMarker);
       settleResolve({ exitCode: code, signal });
       wake();
     });
     child.once('error', (error) => {
       if (settled) return;
       settled = true;
+      clearPiProcessMarker(processMarker);
       settleReject(error);
       wake();
     });

@@ -11,9 +11,11 @@ import { promisify } from 'node:util';
 import {
   BundledPiLocator,
   buildProbeEnv,
+  cleanupOrphanPiProcesses,
   PiProcessSupervisor,
   PiRunner,
   ProfileMaterializer,
+  ProjectInstructionLoader,
   ProviderRouter,
   type ProviderHealthStore,
   type RuntimeLocator,
@@ -103,6 +105,7 @@ export interface PiRuntimeServices {
   providerStore: ProviderStore;
   locator: RuntimeLocator;
   router: ProviderRouter;
+  cleanupOrphans(): Promise<void>;
 }
 
 export function createPiRuntime(repos: Repositories, userData: string): PiRuntimeServices {
@@ -145,8 +148,17 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
     supervisor,
     sessionsBaseDir,
     projectToolPath: process.env.PATH ?? '/usr/bin:/bin',
+    instructionLoader: new ProjectInstructionLoader(),
     attempts: repos.executionAttempts,
   });
 
-  return { runner, providerStore, locator, router };
+  return {
+    runner,
+    providerStore,
+    locator,
+    router,
+    async cleanupOrphans() {
+      await cleanupOrphanPiProcesses(sessionsBaseDir);
+    },
+  };
 }

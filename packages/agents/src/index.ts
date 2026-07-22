@@ -50,9 +50,16 @@ export {
   type ProcessSupervisorOptions,
 } from './process-supervisor.js';
 export {
+  cleanupOrphanPiProcesses,
+  ORPHAN_MARKER,
+  type OrphanCleanupDeps,
+  type OrphanCleanupResult,
+} from './orphan-processes.js';
+export {
   PiRunner,
   type PiRunnerDeps,
   type RuntimeLocator,
   type ProfileMaterializerLike,
+  type ProjectInstructionLoaderLike,
 } from './pi-runner.js';
 export { type AgentRunner, type AgentRun, type AgentRunRequest as RunnerAgentRunRequest } from './runner-types.js';

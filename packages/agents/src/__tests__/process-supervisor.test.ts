@@ -1,8 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PiProcessSupervisor, type RawLine, type SpawnFn } from '../process-supervisor.js';
+import { ORPHAN_MARKER } from '../orphan-processes.js';
 import type { PiRunPlan } from '../run-plan.js';
 
 class FakeChild extends EventEmitter {
@@ -113,5 +117,24 @@ describe('PiProcessSupervisor framing', () => {
     child.stdout.end();
     child.stderr.end();
     await expect(done).rejects.toThrow(/spawn EACCES/);
+  });
+
+  it('records process ownership for crash recovery and clears it after close', async () => {
+    const child = new FakeChild();
+    const sessionDir = mkdtempSync(join(tmpdir(), 'pi-owned-process-'));
+    const supervisor = new PiProcessSupervisor({
+      spawnFn: () => child as unknown as ChildProcess,
+    });
+    const spawned = supervisor.spawn({
+      ...PLAN,
+      env: { PI_CODING_AGENT_SESSION_DIR: sessionDir },
+    }, { cwd: '/tmp', timeoutMs: 30_000, secrets: [] });
+    const marker = join(sessionDir, ORPHAN_MARKER);
+    expect(existsSync(marker)).toBe(true);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', 0, null);
+    await spawned.done();
+    expect(existsSync(marker)).toBe(false);
   });
 });

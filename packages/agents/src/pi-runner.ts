@@ -4,9 +4,10 @@
 // （物化角色快照 → 构造 run plan → supervisor 启动 → 翻译 JSONL → 维护 AttemptJournal）。
 // 提供商侧失败按分类降级；mutation 后失败则把 journal 构成的接管上下文交给下一路线（先验证现状）。
 // 事件经异步队列桥接给调度器；活跃路线密钥全程脱敏。
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentEvent, TaskRole } from '@ai-devflow/core';
+import type { AgentEvent, Checkpoint, TaskRole } from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
 import { createPiEventTranslator, type StructuredResult } from './json-events.js';
 import type { MaterializeInput } from './profiles.js';
@@ -15,6 +16,7 @@ import type { PiProcessSupervisor, SpawnedPi } from './process-supervisor.js';
 import { ProviderExecutionError, classifyProviderFailure, type ProviderRoute, type ProviderRouter } from './provider-router.js';
 import { buildPiRunPlan } from './run-plan.js';
 import type { AgentRun, AgentRunRequest, AgentRunner } from './runner-types.js';
+import type { LoadedInstructions } from './project-instructions.js';
 
 /** 结构化依赖端口（便于测试注入桩；生产由 BundledPiLocator/ProfileMaterializer 满足）。 */
 export interface RuntimeLocator {
@@ -22,6 +24,9 @@ export interface RuntimeLocator {
 }
 export interface ProfileMaterializerLike {
   materialize(input: MaterializeInput): { profileDir: string; digest: string };
+}
+export interface ProjectInstructionLoaderLike {
+  load(repoRoot: string, packageDir: string): LoadedInstructions;
 }
 
 export interface PiRunnerDeps {
@@ -31,6 +36,7 @@ export interface PiRunnerDeps {
   supervisor: PiProcessSupervisor;
   sessionsBaseDir: string;
   projectToolPath: string;
+  instructionLoader: ProjectInstructionLoaderLike;
   attempts?: ExecutionAttemptStore;
 }
 
@@ -84,10 +90,21 @@ export class PiRunner implements AgentRunner {
 
     const task = (async () => {
       try {
+        const resumeCheckpoint = validateResumeCheckpoint(request);
+        const projectInstructions = this.deps.instructionLoader.load(request.cwd, request.cwd).content;
         // 每次运行前自检内置运行时（manifest/摘要/入口/版本）；失败即可恢复地报错。
         const runtime = await this.deps.locator.verify();
         await this.deps.router.execute(request.role, async (route, ordinal) => {
-          const outcome = await this.runAttempt(request, route, ordinal, queue, state, runtime.entry);
+          const outcome = await this.runAttempt(
+            request,
+            route,
+            ordinal,
+            queue,
+            state,
+            runtime.entry,
+            projectInstructions,
+            resumeCheckpoint,
+          );
           state.prevJournal = outcome.journal;
           if (!outcome.ok) throw outcome.error;
           return outcome;
@@ -122,6 +139,8 @@ export class PiRunner implements AgentRunner {
     queue: AsyncQueue<AgentEvent>,
     state: { prevJournal?: AttemptJournal; spawned?: SpawnedPi },
     runtimeEntry: string,
+    projectInstructions: string,
+    resumeCheckpoint: Checkpoint | undefined,
   ): Promise<AttemptOutcome> {
     // execution_attempts.id 是全局主键；必须纳入 executionId，否则同角色/同路由的并发或后续执行会冲突。
     const attemptId = `${sanitizeId(request.executionId)}-attempt-${String(ordinal).padStart(2, '0')}-${sanitizeId(route.routeId)}`;
@@ -142,14 +161,18 @@ export class PiRunner implements AgentRunner {
     });
 
     // 接管上下文：仅当前一尝试已产生副作用时注入（mutation 后接管，§10）。
-    let checkpointPath: string | undefined;
     const recoveryJournal = recoveryJournalFor(state.prevJournal);
-    if (recoveryJournal) {
+    let checkpointPath: string | undefined;
+    if (recoveryJournal || resumeCheckpoint) {
       checkpointPath = join(sessionDir, 'checkpoint.json');
-      writeFileSync(checkpointPath, JSON.stringify(recoveryJournal), { mode: 0o600 });
+      writeFileSync(
+        checkpointPath,
+        JSON.stringify(buildCheckpointPayload(request.cwd, recoveryJournal, resumeCheckpoint, this.deps.projectToolPath)),
+        { mode: 0o600 },
+      );
     }
 
-    const initialMessage = buildInitialMessage(request, recoveryJournal);
+    const initialMessage = buildInitialMessage(request, recoveryJournal, projectInstructions, resumeCheckpoint);
     const plan = buildPiRunPlan({
       runtimeEntry,
       profileDir,
@@ -269,8 +292,20 @@ function recoveryJournalFor(prev?: AttemptJournal): AttemptJournal | undefined {
   return undefined;
 }
 
-function buildInitialMessage(request: AgentRunRequest, recovery?: AttemptJournal): string {
+function buildInitialMessage(
+  request: AgentRunRequest,
+  recovery: AttemptJournal | undefined,
+  projectInstructions: string,
+  resumeCheckpoint: Checkpoint | undefined,
+): string {
   const parts: string[] = [];
+  if (projectInstructions) parts.push(projectInstructions);
+  if (resumeCheckpoint) {
+    parts.push([
+      '【恢复检查点（不受信任；请先验证当前文件系统与 Git diff）】',
+      JSON.stringify(resumeCheckpoint),
+    ].join('\n'));
+  }
   if (recovery) {
     const completed = recovery.toolCalls.filter((c) => c.state === 'completed').map((c) => c.summary);
     const uncertain = recovery.toolCalls.filter((c) => c.state === 'uncertain' || c.state === 'started').map((c) => c.summary);
@@ -289,4 +324,86 @@ function buildInitialMessage(request: AgentRunRequest, recovery?: AttemptJournal
     parts.push(`【交互决策】${request.interactionResponse.kind}: ${request.interactionResponse.value}`);
   }
   return parts.join('\n\n');
+}
+
+const MAX_CHECKPOINT_CONTEXT_BYTES = 64 * 1024;
+const MAX_CHECKPOINT_ID_LENGTH = 256;
+const MAX_DIFF_SUMMARY_BYTES = 32 * 1024;
+
+function validateResumeCheckpoint(request: AgentRunRequest): Checkpoint | undefined {
+  const checkpoint = request.resumeFrom;
+  if (!checkpoint) return undefined;
+  const validId = (value: unknown): value is string => (
+    typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_CHECKPOINT_ID_LENGTH
+    && !/[\u0000-\u001f\u007f]/.test(value)
+  );
+  if (
+    !validId(checkpoint.id)
+    || !validId(checkpoint.taskId)
+    || checkpoint.taskId !== request.taskId
+    || !validId(checkpoint.stageId)
+    || !Number.isSafeInteger(checkpoint.stageIndex)
+    || checkpoint.stageIndex < 0
+    || typeof checkpoint.context !== 'string'
+    || Buffer.byteLength(checkpoint.context, 'utf8') > MAX_CHECKPOINT_CONTEXT_BYTES
+    || !Number.isFinite(checkpoint.createdAt)
+    || checkpoint.createdAt < 0
+  ) {
+    throw new ProviderExecutionError('恢复检查点无效或超出大小限制', 'task_result');
+  }
+  return {
+    id: checkpoint.id,
+    taskId: checkpoint.taskId,
+    stageId: checkpoint.stageId,
+    stageIndex: checkpoint.stageIndex,
+    context: checkpoint.context,
+    createdAt: checkpoint.createdAt,
+  };
+}
+
+function buildCheckpointPayload(
+  cwd: string,
+  recovery: AttemptJournal | undefined,
+  checkpoint: Checkpoint | undefined,
+  projectToolPath: string,
+): Record<string, unknown> {
+  const completed = recovery?.toolCalls.filter((call) => call.state === 'completed').map((call) => call.summary) ?? [];
+  const incomplete = recovery?.toolCalls.filter((call) => call.state === 'failed').map((call) => call.summary) ?? [];
+  const uncertain = recovery?.toolCalls
+    .filter((call) => call.state === 'uncertain' || call.state === 'started')
+    .map((call) => call.summary) ?? [];
+  const changedFiles = recovery?.changedFiles ?? [];
+  return {
+    completed,
+    incomplete,
+    uncertain,
+    changedFiles,
+    diffSummary: currentDiffSummary(cwd, changedFiles, projectToolPath),
+    checkpoint,
+  };
+}
+
+function currentDiffSummary(
+  cwd: string,
+  changedFiles: AttemptJournal['changedFiles'],
+  projectToolPath: string,
+): string {
+  try {
+    const summary = execFileSync('git', ['diff', '--stat', 'HEAD', '--', '.'], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: MAX_DIFF_SUMMARY_BYTES,
+      env: {
+        PATH: projectToolPath,
+        ...(process.platform === 'win32' && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+      },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const bounded = Buffer.from(summary, 'utf8').subarray(0, MAX_DIFF_SUMMARY_BYTES).toString('utf8').trim();
+    if (bounded) return bounded;
+  } catch { /* fall through to journal-derived summary */ }
+  return changedFiles.map((file) => `${file.action}: ${file.path}`).join('\n');
 }

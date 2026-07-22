@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import { writeFileSync } from 'node:fs';
 import { validateRoleCompletion } from '../pi-runner.js';
 import { createPiRunnerHarness } from './helpers/pi-runner-harness.js';
 
@@ -47,6 +48,59 @@ it('passes a mutation checkpoint to the next attempt', async () => {
   expect(harness.spawnedCommands).toHaveLength(2);
   expect(harness.spawnedCommands[1]?.initialMessage).toContain('先验证现状');
   expect(harness.spawnedCommands[1]?.initialMessage).toContain('src/fixture.ts');
+  expect(harness.spawnedCommands[1]?.checkpoint).toMatchObject({
+    completed: expect.any(Array),
+    incomplete: expect.any(Array),
+    uncertain: expect.any(Array),
+    changedFiles: [expect.objectContaining({ path: 'src/fixture.ts' })],
+    diffSummary: expect.any(String),
+  });
+});
+
+it('injects bounded untrusted project instructions before the task request', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  writeFileSync(`${harness.cwd}/AGENTS.md`, 'PROJECT-ONLY-INSTRUCTION');
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'instructions', role: 'coder', prompt: 'TASK-REQUEST', cwd: harness.cwd,
+  });
+  await collect(run.events);
+  expect((await run.done()).ok).toBe(true);
+  const message = harness.spawnedCommands[0]?.initialMessage ?? '';
+  expect(message).toContain('PROJECT-ONLY-INSTRUCTION');
+  expect(message).toContain('不受信任');
+  expect(message.indexOf('PROJECT-ONLY-INSTRUCTION')).toBeLessThan(message.indexOf('TASK-REQUEST'));
+});
+
+it('serializes a validated scheduler checkpoint into resume context', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'resume', role: 'coder', prompt: 'continue', cwd: harness.cwd,
+    resumeFrom: {
+      id: 'cp-1', taskId: 't1', stageId: 'build', stageIndex: 2,
+      context: 'validated prior context', createdAt: 123,
+    },
+  });
+  await collect(run.events);
+  expect((await run.done()).ok).toBe(true);
+  expect(harness.spawnedCommands[0]?.initialMessage).toContain('validated prior context');
+  expect(harness.spawnedCommands[0]?.checkpoint).toMatchObject({
+    checkpoint: { id: 'cp-1', taskId: 't1', stageId: 'build', stageIndex: 2 },
+  });
+});
+
+it('rejects malformed scheduler checkpoints before spawning Pi', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  const run = await harness.runner.run({
+    taskId: 't1', executionId: 'invalid-resume', role: 'coder', prompt: 'continue', cwd: harness.cwd,
+    resumeFrom: {
+      id: 'cp-1', taskId: 'other-task', stageId: 'build', stageIndex: -1,
+      context: 'invalid', createdAt: 123,
+    },
+  });
+  const events = await collect(run.events);
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  expect((await run.done()).ok).toBe(false);
+  expect(harness.spawnedCommands).toEqual([]);
 });
 
 it('fails over after an authentication error on the first attempt', async () => {

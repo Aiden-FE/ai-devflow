@@ -23,6 +23,9 @@ describe('initializeServices', () => {
   it('awaits credential migration before runtime verification', async () => {
     const status = await initializeServices({
       piRuntime: {
+        async cleanupOrphans() {
+          calls.push('cleanup');
+        },
         providerStore: {
           migrateLegacy() {
             calls.push('migration');
@@ -38,7 +41,7 @@ describe('initializeServices', () => {
       },
     });
 
-    expect(calls).toEqual(['migration', 'runtime']);
+    expect(calls).toEqual(['migration', 'cleanup', 'runtime']);
     expect(status).toEqual({ credentialMigration: 'migrated', runtime: 'ready' });
   });
 

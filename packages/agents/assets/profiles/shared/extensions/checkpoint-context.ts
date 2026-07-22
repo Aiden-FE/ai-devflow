@@ -43,6 +43,7 @@ export default function (pi: ExtensionAPI) {
       `不确定（必须先检查工作区/进程/测试状态）：${JSON.stringify(data.uncertain ?? [])}`,
       `已知文件变化：${JSON.stringify(data.changedFiles ?? [])}`,
       `最近 diff 摘要：${typeof data.diffSummary === "string" ? data.diffSummary : ""}`,
+      `调度器检查点：${JSON.stringify(data.checkpoint ?? null)}`,
     ].join("\n");
     const ev = event as { systemPrompt?: string } | undefined;
     if (ev && typeof ev.systemPrompt === "string") {
