@@ -21,6 +21,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **persistence**：migrate to pi-only execution records（b46fd12）
 
 ### 问题修复
+- remove non-deterministic openrouter/gpt-5.6-sol from catalog gate; set fail-fast false in smoke matrix（1075202）
 - start xvfb before gnome-keyring for E2E on Linux CI（a8d32d3）
 - add libsecret-1-0, improve safeStorage diagnostics on Linux CI（79af6c4）
 - only normalize absolute symlinks on Windows（7a69452）
