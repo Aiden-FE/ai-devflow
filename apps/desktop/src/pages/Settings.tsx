@@ -13,10 +13,11 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ProviderMigrationStatus } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ModelRoleKey, ProviderMigrationStatus } from '@ai-devflow/core';
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
+const MODEL_ROLES: ModelRoleKey[] = ['planner', 'coder', 'reviewer', 'tester', 'chat', 'proposal'];
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
 
@@ -403,6 +404,11 @@ function ProviderSection(): React.ReactElement {
   const [baseURL, setBaseURL] = useState('');
   const [allowLocal, setAllowLocal] = useState(false);
   const [enabled, setEnabled] = useState(true);
+  const [defaultModel, setDefaultModel] = useState('');
+  const [workloadModels, setWorkloadModels] = useState<Partial<Record<ModelRoleKey, string>>>({});
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelRefreshed, setModelRefreshed] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; error?: string }>>({});
   const [reentry, setReentry] = useState(false);
@@ -410,20 +416,29 @@ function ProviderSection(): React.ReactElement {
   const startAdd = () => {
     setReentry(false);
     setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
-    setBaseURL(''); setAllowLocal(false); setEnabled(true); setError(undefined); setOpen(true);
+    setBaseURL(''); setAllowLocal(false); setEnabled(true);
+    setDefaultModel(''); setWorkloadModels({}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const startReentry = () => {
     setReentry(true);
     setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
-    setBaseURL(''); setAllowLocal(false); setEnabled(true); setError(undefined); setOpen(true);
+    setBaseURL(''); setAllowLocal(false); setEnabled(true);
+    setDefaultModel(''); setWorkloadModels({}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const startEdit = (p: ProviderSummary) => {
     setReentry(false);
     setEditing(p); setKind(p.kind); setDisplayName(p.displayName); setApiKey('');
-    setBaseURL(p.baseURL ?? ''); setAllowLocal(false); setEnabled(p.enabled); setError(undefined); setOpen(true);
+    setBaseURL(p.baseURL ?? ''); setAllowLocal(false); setEnabled(p.enabled);
+    setDefaultModel(p.defaultModel ?? ''); setWorkloadModels(p.workloadModels ?? {}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const save = async () => {
     setError(undefined);
+    const workloadEntries = Object.entries(workloadModels).filter(([, v]) => v?.trim());
+    const hasWorkload = workloadEntries.length === 6;
+    if (!defaultModel.trim() && !hasWorkload) {
+      setError(t('settings.providers.model.required'));
+      return;
+    }
     try {
       const list = data ?? [];
       const input: ProviderInput = {
@@ -434,6 +449,8 @@ function ProviderSection(): React.ReactElement {
         apiKey: apiKey || undefined,
         baseURL: baseURL || undefined,
         allowInsecureLocal: allowLocal,
+        defaultModel: defaultModel.trim() || undefined,
+        workloadModels: workloadEntries.length > 0 ? Object.fromEntries(workloadEntries) as Record<ModelRoleKey, string> : undefined,
         revision: editing?.revision ?? 1,
       };
       if (reentry) await api.providers.completeReentry(input);
@@ -457,6 +474,17 @@ function ProviderSection(): React.ReactElement {
   const test = async (id: string) => {
     const r = await api.providers.test(id);
     setTestResults((prev) => ({ ...prev, [id]: { ok: r.ok, error: r.error } }));
+  };
+  const refreshModels = async () => {
+    if (!COMPATIBLE_PROVIDER_KINDS.includes(kind)) return;
+    setModelLoading(true);
+    try {
+      const models = await api.providers.listModels(editing?.id ?? '');
+      setAvailableModels(models.map((m) => m.id));
+      setModelRefreshed(true);
+    } finally {
+      setModelLoading(false);
+    }
   };
 
   const list = data ?? [];
@@ -486,6 +514,9 @@ function ProviderSection(): React.ReactElement {
                 {!p.enabled && <Badge variant="outline">off</Badge>}
               </div>
               {p.baseURL && <span className="text-[11px] text-muted-foreground">{p.baseURL}</span>}
+              {p.health === 'configuration_error' && (
+                <span className="text-[11px] text-warn">{t('settings.providers.configuration_error')}</span>
+              )}
               {testResults[p.id] && (
                 <span className={`text-[11px] ${testResults[p.id]!.ok ? 'text-ok' : 'text-destructive'}`}>
                   {testResults[p.id]!.ok ? t('settings.providers.testOk') : `${t('settings.providers.testFail')}${testResults[p.id]!.error ? `: ${testResults[p.id]!.error}` : ''}`}
@@ -528,6 +559,50 @@ function ProviderSection(): React.ReactElement {
               </>
             )}
             <label className="flex items-center gap-2 text-xs"><Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} />{t('settings.providers.enabled')}</label>
+            <div className="flex flex-col gap-1.5">
+              <Label>{t('settings.providers.model.default')}</Label>
+              <div className="flex gap-2">
+                <Input
+                  list="model-suggestions"
+                  value={defaultModel}
+                  onChange={(e) => setDefaultModel(e.target.value)}
+                  placeholder={t('settings.providers.model.default.hint')}
+                  className="flex-1"
+                />
+                {COMPATIBLE_PROVIDER_KINDS.includes(kind) && editing && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={modelLoading}
+                    onClick={refreshModels}
+                  >
+                    {modelLoading ? t('settings.providers.model.refreshing') : t('settings.providers.model.refresh')}
+                  </Button>
+                )}
+              </div>
+              {availableModels.length > 0 && (
+                <datalist id="model-suggestions">
+                  {availableModels.map((m) => <option key={m} value={m} />)}
+                </datalist>
+              )}
+              {modelRefreshed && !modelLoading && availableModels.length === 0 && (
+                <span className="text-[11px] text-muted-foreground">{t('settings.providers.model.empty')}</span>
+              )}
+            </div>
+            <details className="text-xs">
+              <summary>{t('settings.providers.model.workloads')}</summary>
+              <div className="mt-2 flex flex-col gap-2">
+                {MODEL_ROLES.map((role) => (
+                  <div key={role} className="flex flex-col gap-1">
+                    <Label className="text-[11px]">{role}</Label>
+                    <Input
+                      value={workloadModels[role] ?? ''}
+                      onChange={(e) => setWorkloadModels({ ...workloadModels, [role]: e.target.value })}
+                    />
+                  </div>
+                ))}
+              </div>
+            </details>
             {error && <div className="break-words text-xs text-destructive">{error}</div>}
           </div>
           <DialogFooter><Button onClick={save}>{t('common.save')}</Button></DialogFooter>
