@@ -89,3 +89,21 @@ it('verifies the runtime via the locator', async () => {
   expect(verified.version).toBe('0.80.10');
   expect(verified.entry).toBe(harness.fakePiEntry);
 });
+
+it('uses globally unique attempt ids for repeated same-role executions', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'success' });
+  for (const executionId of ['execution-a', 'execution-b']) {
+    const run = await harness.runner.run({
+      taskId: executionId, executionId, role: 'reviewer', prompt: 'review', cwd: harness.cwd,
+    });
+    await collect(run.events);
+    expect((await run.done()).ok).toBe(true);
+  }
+  expect(harness.attemptCollisions).toEqual([]);
+  expect(harness.spawnedCommands).toHaveLength(2);
+  expect(new Set(harness.attemptIds).size).toBe(2);
+  expect(harness.attemptIds).toEqual(expect.arrayContaining([
+    expect.stringContaining('execution-a'),
+    expect.stringContaining('execution-b'),
+  ]));
+});

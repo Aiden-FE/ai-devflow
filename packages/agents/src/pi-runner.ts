@@ -123,7 +123,8 @@ export class PiRunner implements AgentRunner {
     state: { prevJournal?: AttemptJournal; spawned?: SpawnedPi },
     runtimeEntry: string,
   ): Promise<AttemptOutcome> {
-    const attemptId = `attempt-${String(ordinal).padStart(2, '0')}-${sanitizeId(route.routeId)}`;
+    // execution_attempts.id 是全局主键；必须纳入 executionId，否则同角色/同路由的并发或后续执行会冲突。
+    const attemptId = `${sanitizeId(request.executionId)}-attempt-${String(ordinal).padStart(2, '0')}-${sanitizeId(route.routeId)}`;
     const sessionDir = join(this.deps.sessionsBaseDir, request.executionId, attemptId);
     const isolatedHome = join(sessionDir, 'home');
     const tempDir = join(sessionDir, 'tmp');

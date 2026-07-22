@@ -3,7 +3,7 @@
 // 场景由 AI_DEVFLOW_FAKE_SCENARIO 指定；首次尝试（attempt-01）按场景失败，其后成功——用以驱动降级/接管。
 const scenario = process.env.AI_DEVFLOW_FAKE_SCENARIO || 'success';
 const attemptId = process.env.AI_DEVFLOW_ATTEMPT_ID || '';
-const isFirst = attemptId.startsWith('attempt-01');
+const isFirst = attemptId.startsWith('attempt-01') || attemptId.includes('-attempt-01-');
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');

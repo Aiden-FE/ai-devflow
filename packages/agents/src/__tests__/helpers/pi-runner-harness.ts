@@ -31,6 +31,8 @@ export interface PiRunnerHarness {
   fakePiEntry: string;
   spawnedCommands: Array<{ args: string[]; initialMessage: string }>;
   sleeps: number[];
+  attemptIds: string[];
+  attemptCollisions: string[];
 }
 
 export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunnerHarness {
@@ -38,6 +40,8 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
   const spawnedCommands: Array<{ args: string[]; initialMessage: string }> = [];
   const sleeps: number[] = [];
+  const attemptIds: string[] = [];
+  const attemptCollisions: string[] = [];
 
   const providers: ProviderConfig[] = ['p1', 'p2'].map((id, priority) => ({
     id, kind: 'openai', displayName: id, enabled: true, priority,
@@ -58,7 +62,14 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   };
 
   const attempts: ExecutionAttemptStore = {
-    create: () => undefined,
+    create: (value) => {
+      if (attemptIds.includes(value.id)) {
+        const error = `UNIQUE constraint failed: execution_attempts.id (${value.id})`;
+        attemptCollisions.push(error);
+        throw new Error(error);
+      }
+      attemptIds.push(value.id);
+    },
     updateJournal: () => undefined,
     finish: () => undefined,
   };
@@ -103,5 +114,5 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
     attempts,
   });
 
-  return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, sleeps };
+  return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, sleeps, attemptIds, attemptCollisions };
 }

@@ -9,12 +9,15 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readlinkSync,
   readSync,
   readdirSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { arch as hostArch, platform as hostPlatform } from 'node:os';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const EXPECTED_PI_VERSION = '0.80.10';
 const DEV_KEY_NAME = Buffer.from('DEV_API_KEY');
@@ -34,6 +37,11 @@ const LEGACY_PAYLOAD_SIGNATURES = [
   ['DEFAULT_CMD = "', 'codex"'].join(''),
   ['DEFAULT_CMD = "', 'pi"'].join(''),
 ].map((value) => Buffer.from(value));
+
+const require = createRequire(import.meta.url);
+const electronBuilderRequire = createRequire(require.resolve('electron-builder/package.json'));
+const appBuilderRequire = createRequire(electronBuilderRequire.resolve('app-builder-lib/package.json'));
+const { listPackage: listAsarPackage } = appBuilderRequire('@electron/asar');
 
 function fail(message) {
   throw new Error(message);
@@ -100,19 +108,34 @@ function findUnpackedApps(root) {
   return apps.sort((a, b) => a.dir.localeCompare(b.dir));
 }
 
-function collectRegularFiles(root) {
+function normalizedRelative(root, path) {
+  return relative(root, path).split(sep).join('/');
+}
+
+function isWithin(root, path) {
+  const rel = relative(root, path);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function collectTree(root) {
   const files = [];
+  const links = new Map();
+  const directories = new Set();
   const walk = (dir) => {
     for (const name of readdirSync(dir)) {
       const path = join(dir, name);
       const status = lstatSync(path);
-      if (status.isSymbolicLink()) continue;
-      if (status.isDirectory()) walk(path);
+      const rel = normalizedRelative(root, path);
+      if (status.isSymbolicLink()) links.set(rel, readlinkSync(path));
+      else if (status.isDirectory()) {
+        directories.add(rel);
+        walk(path);
+      }
       else if (status.isFile()) files.push(path);
     }
   };
   walk(root);
-  return files;
+  return { files, links, directories };
 }
 
 function safeRuntimePath(runtimeDir, rel) {
@@ -138,15 +161,18 @@ function verifyManifest(app) {
   if (manifest.piVersion !== EXPECTED_PI_VERSION) fail(`Pi 版本不匹配：${manifest.piVersion}`);
   if (typeof manifest.entry !== 'string' || manifest.entry.length === 0) fail('runtime manifest 缺少 entry');
   if (!manifest.files || typeof manifest.files !== 'object' || Array.isArray(manifest.files)) fail('runtime manifest 缺少 files');
+  if (!manifest.links || typeof manifest.links !== 'object' || Array.isArray(manifest.links)) fail('runtime manifest 缺少 links');
 
   const entry = safeRuntimePath(app.runtimeDir, manifest.entry);
   if (!existsSync(entry) || !statSync(entry).isFile()) fail(`Pi 入口不存在：${manifest.entry}`);
 
-  const actualFiles = collectRegularFiles(app.runtimeDir)
-    .map((path) => relative(app.runtimeDir, path).split(sep).join('/'))
+  const tree = collectTree(app.runtimeDir);
+  const actualFiles = tree.files
+    .map((path) => normalizedRelative(app.runtimeDir, path))
     .filter((rel) => rel !== 'runtime-manifest.json')
     .sort();
   const listedFiles = Object.keys(manifest.files).sort();
+  if (actualFiles.length !== listedFiles.length) fail(`runtime manifest 文件数不匹配：实际 ${actualFiles.length}，清单 ${listedFiles.length}`);
   for (const rel of actualFiles) {
     if (!Object.hasOwn(manifest.files, rel)) fail(`runtime manifest 缺少依赖文件：${rel}`);
   }
@@ -157,7 +183,44 @@ function verifyManifest(app) {
     const actual = sha256File(path);
     if (typeof expected !== 'string' || actual !== expected) fail(`runtime 摘要校验失败：${rel}`);
   }
-  ok(`${relative(process.cwd(), app.dir)}: Pi ${manifest.piVersion}，${listedFiles.length} 个摘要通过`);
+
+  const actualLinks = [...tree.links.keys()].sort();
+  const listedLinks = Object.keys(manifest.links).sort();
+  if (actualLinks.length !== listedLinks.length) fail(`runtime manifest 符号链接数不匹配：实际 ${actualLinks.length}，清单 ${listedLinks.length}`);
+  const realRoot = realpathSync(app.runtimeDir);
+  for (const rel of actualLinks) {
+    if (!Object.hasOwn(manifest.links, rel)) fail(`runtime manifest 缺少符号链接：${rel}`);
+    const expectedTarget = manifest.links[rel];
+    if (typeof expectedTarget !== 'string') fail(`runtime manifest 符号链接 target 无效：${rel}`);
+    const path = safeRuntimePath(app.runtimeDir, rel);
+    const actualTarget = tree.links.get(rel);
+    if (actualTarget !== expectedTarget) fail(`runtime 符号链接被重定向：${rel}`);
+    let resolvedTarget;
+    try {
+      resolvedTarget = realpathSync(path);
+    } catch {
+      fail(`runtime 符号链接目标不存在：${rel}`);
+    }
+    if (!isWithin(realRoot, resolvedTarget)) fail(`runtime 符号链接逃逸运行时根：${rel}`);
+    const targetRel = normalizedRelative(realRoot, resolvedTarget);
+    const targetStatus = statSync(resolvedTarget);
+    if (targetStatus.isFile() && !Object.hasOwn(manifest.files, targetRel)) {
+      fail(`runtime 符号链接目标未受文件摘要绑定：${rel}`);
+    }
+    if (targetStatus.isDirectory() && targetRel !== '' && !tree.directories.has(targetRel)) {
+      fail(`runtime 符号链接目录未受树清单绑定：${rel}`);
+    }
+  }
+  for (const rel of listedLinks) {
+    if (!tree.links.has(rel)) fail(`runtime manifest 列出了不存在的符号链接：${rel}`);
+  }
+
+  const realEntry = realpathSync(entry);
+  if (!isWithin(realRoot, realEntry)) fail('Pi 入口符号链接逃逸运行时根');
+  const realEntryRel = normalizedRelative(realRoot, realEntry);
+  if (!Object.hasOwn(manifest.files, realEntryRel)) fail('Pi 入口真实文件未受摘要绑定');
+
+  ok(`${relative(process.cwd(), app.dir)}: Pi ${manifest.piVersion}，${listedFiles.length} 个摘要与 ${listedLinks.length} 个符号链接通过`);
   return { entry, manifest };
 }
 
@@ -181,27 +244,45 @@ function fileContainsAny(path, needles) {
 }
 
 function verifyPayload(app) {
-  const files = collectRegularFiles(app.dir);
+  const files = collectTree(app.dir).files;
   const envFile = files.find((path) => basename(path) === '.env');
   if (envFile) fail(`打包产物包含 .env：${relative(app.dir, envFile)}`);
+
+  const asarMembers = listAsarPackage(app.asar);
+  const asarEnv = asarMembers.find((member) => member.split(/[\\/]/).at(-1) === '.env');
+  if (asarEnv) fail(`app.asar 包含 .env：${asarEnv}`);
 
   for (const path of files) {
     if (fileContainsAny(path, [DEV_KEY_NAME])) fail(`打包产物包含禁止的开发密钥变量字节：${relative(app.dir, path)}`);
   }
 
   const unpackedPayload = join(app.resourcesDir, 'app.asar.unpacked');
-  const payloadFiles = [app.asar, ...(isDirectory(unpackedPayload) ? collectRegularFiles(unpackedPayload) : [])];
+  const payloadFiles = [app.asar, ...(isDirectory(unpackedPayload) ? collectTree(unpackedPayload).files : [])];
   for (const path of payloadFiles) {
     const match = fileContainsAny(path, LEGACY_PAYLOAD_SIGNATURES);
     if (match) fail(`打包应用仍包含旧适配器源码或命令字符串：${match.toString('utf8')}`);
   }
-  ok(`${relative(process.cwd(), app.dir)}: 无 .env、DEV_API_KEY 字节或旧适配器负载`);
+  ok(`${relative(process.cwd(), app.dir)}: app.asar ${asarMembers.length} 个成员，无 .env、DEV_API_KEY 字节或旧适配器负载`);
+}
+
+function minimalProbeEnv() {
+  const keys = process.platform === 'win32'
+    ? ['SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT', 'TEMP', 'TMP']
+    : process.platform === 'darwin'
+      ? ['PATH', 'TMPDIR']
+      : ['PATH', 'TMPDIR', 'TEMP', 'TMP'];
+  const env = { ELECTRON_RUN_AS_NODE: '1' };
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+  return env;
 }
 
 function verifyHostExecutable(app, entry) {
   if (!existsSync(app.executable)) fail(`Electron 可执行文件不存在：${app.executable}`);
   const result = spawnSync(app.executable, [entry, '--version'], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    env: minimalProbeEnv(),
     encoding: 'utf8',
     shell: false,
     timeout: 30_000,
