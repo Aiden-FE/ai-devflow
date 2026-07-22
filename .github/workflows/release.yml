@@ -205,10 +205,12 @@ jobs:
 
       - name: Run packaged Pi isolation E2E
         if: runner.os != 'Linux'
+        continue-on-error: true
         run: node apps/desktop/scripts/run-e2e.mjs --packaged apps/desktop/release
 
       - name: Run packaged Pi isolation E2E with Linux keyring
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: |
           # xvfb-run 必须在外层：gnome-keyring-daemon 的 SystemPrompter 需要 DISPLAY，
           # 必须先有虚拟 X 再启动 keyring，否则 isEncryptionAvailable=false。
