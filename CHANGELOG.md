@@ -48,6 +48,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
 
 ### 其他变更
+- drop macos-13 x64 smoke from release matrix（80f2c7b）
 - add timeouts to E2E steps in release workflow（bd2922d）
 - make E2E steps non-blocking for release (Pi verification already gates)（1153851）
 - add diagnostic model list to pi-catalog-gate on failure（d191230）
