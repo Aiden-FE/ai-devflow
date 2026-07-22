@@ -6,6 +6,59 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.2.0
+
+变更范围：[v0.1.2...v0.2.0](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.2...v0.2.0)
+
+### 新功能
+- mac ad-hoc signing + user-friendly README（b749084）
+- **desktop**：provider-only AI settings UI; remove agent config sections（9d00e07）
+- **desktop**：add sanitized providers IPC (list/save/remove/reorder/test/health)（d31c5b4）
+- **agents**：bridge pi json events and attempt journals（329d054）
+- **agents**：add isolated built-in pi role profiles（45b8952）
+- **agents**：add provider routing and circuit breaking（44ab532）
+- **desktop**：store ordered encrypted providers（d7a26b3）
+- **persistence**：migrate to pi-only execution records（b46fd12）
+
+### 问题修复
+- harden execution policy, env safety and Pi interaction protocol（b918a92）
+- harden execution policy and Pi interaction protocol（ea90312）
+- enforce provider-wide auth readiness（67acab9）
+- close execution policy wrapper escapes（5d05707）
+- fail closed on pi terminal protocol（58b57a9）
+- complete legacy provider migration（d72e492）
+- prioritize provider configuration errors（9728786）
+- restore bounded attempt context and cleanup（b73d884）
+- align scheduler and provider failover lifecycle（1631800）
+- fail closed on pi process framing（1d8542b）
+- require clean pi conversation completion（2db8eda）
+- enforce role execution policy evidence（eee9d1c）
+- isolate provider profile snapshots（50e1a84）
+- make provider migration atomic at startup（d2eea19）
+- verify packaged pi links at startup（a1ca820）
+- close packaged pi isolation gaps（885da63）
+- **agents**：correct PI_PACKAGE_DIR root and non-interactive flag; pass real pi e2e（338b371）
+
+### 其他变更
+- harden real Pi secret and planner gates（43c7876）
+- require real reviewer policy denial（ef3174b）
+- align packaged profile isolation checks（c3cc5e3）
+- enforce the real pi provider gate（eb39d33）
+- cover packaged pi link validation（bb9f50c）
+- gate releases on bundled pi isolation（5edbc81）
+- **desktop**：route all AI workloads through bundled Pi; remove legacy ai-sdk provider surface（ff6a9e7）
+- remove agent types, capability config, agent IPC and copy (pi-only)（4e09c53）
+- remove claude code/codex adapters, agent registry, detection and agent IPC（ad34c14）
+- **desktop**：remove agent selection UI (badge, selectors, exec column)（3e81276）
+- add real bundled pi provider verification（a5a7905）
+- **scheduler**：execute all roles through pi runner（b9a5f32）
+- **agents**：replace adapters with bundled pi runner（563927a）
+- bundle and verify pi 0.80.10（fe303c2）
+- **core**：replace agent selection with provider contracts（c7f2d59）
+- add embedded pi implementation plan（d7ddc41）
+- require real pi provider validation（d1001d2）
+- design bundled pi-only agent runtime（06cdf61）
+
 ## v0.1.2
 
 变更范围：[v0.1.1...v0.1.2](https://github.com/Aiden-FE/ai-devflow/compare/v0.1.1...v0.1.2)
