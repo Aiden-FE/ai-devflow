@@ -218,6 +218,7 @@ describe('typed IPC wiring', () => {
     await call('providers', 'save', {
       id: 'auth-broken', kind: 'openai', displayName: 'Auth broken', enabled: true,
       priority: 0, authType: 'api_key', apiKey: 'test-key', revision: 1,
+      defaultModel: 'gpt-4o',
     });
     repos.providerHealth.upsert({
       providerId: 'auth-broken',
@@ -232,6 +233,18 @@ describe('typed IPC wiring', () => {
     expect(listed.find((provider) => provider.id === 'auth-broken')?.health).toBe('configuration_error');
     const health = await call('providers', 'health') as Array<{ providerId: string; status: string }>;
     expect(health.find((provider) => provider.providerId === 'auth-broken')?.status).toBe('configuration_error');
+  });
+
+  it('providers list and health report configuration_error for provider without models', async () => {
+    await call('providers', 'save', {
+      id: 'no-models', kind: 'openai', displayName: 'No Models', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
+    });
+    // No defaultModel or workloadModels set, and no health records.
+    const listed = await call('providers', 'list') as Array<{ id: string; health: string }>;
+    expect(listed.find((p) => p.id === 'no-models')?.health).toBe('configuration_error');
+    const health = await call('providers', 'health') as Array<{ providerId: string; status: string }>;
+    expect(health.find((p) => p.providerId === 'no-models')?.status).toBe('configuration_error');
   });
 
   it('providers expose sanitized migration state and complete credential re-entry', async () => {

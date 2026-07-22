@@ -31,7 +31,7 @@ function secretKey(id: string): string {
 }
 
 /** 提供商是否配置了任何可用模型（默认模型或任一 workload 覆盖）。无模型时报告 configuration_error。 */
-function hasModelConfig(config: ProviderConfig): boolean {
+export function hasModelConfig(config: ProviderConfig): boolean {
   if (config.defaultModel?.trim()) return true;
   if (!config.workloadModels) return false;
   return Object.values(config.workloadModels).some((v) => v?.trim());
