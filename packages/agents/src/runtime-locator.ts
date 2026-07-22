@@ -5,8 +5,8 @@
 // `pi --version` → 预期版本；requireProfiles 时还校验角色资源摘要与四角色目录。任一步失败抛
 // 「运行时校验失败」，阻止 Agent 执行，绝不回退 PATH 或外部 Pi。
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 export interface PiRuntimeManifest {
   schemaVersion: number;
@@ -14,6 +14,7 @@ export interface PiRuntimeManifest {
   entry: string;
   profilesDigest: string | null;
   files: Record<string, string>;
+  links: Record<string, string>;
 }
 
 export interface ExecLike {
@@ -56,7 +57,11 @@ export class BundledPiLocator {
   /** 全量自检：manifest → 摘要 → 入口 → 角色资源（可选）→ 版本。任一失败抛「运行时校验失败」。 */
   async verify(): Promise<VerifiedPiRuntime> {
     const manifest = this.readManifest();
-    if (!manifest.piVersion || !manifest.entry) throw new Error('运行时校验失败：manifest 字段不完整');
+    if (!manifest.piVersion || !manifest.entry || !isRecord(manifest.files)) {
+      throw new Error('运行时校验失败：manifest 字段不完整');
+    }
+    if (!isRecord(manifest.links)) throw new Error('运行时校验失败：manifest 缺少 links');
+    this.verifyLinks(manifest);
     for (const [rel, expected] of Object.entries(manifest.files)) {
       const abs = join(this.root, rel);
       if (!existsSync(abs)) throw new Error(`运行时校验失败：缺少文件 ${rel}`);
@@ -79,10 +84,73 @@ export class BundledPiLocator {
     return { entry, version };
   }
 
+  private verifyLinks(manifest: PiRuntimeManifest): void {
+    const actualLinks = collectLinks(this.root);
+    const listedLinks = Object.keys(manifest.links).sort();
+    const actualPaths = [...actualLinks.keys()].sort();
+    for (const rel of actualPaths) {
+      if (!Object.hasOwn(manifest.links, rel)) throw new Error(`运行时校验失败：manifest 缺少符号链接 ${rel}`);
+    }
+    for (const rel of listedLinks) {
+      if (!actualLinks.has(rel)) throw new Error(`运行时校验失败：符号链接缺失或不是符号链接 ${rel}`);
+      const expectedTarget = manifest.links[rel];
+      if (typeof expectedTarget !== 'string' || actualLinks.get(rel) !== expectedTarget) {
+        throw new Error(`运行时校验失败：符号链接被重定向 ${rel}`);
+      }
+    }
+
+    const realRoot = realpathSync(this.root);
+    const manifestFiles = Object.keys(manifest.files);
+    for (const rel of listedLinks) {
+      const linkPath = join(this.root, rel);
+      let realTarget: string;
+      try {
+        realTarget = realpathSync(linkPath);
+      } catch {
+        throw new Error(`运行时校验失败：符号链接目标缺失 ${rel}`);
+      }
+      const targetRel = relative(realRoot, realTarget);
+      if (targetRel === '..' || targetRel.startsWith(`..${sep}`) || isAbsolute(targetRel)) {
+        throw new Error(`运行时校验失败：符号链接目标越出运行时 ${rel}`);
+      }
+      const normalizedTarget = normalizeRelative(targetRel);
+      const target = statSync(linkPath);
+      const checksumBound = target.isFile()
+        ? Object.hasOwn(manifest.files, normalizedTarget)
+        : target.isDirectory() && manifestFiles.some((file) => file.startsWith(`${normalizedTarget}/`));
+      if (!checksumBound) throw new Error(`运行时校验失败：符号链接目标未受摘要保护 ${rel}`);
+    }
+  }
+
   /** 校验并返回绝对入口与版本（供 PiProcessSupervisor 以 ELECTRON_RUN_AS_NODE 启动）。 */
   async command(): Promise<VerifiedPiRuntime> {
     return this.verify();
   }
+}
+
+function isRecord(value: unknown): value is Record<string, string> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeRelative(path: string): string {
+  return path.split(sep).join('/');
+}
+
+function collectLinks(root: string): Map<string, string> {
+  const links = new Map<string, string>();
+  const visit = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      const status = lstatSync(path);
+      if (status.isSymbolicLink()) {
+        links.set(normalizeRelative(relative(root, path)), readlinkSync(path));
+      } else if (status.isDirectory()) {
+        visit(path);
+      }
+    }
+  };
+  visit(root);
+  return links;
 }
 
 async function defaultExecFile(command: string, args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
