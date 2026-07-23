@@ -137,6 +137,44 @@ describe('ProviderRouter', () => {
     expect(calls).toBeLessThanOrEqual(8);
   });
 
+  it('preserves the last underlying error as detail on the final degradation', async () => {
+    // 测试连接等场景需要从泛化「所有已配置 AI 服务暂时不可用」还原真实根因（如 401/404）。
+    const harness = makeRouterHarness(['p1']);
+    let caught: ProviderExecutionError | undefined;
+    try {
+      await harness.router.execute('tester', async () => {
+        throw new ProviderExecutionError('AI 服务请求失败：401: invalid key', 'authentication', 401);
+      });
+    } catch (err) {
+      caught = err as ProviderExecutionError;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.detail).toBe('AI 服务请求失败：401: invalid key');
+  });
+
+  it('prefers the underlying error detail over its message when degrading', async () => {
+    // executeTextOnRoute 把 stderr/原因放进 detail、message 保留为稳定标签；路由器应优先透传 detail，
+    // 使测试连接能从泛化「所有已配置 AI 服务暂时不可用」还原到真实根因（而非稳定标签文案）。
+    const harness = makeRouterHarness(['p1']);
+    let caught: ProviderExecutionError | undefined;
+    try {
+      await harness.router.execute('tester', async () => {
+        throw new ProviderExecutionError(
+          'Pi 返回的终止协议无效',
+          'protocol',
+          0,
+          undefined,
+          '缺少 agent_end 终态事件；Pi stderr：model not found',
+        );
+      });
+    } catch (err) {
+      caught = err as ProviderExecutionError;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toBe('所有已配置 AI 服务暂时不可用，请稍后重试');
+    expect(caught!.detail).toBe('缺少 agent_end 终态事件；Pi stderr：model not found');
+  });
+
   it('does not fail over or open health for a task-result failure', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     let calls = 0;

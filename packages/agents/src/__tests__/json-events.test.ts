@@ -28,7 +28,7 @@ describe('createPiEventTranslator', () => {
 
   it('emits a log event for message_update text deltas', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
-    const events = translator.push(JSON.stringify({ type: 'message_update', delta: 'hello world' }));
+    const events = translator.push(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello world' } }));
     expect(events).toContainEqual(expect.objectContaining({ type: 'log', text: 'hello world' }));
   });
 
@@ -129,7 +129,7 @@ describe('createPiEventTranslator', () => {
 
   it('redacts the active route secret before emitting or journaling', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1', secrets: ['route-secret'] });
-    const events = translator.push(JSON.stringify({ type: 'message_update', delta: 'never route-secret here' }));
+    const events = translator.push(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'never route-secret here' } }));
     expect(JSON.stringify(events)).not.toContain('route-secret');
     expect(JSON.stringify(translator.journal())).not.toContain('route-secret');
   });
@@ -162,5 +162,41 @@ describe('createPiEventTranslator', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     expect(() => translator.push('not-json-at-all')).not.toThrow();
     expect(() => translator.finish()).toThrow(/protocol failure/);
+  });
+
+  it('captures a provider HTTP error from a message_end with stopReason error', () => {
+    // Pi 对提供商 HTTP 错误不发射 error/provider_error 事件，而是把 stopReason:"error" + errorMessage
+    // 放在 message 事件上（如 "401: {...}"）。translator 必须捕获之以还原根因。
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: '401: {"message":"Invalid API key"}' },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+    const pe = translator.lastProviderError();
+    expect(pe).toBeDefined();
+    expect(pe!.status).toBe(401);
+    expect(pe!.message).toContain('401');
+    expect(pe!.message).toContain('Invalid API key');
+    // 提供商错误是合法失败终态：finish() 不应再抛 protocol 失败。
+    expect(() => translator.finish()).not.toThrow();
+  });
+
+  it('parses HTTP status from a no-body error message on turn_end', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'turn_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: '404 status code (no body)' },
+    }));
+    expect(translator.lastProviderError()?.status).toBe(404);
+  });
+
+  it('redacts the active route secret embedded in a provider error message', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1', secrets: ['route-secret'] });
+    translator.push(JSON.stringify({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: '401: leaked route-secret here' },
+    }));
+    expect(translator.lastProviderError()?.message).not.toContain('route-secret');
   });
 });

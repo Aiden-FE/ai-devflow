@@ -104,6 +104,15 @@ function interactionResult(value: unknown): ReturnType<typeof interactionInput> 
   }
 }
 
+/**
+ * 从 Pi 的 errorMessage（如 "401: {...}" 或 "404 status code (no body)"）解析 HTTP 状态码。
+ * Pi 对提供商 HTTP 错误不发射 error/provider_error 事件，而是把状态前缀写入 message 事件的 errorMessage。
+ */
+function parseHttpStatus(errorMessage: string): number {
+  const m = /^(\d{3})\b/.exec(errorMessage);
+  return m ? Number(m[1]) : 0;
+}
+
 export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEventTranslator {
   const redact = makeRedactor(opts.secrets ?? []);
   const journal: AttemptJournal = {
@@ -141,7 +150,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
           // 记录 Pi session 元数据（不暴露内部路径）。
           break;
         case 'message_update': {
-          const delta = typeof ev.delta === 'string' ? ev.delta : '';
+          // Pi 的文本增量在 assistantMessageEvent.delta（text_delta 事件）；顶层无 delta 字段。
+          const ame = ev.assistantMessageEvent as { delta?: unknown } | undefined;
+          const delta = typeof ame?.delta === 'string' ? ame.delta : typeof ev.delta === 'string' ? ev.delta : '';
           if (delta) events.push({ type: 'log', level: 'info', text: redact(delta), t: t() });
           break;
         }
@@ -202,6 +213,18 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
         case 'agent_end':
           agentEnded = true;
           break;
+        case 'message_start':
+        case 'message_end':
+        case 'turn_end': {
+          // Pi 对提供商 HTTP 错误（401/404/5xx 等）不发射 error/provider_error 事件，
+          // 而是把 stopReason:"error" + errorMessage 放在 message 事件上。捕获之以还原根因（§9.4），
+          // 否则会被误判为 protocol 失败而丢失真实原因。
+          const msg = ev.message as { stopReason?: unknown; errorMessage?: unknown } | undefined;
+          if (msg && msg.stopReason === 'error' && typeof msg.errorMessage === 'string' && msg.errorMessage) {
+            providerError ??= { status: parseHttpStatus(msg.errorMessage), message: redact(msg.errorMessage) };
+          }
+          break;
+        }
         case 'error':
         case 'provider_error': {
           const status = typeof ev.status === 'number' ? ev.status : 0;
@@ -243,7 +266,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
       if (!agentEnded && result) {
         throw new Error('protocol failure：收到结构化结果但缺少 agent_end');
       }
-      if (agentEnded && !result) {
+      // 提供商错误（已捕获到 providerError）是合法的失败终态：Pi 以 agent_end + stopReason:"error"
+      // 收场，无结构化结果。此时不应再判 protocol 失败，交由 runAttempt 走 provider 错误分支。
+      if (agentEnded && !result && !providerError) {
         throw new Error('protocol failure：Pi 已结束但缺少有效的结构化结果（ai_devflow_report_result）');
       }
       if (!agentEnded && !result && !providerError) {

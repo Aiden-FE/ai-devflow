@@ -151,7 +151,7 @@ describe('production Pi text executor', () => {
   it('commits buffered deltas only after exit 0 and agent_end', async () => {
     const harness = productionHarness({
       stdout: [
-        JSON.stringify({ type: 'message_update', delta: 'hello' }),
+        JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'hello' } }),
         JSON.stringify({ type: 'agent_end', messages: [] }),
       ],
       exitCode: 0,
@@ -201,7 +201,7 @@ describe('production Pi text executor', () => {
 
   it('passes onlyProviderId through to ProviderRouter', async () => {
     const harness = productionHarness({
-      stdout: [JSON.stringify({ type: 'message_update', delta: 'pong' }), JSON.stringify({ type: 'agent_end' })],
+      stdout: [JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'pong' } }), JSON.stringify({ type: 'agent_end' })],
       exitCode: 0,
     });
     await harness.executor(

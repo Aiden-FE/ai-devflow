@@ -98,6 +98,44 @@ function formatMessages(messages: AiChatMessage[]): string {
   return messages.map((m) => `${m.role}: ${m.content}`).join('\n\n');
 }
 
+/**
+ * 从 Pi 的 errorMessage（如 "401: {...}" 或 "404 status code (no body)"）解析 HTTP 状态码。
+ * Pi 对提供商 HTTP 错误不发射 error/provider_error 事件，而是把状态前缀写入 message 事件的 errorMessage。
+ */
+function parseHttpStatus(errorMessage: string): number {
+  const m = /^(\d{3})\b/.exec(errorMessage);
+  return m ? Number(m[1]) : 0;
+}
+
+/** Pi 助手消息（terminal 事件 message_end/turn_end/agent_end 携带）。 */
+interface AssistantMessage {
+  role?: string;
+  content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+}
+
+/**
+ * 从 Pi 助手消息提取纯文本。Pi 的 message.content 是内容块数组（如 [{type:"text",text:"..."}]），
+ * 也可能含 thinking/tool_use 等非文本块；此处仅拼接 text 块。
+ */
+function extractAssistantText(message: AssistantMessage | undefined): string {
+  if (!message || message.role !== 'assistant') return '';
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter(
+      (b): b is { type: 'text'; text: string } =>
+        !!b &&
+        typeof b === 'object' &&
+        (b as { type?: unknown }).type === 'text' &&
+        typeof (b as { text?: unknown }).text === 'string',
+    )
+    .map((b) => b.text)
+    .join('');
+}
+
 function buildChatPlan(
   entry: string,
   route: ProviderRoute,
@@ -178,7 +216,7 @@ function materializeChatProfile(sessionDir: string, systemPrompt: string): strin
   return profileDir;
 }
 
-async function executeTextOnRoute(
+export async function executeTextOnRoute(
   route: ProviderRoute,
   messages: AiChatMessage[],
   onDelta: ((text: string) => void) | undefined,
@@ -208,13 +246,28 @@ async function executeTextOnRoute(
   let streamError: unknown;
   let providerError: { status: number; message: string } | undefined;
   const deltas: string[] = [];
+  // Pi 在配置/模型/网络类失败时（如模型不在网关列表、Base URL 错误、DNS/TLS 失败、未知 provider 名）
+  // 通常把人类可读诊断写到 stderr 并以 exit 0 结束——既不产 message_update 文本，也不发 agent_end，
+  // 更不会在 message 事件上带 stopReason:"error"。若不捕获 stderr，会落到「终止协议无效」分支而丢失根因。
+  // supervisor 已对 stderr 脱敏（makeLineRedactor），这里仅保留尾部用于失败时还原原因。
+  const stderrLines: string[] = [];
+  const unknownEventTypes: string[] = [];
   let exitInfo: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
   let doneError: unknown;
   try {
     try {
       for await (const line of spawned.lines) {
-        if (line.stream !== 'stdout') continue;
-        let event: { type?: string; delta?: string; text?: string; status?: number; message?: string };
+        if (line.stream === 'stderr') {
+          if (stderrLines.length >= 64) stderrLines.shift();
+          stderrLines.push(line.text);
+          continue;
+        }
+        let event: {
+          type?: string;
+          status?: number;
+          message?: string | AssistantMessage;
+          assistantMessageEvent?: { type?: string; delta?: string; content?: string };
+        };
         try {
           event = JSON.parse(line.text) as typeof event;
         } catch {
@@ -222,7 +275,10 @@ async function executeTextOnRoute(
           continue;
         }
         if (event.type === 'message_update') {
-          const delta = typeof event.delta === 'string' ? event.delta : typeof event.text === 'string' ? event.text : '';
+          // Pi 的文本增量在 assistantMessageEvent.delta（text_delta 事件）；顶层无 delta/text 字段。
+          // 早期实现误读 event.delta，导致任何能正常返回的提供商都被判为「未收到任何文本输出」。
+          const ame = event.assistantMessageEvent;
+          const delta = typeof ame?.delta === 'string' ? ame.delta : '';
           if (delta) {
             full += delta;
             deltas.push(delta);
@@ -234,6 +290,22 @@ async function executeTextOnRoute(
             status: typeof event.status === 'number' ? event.status : 0,
             message: typeof event.message === 'string' ? event.message : '',
           };
+        } else if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
+          // Pi 对提供商 HTTP 错误（401/404/5xx 等）不发射 error/provider_error 事件，而是把
+          // stopReason:"error" + errorMessage 放在 message 事件上。捕获之以还原根因，否则会被
+          // 误判为「终止协议无效」而丢失真实原因（如密钥无效、模型不存在、Base URL 错误）。
+          const msg = typeof event.message === 'object' ? event.message : undefined;
+          if (msg && msg.stopReason === 'error' && typeof msg.errorMessage === 'string' && msg.errorMessage) {
+            providerError ??= { status: parseHttpStatus(msg.errorMessage), message: msg.errorMessage };
+          }
+          // 权威最终文本：terminal 事件携带完整的助手消息 content，即使流式增量因字段差异遗漏，
+          // 也能还原完整回复，避免把正常返回误判为空输出。
+          const text = extractAssistantText(msg);
+          if (text) full = text;
+        } else {
+          // 记录未处理的事件类型，供 protocol 失败时还原根因（Pi 可能以新事件形态报告错误）。
+          const eventType = typeof event.type === 'string' && event.type ? event.type : '<unknown>';
+          if (unknownEventTypes.length < 32) unknownEventTypes.push(eventType);
         }
       }
     } catch (error) {
@@ -250,19 +322,60 @@ async function executeTextOnRoute(
 
   if (providerError) {
     throw new ProviderExecutionError(
-      'AI 服务请求失败',
+      `AI 服务请求失败：${providerError.message}`,
       classifyProviderFailure({ status: providerError.status, message: providerError.message }),
       providerError.status,
     );
   }
   if (doneError || !exitInfo || exitInfo.exitCode !== 0) {
-    throw new ProviderExecutionError('Pi 运行进程异常退出', 'runtime', exitInfo?.exitCode ?? 0);
+    const exitCode = exitInfo?.exitCode ?? 0;
+    const reason = doneError
+      ? `进程异常：${(doneError as Error).message ?? String(doneError)}`
+      : `exit=${exitCode}`;
+    throw new ProviderExecutionError(
+      'Pi 运行进程异常退出',
+      'runtime',
+      exitCode,
+      undefined,
+      buildPiFailureDetail([reason], stderrLines, unknownEventTypes),
+    );
   }
   if (streamError || malformedStdout || !sawAgentEnd || full.length === 0) {
-    throw new ProviderExecutionError('Pi 返回的终止协议无效', 'protocol');
+    const reasons: string[] = [];
+    if (streamError) reasons.push(`流错误：${(streamError as Error).message ?? String(streamError)}`);
+    if (malformedStdout) reasons.push('stdout 含非法 JSON');
+    if (!sawAgentEnd) reasons.push('缺少 agent_end 终态事件');
+    if (full.length === 0) reasons.push('未收到任何文本输出');
+    throw new ProviderExecutionError(
+      'Pi 返回的终止协议无效',
+      'protocol',
+      0,
+      undefined,
+      buildPiFailureDetail(reasons, stderrLines, unknownEventTypes),
+    );
   }
   for (const delta of deltas) onDelta?.(delta);
   return full;
+}
+
+/**
+ * 组装 Pi 执行失败时的根因详情：原因 + 未处理事件 + stderr 尾部。
+ * 各部分均已由 PiProcessSupervisor 脱敏；此处仅做长度裁剪，testConnectionWithRouter 会再过一次 redactText。
+ */
+function buildPiFailureDetail(
+  reasons: string[],
+  stderrLines: string[],
+  unknownEventTypes: string[],
+): string {
+  const parts: string[] = [];
+  if (reasons.length) parts.push(reasons.join('；'));
+  if (unknownEventTypes.length) parts.push(`收到未处理事件：${unknownEventTypes.join(', ')}`);
+  const stderrTail = stderrLines.join('\n').trimEnd();
+  if (stderrTail) {
+    const trimmed = stderrTail.length > 4000 ? `…${stderrTail.slice(-4000)}` : stderrTail;
+    parts.push(`Pi stderr：\n${trimmed}`);
+  }
+  return parts.join('\n');
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
@@ -402,7 +515,10 @@ async function testConnectionWithRouter(
     return { ok: true, providerId, status: 200 };
   } catch (err) {
     // §8.2：保存、测试、运行和错误记录都使用统一脱敏函数；错误消息可能含 URL/状态/密钥形态片段。
-    const message = redactText((err as Error).message || String(err));
+    // 路由器在所有路线失败后抛出泛化「所有已配置 AI 服务暂时不可用」，其 detail 携带最近一次底层错误
+    // （如「AI 服务请求失败：401: ...」）。优先用 detail 还原根因，避免测试结果只显示无信息的泛化文案。
+    const detail = err instanceof ProviderExecutionError ? err.detail : undefined;
+    const message = redactText(detail || (err as Error).message || String(err));
     return { ok: false, providerId, status: 0, error: message };
   }
 }

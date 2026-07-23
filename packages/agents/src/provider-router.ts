@@ -49,6 +49,8 @@ export class ProviderExecutionError extends Error {
     readonly kind: FailureKind,
     readonly status = 0,
     readonly retryAfterMs?: number,
+    /** 最终降级抛错时保留的最近一次底层错误（如真实 HTTP/提供商错误），供测试连接等场景还原根因。 */
+    readonly detail?: string,
   ) {
     super(message);
     this.name = 'ProviderExecutionError';
@@ -258,6 +260,7 @@ export class ProviderRouter {
       throw new ProviderExecutionError('所有已配置 AI 服务均不可用，请检查提供商设置', 'transient_provider');
     }
     let calls = 0;
+    let lastDetail: string | undefined;
     const retriedSame = new Set<string>();
     const authenticationFailures = new Set<string>();
     for (const route of routes) {
@@ -265,7 +268,7 @@ export class ProviderRouter {
       // eslint-disable-next-line no-constant-condition
       while (true) {
         if (calls >= MAX_ATTEMPTS) {
-          throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider');
+          throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider', 0, undefined, lastDetail);
         }
         calls += 1;
         try {
@@ -273,6 +276,14 @@ export class ProviderRouter {
           this.recordSuccess(route);
           return result;
         } catch (err) {
+          // 优先保留底层错误自带的 detail（如 executeTextOnRoute 还原的 stderr/原因），
+          // 否则回退到 message。这样测试连接等场景能从泛化文案还原真实根因。
+          lastDetail =
+            err instanceof ProviderExecutionError && err.detail
+              ? err.detail
+              : err instanceof Error
+                ? err.message
+                : String(err);
           const kind = err instanceof ProviderExecutionError ? err.kind : classifyProviderFailure(err);
           const retryAfterMs = err instanceof ProviderExecutionError ? err.retryAfterMs : undefined;
           if (kind === 'task_result' || kind === 'interaction') {
@@ -293,7 +304,7 @@ export class ProviderRouter {
         }
       }
     }
-    throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider');
+    throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider', 0, undefined, lastDetail);
   }
 
   /** Synchronously claim an open route so concurrent executions cannot duplicate its half-open probe. */
