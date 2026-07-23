@@ -11,6 +11,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 变更范围：[v0.2.1...v0.2.2](https://github.com/Aiden-FE/ai-devflow/compare/v0.2.1...v0.2.2)
 
 ### 新功能
+- **agents**：shared skills registry with cross-role borrow support（088c7f8）
 - **scripts**：inspect:roles maintainer capability self-check（d6cb9a7）
 - **agents**：per-role extensions on RoleProfile, validated at load（3e41b2d）
 - **workspace**：open project folder via projects.openFolder IPC（81d34a8）

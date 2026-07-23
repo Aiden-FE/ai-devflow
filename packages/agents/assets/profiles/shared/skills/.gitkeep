@@ -1,0 +1,3 @@
+# 占位：共享技能放此目录，每个技能一个子目录 <name>/SKILL.md。
+# 任意角色可通过 RoleProfile.skills 引用 BUILTIN_SKILLS 中 source='shared' 的技能，
+# ProfileMaterializer 会把对应文件拷入角色快照的 skills/<name>/。

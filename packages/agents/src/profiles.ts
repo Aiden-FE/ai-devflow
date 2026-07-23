@@ -34,7 +34,7 @@ export interface RoleProfile {
   /** 角色 built-in tools（未含两个内部工具）。 */
   tools: string[];
   excludedTools: string[];
-  /** 内置 skills（<profile>/skills/<name>/SKILL.md）。 */
+  /** 引用的内置 skills（来自 BUILTIN_SKILLS 注册池；source=角色名时取 <source>/skills/<name>/，source='shared' 时取 shared/skills/<name>/）。任意角色可引用池中任意技能。 */
   skills: string[];
   /** 该角色启用的扩展（名称取自 BUILTIN_EXTENSIONS 注册池）。 */
   extensions: string[];
@@ -51,6 +51,34 @@ export const BUILTIN_EXTENSIONS = [
   'structured-result',
   'checkpoint-context',
 ] as const;
+
+/** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
+export type SkillSource = TaskRole | 'shared';
+
+/** 内置技能注册表条目：name 为技能目录名，source 仅表示物理文件位置，不限制哪些角色可引用。 */
+export interface BuiltinSkill {
+  name: string;
+  source: SkillSource;
+}
+
+/**
+ * 内置技能注册池：记录每个技能的物理位置。任意角色均可引用池中任意技能——source 仅用于
+ * ProfileMaterializer 物化时定位源文件，不构成引用限制。物化后统一落在角色快照的 skills/<name>/。
+ */
+export const BUILTIN_SKILLS = [
+  { name: 'requirements-analysis',   source: 'planner' },
+  { name: 'design-writing',          source: 'planner' },
+  { name: 'implementation-planning', source: 'planner' },
+  { name: 'test-driven-development', source: 'coder' },
+  { name: 'systematic-debugging',    source: 'coder' },
+  { name: 'verification',            source: 'coder' },
+  { name: 'code-review',             source: 'reviewer' },
+  { name: 'security-review',         source: 'reviewer' },
+  { name: 'regression-review',       source: 'reviewer' },
+  { name: 'test-design',             source: 'tester' },
+  { name: 'failure-analysis',        source: 'tester' },
+  { name: 'acceptance-verification', source: 'tester' },
+] as const satisfies readonly BuiltinSkill[];
 
 export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
   planner: {
@@ -141,14 +169,20 @@ export interface MaterializeInput {
 
 /**
  * 把内置只读角色资源物化到内容寻址快照：`<baseDir>/profiles/<digest>/<role>/`，含 settings.json、
- * SYSTEM.md、skills/ 与共享 extensions/ 副本；兼容网关额外写 models.json。原子切换（临时目录 + rename），
- * 完成后写 `.complete` 标记；已存在则直接复用（幂等）。每个角色快照自包含，互不可见。
+ * SYSTEM.md、skills/（角色私有技能 + 跨源引用的共享/他角技能副本）、共享 extensions/ 副本；兼容网关
+ * 额外写 models.json。原子切换（临时目录 + rename），完成后写 `.complete` 标记；已存在则直接复用
+ * （幂等）。每个角色快照自包含，互不可见。
  */
 export class ProfileMaterializer {
-  constructor(private assetsRoot: string, private baseDir: string) {}
+  constructor(
+    private assetsRoot: string,
+    private baseDir: string,
+    private readonly profiles: Record<TaskRole, RoleProfile> = ROLE_PROFILES,
+    private readonly skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+  ) {}
 
   digest(input: MaterializeInput): string {
-    const profile = ROLE_PROFILES[input.role];
+    const profile = this.profiles[input.role];
     const key = JSON.stringify({
       role: input.role,
       profileVersion: profile.version,
@@ -169,10 +203,22 @@ export class ProfileMaterializer {
     const tmp = `${profileDir}.tmp-${randomBytes(4).toString('hex')}`;
     mkdirSync(join(this.baseDir, 'profiles', digest), { recursive: true });
     try {
+      const profile = this.profiles[input.role];
+      const skillByName = new Map(this.skillPool.map((s) => [s.name, s]));
       cpSync(join(this.assetsRoot, input.role), tmp, { recursive: true });
+      // 跨源技能：角色声明的 skills 中 source !== role 的（共享技能或跨角色引用的他角私有技能），
+      // 从其物理来源目录拷入快照 skills/<name>/。source === role 的已由上方 cpSync 带入。
+      for (const skill of profile.skills) {
+        const entry = skillByName.get(skill);
+        if (!entry) throw new Error(`角色 ${input.role} 引用了未注册的技能：${skill}`);
+        if (entry.source === input.role) continue;
+        const src = join(this.assetsRoot, entry.source, 'skills', skill);
+        if (!existsSync(src)) throw new Error(`技能 ${skill} 的源目录不存在：${src}`);
+        cpSync(src, join(tmp, 'skills', skill), { recursive: true });
+      }
       const extDir = join(tmp, 'extensions');
       mkdirSync(extDir, { recursive: true });
-      for (const ext of ROLE_PROFILES[input.role].extensions) {
+      for (const ext of profile.extensions) {
         const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
         if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
       }
@@ -256,17 +302,23 @@ function publishSnapshot(tmp: string, profileDir: string, digest: string): void 
 }
 
 /**
- * 校验每个角色声明的扩展都存在于 BUILTIN_EXTENSIONS 注册池。
+ * 校验每个角色声明的扩展都在 BUILTIN_EXTENSIONS 注册池、声明的技能都在 BUILTIN_SKILLS 注册池。
  * 模块加载时调用，使配置错误在应用启动期 fail-fast，而非运行期才暴露。
+ * 技能 source 仅表示物理来源，不限制引用角色——任意角色可引用池中任意技能（含共享与他角私有技能）。
  */
 export function validateRoleProfiles(
   profiles: Record<TaskRole, RoleProfile> = ROLE_PROFILES,
-  pool: readonly string[] = BUILTIN_EXTENSIONS,
+  extensionPool: readonly string[] = BUILTIN_EXTENSIONS,
+  skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
 ): void {
-  const poolSet = new Set(pool);
+  const extSet = new Set(extensionPool);
+  const skillNames = new Set(skillPool.map((s) => s.name));
   for (const role of Object.keys(profiles) as TaskRole[]) {
     for (const ext of profiles[role].extensions) {
-      if (!poolSet.has(ext)) throw new Error(`角色 ${role} 引用了未注册的扩展：${ext}`);
+      if (!extSet.has(ext)) throw new Error(`角色 ${role} 引用了未注册的扩展：${ext}`);
+    }
+    for (const skill of profiles[role].skills) {
+      if (!skillNames.has(skill)) throw new Error(`角色 ${role} 引用了未注册的技能：${skill}`);
     }
   }
 }

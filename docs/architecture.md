@@ -168,6 +168,8 @@ Orchestrator ─────────────── task state, checkpoin
 
 四个角色均额外启用两个内部工具：`ai_devflow_interaction`（澄清/确认）与 `ai_devflow_report_result`（结构化完成）。
 
+技能由 `BUILTIN_SKILLS` 注册池集中登记，每条记录技能名与物理来源（`source`）：`source=<角色名>` 时文件在 `assets/profiles/<source>/skills/<name>/`，`source='shared'` 时文件在 `assets/profiles/shared/skills/<name>/`。任意角色可引用池中任意技能--含 `shared` 共享技能与其他角色的私有技能（跨角色引用）；`source` 仅表示物理文件位置，不限制引用方。`ProfileMaterializer.materialize` 把角色声明的全部技能物化进角色快照的 `skills/<name>/`（`source===role` 由角色目录整体拷贝带入，其余从对应来源目录拷贝）。模块加载期 `validateRoleProfiles` 校验角色声明的每个技能名均在注册池中，配置错误 fail-fast。
+
 ### 6.2 Pi 启动参数
 
 每个 attempt 按以下顺序构造参数：
