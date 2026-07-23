@@ -6,6 +6,25 @@ GitHub Release 正文与本文件对应小节保持一致。
 
 分组：新功能 / 问题修复 / 其他变更；自动过滤 merge、版本号提交等噪音，并附 compare 链接。
 
+## v0.2.2
+
+变更范围：[v0.2.1...v0.2.2](https://github.com/Aiden-FE/ai-devflow/compare/v0.2.1...v0.2.2)
+
+### 新功能
+- **scripts**：inspect:roles maintainer capability self-check（d6cb9a7）
+- **agents**：per-role extensions on RoleProfile, validated at load（3e41b2d）
+- **workspace**：open project folder via projects.openFolder IPC（81d34a8）
+- **workspace**：collapse requirement subtasks with >10 pagination（a4c76f5）
+- **provider**：drop allowInsecureLocal, allow any http/https baseURL（c4e439e）
+
+### 问题修复
+- **agents**：surface real root cause of Pi/provider failures（fe0f583）
+
+### 其他变更
+- add executed plan for workbench and maintainer improvements（ebaf527）
+- maintainer guide for role agent skills/extensions/tools（fc65da9）
+- design for workbench improvements and maintainer capability management（7e92641）
+
 ## v0.2.1
 
 变更范围：[v0.2.0...v0.2.1](https://github.com/Aiden-FE/ai-devflow/compare/v0.2.0...v0.2.1)
