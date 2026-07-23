@@ -94,6 +94,11 @@ export const en: Record<string, string> = {
   'ws.switchProject': 'Switch project',
   'ws.reqArchived': 'This requirement is archived',
   'ws.subtasksCount': '{n} subtasks',
+  'ws.subtasks.expand': 'Show subtasks ({n})',
+  'ws.subtasks.collapse': 'Hide subtasks',
+  'ws.subtasks.prev': 'Prev',
+  'ws.subtasks.next': 'Next',
+  'ws.subtasks.page': 'Page {cur}/{total}',
 
   // ---- requirement form ----
   'req.title': 'Title',

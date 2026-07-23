@@ -94,6 +94,11 @@ export const zh: Record<string, string> = {
   'ws.switchProject': '切换项目',
   'ws.reqArchived': '该需求已归档',
   'ws.subtasksCount': '{n} 个子任务',
+  'ws.subtasks.expand': '展开子任务（{n}）',
+  'ws.subtasks.collapse': '收起子任务',
+  'ws.subtasks.prev': '上一页',
+  'ws.subtasks.next': '下一页',
+  'ws.subtasks.page': '第 {cur}/{total} 页',
 
   // ---- 需求表单 ----
   'req.title': '标题',

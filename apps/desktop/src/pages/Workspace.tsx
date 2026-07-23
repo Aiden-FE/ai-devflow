@@ -18,7 +18,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2 } from 'lucide-react';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 
 export function WorkspacePage({ project, projects, onSwitchProject }: {
@@ -231,12 +231,23 @@ function TaskCard({ task, selected, onSelect }: { task: Task; selected: boolean;
   );
 }
 
-function ReqItem({ req, tasks, onCreateTask, onArchived }: {
+export function paginate<T>(items: T[], page: number, pageSize: number): { items: T[]; totalPages: number } {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = safePage * pageSize;
+  return { items: items.slice(start, start + pageSize), totalPages };
+}
+
+export function ReqItem({ req, tasks, onCreateTask, onArchived }: {
   req: Requirement; tasks: Task[]; onCreateTask: () => void; onArchived: () => void;
 }): React.ReactElement {
   const t = useT();
   const [error, setError] = useState<string | undefined>();
   const subtasks = tasks.filter((x) => x.requirementId === req.id);
+  const [collapsed, setCollapsed] = useState(subtasks.length > 0);
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 10;
+  const view = paginate(subtasks, page, PAGE_SIZE);
   const archive = async () => {
     setError(undefined);
     try { await api.requirements.archive(req.id); onArchived(); }
@@ -258,15 +269,30 @@ function ReqItem({ req, tasks, onCreateTask, onArchived }: {
         <Button size="sm" variant="ghost" onClick={onCreateTask} disabled={req.archived}><Plus className="h-3.5 w-3.5" /> {t('ws.createTask')}</Button>
         {!req.archived && <Button size="sm" variant="outline" onClick={archive}><Archive className="h-3.5 w-3.5" /> {t('ws.archiveReq')}</Button>}
       </div>
-      {/* 关联子任务（需求 -> 任务） */}
       {subtasks.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1 border-t border-border/60 pt-2">
-          {subtasks.map((s) => (
-            <div key={s.id} className="flex items-center gap-2 text-xs">
-              <StatusBadge status={s.status} />
-              <span className="truncate">{s.title}</span>
+        <div className="mt-2 border-t border-border/60 pt-2">
+          <button data-testid="req-subtasks-toggle" className="flex w-full items-center gap-1.5 text-xs font-medium text-muted-foreground"
+            onClick={() => { setCollapsed((c) => !c); setPage(0); }}>
+            {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            {collapsed ? t('ws.subtasks.expand', { n: subtasks.length }) : t('ws.subtasks.collapse')}
+          </button>
+          {!collapsed && (
+            <div className="mt-1.5 flex flex-col gap-1">
+              {view.items.map((s) => (
+                <div key={s.id} data-testid="req-subtask-title" className="flex items-center gap-2 text-xs">
+                  <StatusBadge status={s.status} />
+                  <span className="truncate">{s.title}</span>
+                </div>
+              ))}
+              {view.totalPages > 1 && (
+                <div className="mt-1 flex items-center justify-between text-[11px] text-muted-foreground">
+                  <Button size="sm" variant="ghost" disabled={page <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>{t('ws.subtasks.prev')}</Button>
+                  <span>{t('ws.subtasks.page', { cur: Math.min(page, view.totalPages - 1) + 1, total: view.totalPages })}</span>
+                  <Button size="sm" variant="ghost" disabled={page >= view.totalPages - 1} onClick={() => setPage((p) => Math.min(view.totalPages - 1, p + 1))}>{t('ws.subtasks.next')}</Button>
+                </div>
+              )}
             </div>
-          ))}
+          )}
         </div>
       )}
       {error && <div className="mt-1.5 text-xs text-destructive">{error}</div>}
