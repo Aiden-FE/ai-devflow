@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createPiAiService,
   createProductionTextExecutor,
+  chatSkillsFor,
+  materializeChatProfile,
+  buildChatPlan,
 } from '../pi-ai.js';
 import type {
   ChatWorkload,
@@ -211,5 +214,36 @@ describe('production Pi text executor', () => {
       { onlyProviderId: 'p1' },
     );
     expect(harness.routerOptions).toEqual([{ onlyProviderId: 'p1' }]);
+  });
+});
+
+describe('requirement brainstorming skill loading', () => {
+  it('chatSkillsFor loads brainstorming only for requirement_chat', () => {
+    expect(chatSkillsFor('requirement_chat')).toEqual(['brainstorming']);
+    expect(chatSkillsFor('requirement_proposal')).toEqual([]);
+    expect(chatSkillsFor('task_chat')).toEqual([]);
+    expect(chatSkillsFor('task_proposal')).toEqual([]);
+  });
+
+  it('materializeChatProfile copies brainstorming skill into the profile dir when requested', () => {
+    const sessionDir = mkdtempSync(join(tmpdir(), 'pi-ai-skill-'));
+    const profileDir = materializeChatProfile(sessionDir, 'sys', ['brainstorming']);
+    expect(existsSync(join(profileDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
+    // 不请求技能时不拷入
+    const emptyDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-skill-')), 'sys');
+    expect(existsSync(join(emptyDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(false);
+  });
+
+  it('buildChatPlan adds --skill for requirement_chat and omits it for task_chat', () => {
+    const sessionDir = mkdtempSync(join(tmpdir(), 'pi-ai-plan-'));
+    const profileDir = materializeChatProfile(sessionDir, 'sys', ['brainstorming']);
+    const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, profileDir, 'requirement_chat', 'hi', '/usr/bin');
+    const skillIdx = reqPlan.args.indexOf('--skill');
+    expect(skillIdx).toBeGreaterThan(-1);
+    expect(reqPlan.args[skillIdx + 1]).toMatch(/brainstorming[\\/]SKILL\.md$/);
+
+    const taskProfileDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-plan-')), 'sys');
+    const taskPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, taskProfileDir, 'task_chat', 'hi', '/usr/bin');
+    expect(taskPlan.args.includes('--skill')).toBe(false);
   });
 });

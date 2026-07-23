@@ -2,8 +2,9 @@
 // 所有 AI 沟通（任务对话、需求对话、任务草稿、需求草稿）都通过 ProviderRouter 路由到内置 Pi，
 // 在主进程内以 JSON 模式.spawn 一个独立 Pi attempt；不依赖 ai-sdk，不读取旧 ai_provider 凭证。
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
 import { redactText, validateProposalDag } from '@ai-devflow/core';
 import { z } from 'zod';
@@ -22,6 +23,15 @@ import {
 } from '@ai-devflow/agents';
 import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_TASK_SYSTEM } from './pi-ai-prompts.js';
 import { fetchCompatibleModels } from './provider-models.js';
+
+/** 对话 workload -> 加载的技能名列表（从 assets/chat/skills/<name>/ 读取并物化进 profileDir）。 */
+export function chatSkillsFor(workload: ChatWorkload): string[] {
+  // 仅需求对话加载 brainstorming：草稿生成是一次性结构化提取，不适合对话式提问范式。
+  return workload === 'requirement_chat' ? ['brainstorming'] : [];
+}
+
+/** 对话路径技能资源根目录（pi-ai.ts 同级 assets/chat）。 */
+const CHAT_ASSETS_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'chat');
 
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
@@ -136,12 +146,12 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
     .join('');
 }
 
-function buildChatPlan(
+export function buildChatPlan(
   entry: string,
   route: ProviderRoute,
   sessionDir: string,
   profileDir: string,
-  _workload: ChatWorkload,
+  workload: ChatWorkload,
   messagesText: string,
   projectToolPath: string,
 ) {
@@ -158,6 +168,12 @@ function buildChatPlan(
     '--no-context-files',
     '--no-approve',
     '--no-tools',
+  ];
+  // --no-skills 关闭自动发现后，显式加载该 workload 声明的技能（requirement_chat 加 brainstorming）。
+  for (const skill of chatSkillsFor(workload)) {
+    args.push('--skill', join(profileDir, 'skills', skill, 'SKILL.md'));
+  }
+  args.push(
     '--provider',
     route.providerName,
     '--model',
@@ -169,7 +185,7 @@ function buildChatPlan(
     '--name',
     name,
     messagesText,
-  ];
+  );
 
   const isolatedHome = join(sessionDir, 'home');
   const tempDir = join(sessionDir, 'tmp');
@@ -208,11 +224,14 @@ function buildChatPlan(
   return { command: process.execPath, args, env, initialMessage: messagesText, modelsJson };
 }
 
-function materializeChatProfile(sessionDir: string, systemPrompt: string): string {
+export function materializeChatProfile(sessionDir: string, systemPrompt: string, skills: string[] = []): string {
   const profileDir = join(sessionDir, 'pi-config');
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(join(profileDir, 'settings.json'), CHAT_SETTINGS_JSON);
   writeFileSync(join(profileDir, 'SYSTEM.md'), systemPrompt);
+  for (const name of skills) {
+    cpSync(join(CHAT_ASSETS_ROOT, 'skills', name), join(profileDir, 'skills', name), { recursive: true });
+  }
   return profileDir;
 }
 
@@ -227,7 +246,8 @@ export async function executeTextOnRoute(
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
   mkdirSync(sessionDir, { recursive: true });
   const systemPrompt = systemPromptFor(workload);
-  const profileDir = materializeChatProfile(sessionDir, systemPrompt);
+  const skills = chatSkillsFor(workload);
+  const profileDir = materializeChatProfile(sessionDir, systemPrompt, skills);
   const messagesText = formatMessages(messages);
   const plan = buildChatPlan(entry, route, sessionDir, profileDir, workload, messagesText, deps.projectToolPath);
   if (plan.modelsJson) {
