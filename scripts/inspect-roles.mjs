@@ -11,16 +11,19 @@ const PROFILES_SRC = join(here, '..', 'packages', 'agents', 'src', 'profiles.ts'
 
 /**
  * 纯函数：把角色能力格式化为文本或 JSON。供测试直接调用，不触发 esbuild。
- * @param {Record<string, {role:string;version:number;tools:string[];excludedTools:string[];skills:string[];extensions:string[];timeoutMs:number}>} profiles
+ * @param {Record<string, {role:string;version:number;tools:string[];excludedTools:string[];skills:string[];extensions:string[];timeoutMs:number;systemPromptFile?:string}>} profiles
  * @param {string[]} internalTools
  * @param {string[]} builtinExtensions  注册池（仅用于注释，不改变输出）
- * @param {{json?:boolean}} [opts]
+ * @param {{json?:boolean; skillPool?: {name:string;source:string}[]}} [opts]
+ *   skillPool 提供时，输出每个技能的物理来源（source=角色名或 'shared'），便于调试共享/跨角色借用技能。
  */
 export function formatRoleCapabilities(profiles, internalTools, builtinExtensions, opts = {}) {
+  const skillByName = new Map((opts.skillPool ?? []).map((s) => [s.name, s]));
   const roles = Object.values(profiles);
   const view = Object.fromEntries(roles.map((p) => {
     const tools = [...p.tools, ...internalTools];
-    return [p.role, { version: p.version, tools, excludedTools: p.excludedTools, skills: p.skills, extensions: p.extensions, timeoutMs: p.timeoutMs, systemPromptFile: p.systemPromptFile }];
+    const skillSources = p.skills.map((name) => skillByName.get(name) ?? { name, source: '?' });
+    return [p.role, { version: p.version, tools, excludedTools: p.excludedTools, skills: p.skills, skillSources, extensions: p.extensions, timeoutMs: p.timeoutMs, systemPromptFile: p.systemPromptFile }];
   }));
   if (opts.json) return JSON.stringify(view, null, 2);
   const lines = [`# 内置角色生效能力（internal tools: ${internalTools.join(', ')}）`, ''];
@@ -29,6 +32,11 @@ export function formatRoleCapabilities(profiles, internalTools, builtinExtension
     lines.push(`- tools: ${[...p.tools, ...internalTools].join(', ')}`);
     if (p.excludedTools.length) lines.push(`- excludedTools: ${p.excludedTools.join(', ')}`);
     lines.push(`- skills: ${p.skills.join(', ')}`);
+    const sources = p.skills.map((name) => {
+      const entry = skillByName.get(name);
+      return entry ? `${name}(${entry.source})` : `${name}(?)`;
+    });
+    lines.push(`- skillSources: ${sources.join(', ')}`);
     lines.push(`- extensions: ${p.extensions.join(', ')}`);
     lines.push(`- timeoutMs: ${p.timeoutMs}`);
     lines.push('');
@@ -38,7 +46,7 @@ export function formatRoleCapabilities(profiles, internalTools, builtinExtension
 
 async function loadProfiles() {
   const entry = join(mkdtempSync(join(tmpdir(), 'inspect-roles-')), 'entry.mjs');
-  writeFileSync(entry, `export { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS } from '${PROFILES_SRC.replace(/\\/g, '/')}';\n`);
+  writeFileSync(entry, `export { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } from '${PROFILES_SRC.replace(/\\/g, '/')}';\n`);
   const result = await build({
     entryPoints: [entry],
     bundle: true,
@@ -54,9 +62,9 @@ async function loadProfiles() {
 }
 
 async function main() {
-  const { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS } = await loadProfiles();
+  const { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } = await loadProfiles();
   const json = process.argv.includes('--json');
-  process.stdout.write(formatRoleCapabilities(ROLE_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { json }) + '\n');
+  process.stdout.write(formatRoleCapabilities(ROLE_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { json, skillPool: [...BUILTIN_SKILLS] }) + '\n');
 }
 
 const invokedDirectly = import.meta.url === `file://${process.argv[1]}`;
