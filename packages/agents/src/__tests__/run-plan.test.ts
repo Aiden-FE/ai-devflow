@@ -58,6 +58,16 @@ describe('buildPiRunPlan', () => {
     expect(plan.env.PI_TELEMETRY).toBe('0');
   });
 
+  it('passes --extension args from the role profile extensions', () => {
+    const plan = buildPiRunPlan(makeRunPlanFixture({ role: 'coder', executionId: 'e1', attemptId: 'a1' }));
+    const profileDir = `/userData/pi-runtime/profiles/digest/coder`;
+    for (const ext of ROLE_PROFILES.coder.extensions) {
+      expect(plan.args).toContain(`${profileDir}/extensions/${ext}.ts`);
+    }
+    // 不含未声明的扩展
+    expect(plan.args).not.toContain(`${profileDir}/extensions/does-not-exist.ts`);
+  });
+
   it('gives concurrent attempts different session directories', () => {
     const one = buildPiRunPlan(makeRunPlanFixture({ role: 'tester', executionId: 'e1', attemptId: 'a1' }));
     const two = buildPiRunPlan(makeRunPlanFixture({ role: 'tester', executionId: 'e1', attemptId: 'a2' }));

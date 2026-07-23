@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ProfileMaterializer, ROLE_PROFILES } from '../profiles.js';
+import { ProfileMaterializer, ROLE_PROFILES, BUILTIN_EXTENSIONS, validateRoleProfiles } from '../profiles.js';
 
 const ASSETS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../assets/profiles');
 
@@ -96,5 +96,28 @@ describe('ProfileMaterializer', () => {
     );
     expect(new Set(dirs).size).toBe(4);
     for (const d of dirs) expect(d).toMatch(/\/(planner|coder|reviewer|tester)$/);
+  });
+
+  it('materializes exactly the extensions declared by the role profile', () => {
+    const base = mkdtempSync(join(tmpdir(), 'profiles-'));
+    const m = new ProfileMaterializer(ASSETS_ROOT, base);
+    const { profileDir } = m.materialize({
+      role: 'reviewer', providerId: 'p1', providerKind: 'openai', providerRevision: 1,
+      providerName: 'openai', models: ['m'],
+    });
+    const extFiles = readdirSync(join(profileDir, 'extensions')).sort();
+    expect(extFiles).toEqual(ROLE_PROFILES.reviewer.extensions.map((e) => `${e}.ts`).sort());
+  });
+});
+
+describe('validateRoleProfiles', () => {
+  it('passes for the built-in profiles', () => {
+    expect(() => validateRoleProfiles()).not.toThrow();
+  });
+  it('rejects a role that references an unregistered extension', () => {
+    expect(() => validateRoleProfiles(
+      { ...ROLE_PROFILES, coder: { ...ROLE_PROFILES.coder, extensions: ['event-bridge', 'ghost'] } },
+      BUILTIN_EXTENSIONS,
+    )).toThrow(/未注册的扩展/);
   });
 });

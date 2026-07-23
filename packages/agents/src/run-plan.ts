@@ -11,7 +11,6 @@ import type { ProviderKind, TaskRole } from '@ai-devflow/core';
 import type { ProviderRoute } from './provider-router.js';
 import {
   ACTIVE_API_KEY_ENV,
-  BUILTIN_EXTENSIONS,
   ROLE_PROFILES,
   buildCompatibleModelsJson,
   isCompatibleKind,
@@ -82,7 +81,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
   // --print：非交互一次性执行（处理 prompt 后退出），避免 supervised 子进程进入 TUI。
   // 该开关已纳入设计 §7.5 参数契约（非交互 JSON 执行所需），与 §7.5 列表一致，非偏差。
   const args: string[] = [input.runtimeEntry, '--print', '--mode', 'json', '--no-extensions'];
-  for (const ext of BUILTIN_EXTENSIONS) {
+  for (const ext of profile.extensions) {
     args.push('--extension', `${input.profileDir}/extensions/${ext}.ts`);
   }
   args.push('--no-skills');

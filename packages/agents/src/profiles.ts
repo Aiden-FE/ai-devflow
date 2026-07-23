@@ -21,11 +21,11 @@ import type { ProviderKind, TaskRole } from '@ai-devflow/core';
  * 角色 profile（设计 §7.1）。
  *
  * 与设计 §7.1 契约的等价取舍（显式注明，非偏差）：
- * - `extensions` 未列入本接口：四角色共用同一组仓库内维护的内置扩展，已抽到模块常量
- *   `BUILTIN_EXTENSIONS`（§7.4），不随角色变化，故不再逐角色重复声明。
+ * - `extensions` 逐角色声明启用子集：名称取自模块常量 `BUILTIN_EXTENSIONS`（§7.4 注册池），
+ *   由 `validateRoleProfiles` 在模块加载期校验，避免引用池外扩展。
  * - `providerModels` 未列入本接口：模型由用户在 ProviderConfig 中配置（defaultModel/
  *   workloadModels，§7.2），由 ProviderRouter 按 workload 解析取用，不挂在单角色 profile 上。
- * RoleProfile 只保留角色间确有差异的维度：工具清单、排除工具、skills、超时。
+ * RoleProfile 保留角色间可调维度：工具清单、排除工具、skills、扩展、超时。
  */
 export interface RoleProfile {
   role: TaskRole;
@@ -36,13 +36,15 @@ export interface RoleProfile {
   excludedTools: string[];
   /** 内置 skills（<profile>/skills/<name>/SKILL.md）。 */
   skills: string[];
+  /** 该角色启用的扩展（名称取自 BUILTIN_EXTENSIONS 注册池）。 */
+  extensions: string[];
   timeoutMs: number;
 }
 
 /** 两个内部工具：澄清/确认 与 结构化完成。对四角色都必须启用，非用户可配置（§7.5）。 */
 export const INTERNAL_TOOLS = ['ai_devflow_interaction', 'ai_devflow_report_result'] as const;
 
-/** 四个随仓库维护的内置扩展（Task 7 提供源文件）。 */
+/** 可用扩展注册池：shared/extensions/ 下维护的内置扩展名。各角色通过 RoleProfile.extensions 声明启用子集。 */
 export const BUILTIN_EXTENSIONS = [
   'event-bridge',
   'execution-policy',
@@ -55,24 +57,28 @@ export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
     role: 'planner', version: 1, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'grep', 'find', 'ls', 'write', 'edit'], excludedTools: ['bash'],
     skills: ['requirements-analysis', 'design-writing', 'implementation-planning'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
     timeoutMs: 20 * 60_000,
   },
   coder: {
     role: 'coder', version: 1, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'], excludedTools: [],
     skills: ['test-driven-development', 'systematic-debugging', 'verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
     timeoutMs: 45 * 60_000,
   },
   reviewer: {
     role: 'reviewer', version: 1, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'bash', 'grep', 'find', 'ls'], excludedTools: ['edit', 'write'],
     skills: ['code-review', 'security-review', 'regression-review'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
     timeoutMs: 15 * 60_000,
   },
   tester: {
     role: 'tester', version: 1, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'], excludedTools: [],
     skills: ['test-design', 'failure-analysis', 'acceptance-verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
     timeoutMs: 30 * 60_000,
   },
 };
@@ -166,7 +172,7 @@ export class ProfileMaterializer {
       cpSync(join(this.assetsRoot, input.role), tmp, { recursive: true });
       const extDir = join(tmp, 'extensions');
       mkdirSync(extDir, { recursive: true });
-      for (const ext of BUILTIN_EXTENSIONS) {
+      for (const ext of ROLE_PROFILES[input.role].extensions) {
         const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
         if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
       }
@@ -248,3 +254,20 @@ function publishSnapshot(tmp: string, profileDir: string, digest: string): void 
     throw new Error('角色配置快照发布冲突且获胜内容无效');
   }
 }
+
+/**
+ * 校验每个角色声明的扩展都存在于 BUILTIN_EXTENSIONS 注册池。
+ * 模块加载时调用，使配置错误在应用启动期 fail-fast，而非运行期才暴露。
+ */
+export function validateRoleProfiles(
+  profiles: Record<TaskRole, RoleProfile> = ROLE_PROFILES,
+  pool: readonly string[] = BUILTIN_EXTENSIONS,
+): void {
+  const poolSet = new Set(pool);
+  for (const role of Object.keys(profiles) as TaskRole[]) {
+    for (const ext of profiles[role].extensions) {
+      if (!poolSet.has(ext)) throw new Error(`角色 ${role} 引用了未注册的扩展：${ext}`);
+    }
+  }
+}
+validateRoleProfiles();
