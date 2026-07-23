@@ -402,7 +402,6 @@ function ProviderSection(): React.ReactElement {
   const [displayName, setDisplayName] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [baseURL, setBaseURL] = useState('');
-  const [allowLocal, setAllowLocal] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [defaultModel, setDefaultModel] = useState('');
   const [workloadModels, setWorkloadModels] = useState<Partial<Record<ModelRoleKey, string>>>({});
@@ -416,19 +415,19 @@ function ProviderSection(): React.ReactElement {
   const startAdd = () => {
     setReentry(false);
     setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
-    setBaseURL(''); setAllowLocal(false); setEnabled(true);
+    setBaseURL(''); setEnabled(true);
     setDefaultModel(''); setWorkloadModels({}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const startReentry = () => {
     setReentry(true);
     setEditing(undefined); setKind('openai_compatible'); setDisplayName(''); setApiKey('');
-    setBaseURL(''); setAllowLocal(false); setEnabled(true);
+    setBaseURL(''); setEnabled(true);
     setDefaultModel(''); setWorkloadModels({}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const startEdit = (p: ProviderSummary) => {
     setReentry(false);
     setEditing(p); setKind(p.kind); setDisplayName(p.displayName); setApiKey('');
-    setBaseURL(p.baseURL ?? ''); setAllowLocal(false); setEnabled(p.enabled);
+    setBaseURL(p.baseURL ?? ''); setEnabled(p.enabled);
     setDefaultModel(p.defaultModel ?? ''); setWorkloadModels(p.workloadModels ?? {}); setAvailableModels([]); setModelRefreshed(false); setError(undefined); setOpen(true);
   };
   const save = async () => {
@@ -448,7 +447,6 @@ function ProviderSection(): React.ReactElement {
         authType: 'api_key',
         apiKey: apiKey || undefined,
         baseURL: baseURL || undefined,
-        allowInsecureLocal: allowLocal,
         defaultModel: defaultModel.trim() || undefined,
         workloadModels: workloadEntries.length > 0 ? Object.fromEntries(workloadEntries) as Record<ModelRoleKey, string> : undefined,
         revision: editing?.revision ?? 1,
@@ -558,7 +556,6 @@ function ProviderSection(): React.ReactElement {
                   <Input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://host/v1" />
                   <span className="text-[11px] text-muted-foreground">{t('settings.providers.baseURL.hint')}</span>
                 </div>
-                <label className="flex items-center gap-2 text-xs"><Checkbox checked={allowLocal} onCheckedChange={(v) => setAllowLocal(v === true)} />{t('settings.providers.local')}</label>
               </>
             )}
             <label className="flex items-center gap-2 text-xs"><Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} />{t('settings.providers.enabled')}</label>

@@ -54,16 +54,6 @@ function normalizedLegacyBaseURL(value: string | undefined): string | undefined 
   return value.trim().replace(/\/+$/, '');
 }
 
-function legacyAllowsLocalHTTP(baseURL: string | undefined): boolean {
-  if (!baseURL) return false;
-  try {
-    const url = new URL(baseURL);
-    return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
 export class ProviderStore {
   constructor(
     private credentials: ProviderCredentialSink,
@@ -243,7 +233,6 @@ export class ProviderStore {
       priority: 0,
       authType: 'api_key',
       baseURL: customURL ? legacyBaseURL : undefined,
-      allowInsecureLocal: legacyAllowsLocalHTTP(legacyBaseURL),
       revision: 1,
     });
     this.credentials.transaction(() => {

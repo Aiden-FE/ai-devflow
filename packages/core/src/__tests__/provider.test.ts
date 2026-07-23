@@ -6,7 +6,7 @@ describe('normalizeProviderInput', () => {
     const result = normalizeProviderInput({
       id: 'p1', kind: 'openai_compatible', displayName: 'Dev', enabled: true,
       priority: 2, authType: 'api_key', apiKey: 'secret', baseURL: 'https://gateway.example/v1',
-      allowInsecureLocal: false, revision: 4, defaultModel: 'gpt-default',
+      revision: 4, defaultModel: 'gpt-default',
     });
     expect(result.config).toEqual({
       id: 'p1', kind: 'openai_compatible', displayName: 'Dev', enabled: true,
@@ -23,16 +23,21 @@ describe('normalizeProviderInput', () => {
     })).toThrow(/用户名或密码/);
   });
 
-  it('requires an explicit opt-in for loopback HTTP', () => {
+  it('accepts http and https base URLs without an explicit opt-in', () => {
+    const mk = (baseURL: string) => normalizeProviderInput({
+      id: 'p1', kind: 'openai_compatible', displayName: 'Local', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'secret', baseURL, revision: 1, defaultModel: 'gpt-default',
+    }).config.baseURL;
+    expect(mk('http://127.0.0.1:11434/v1')).toBe('http://127.0.0.1:11434/v1');
+    expect(mk('http://192.168.1.10/v1')).toBe('http://192.168.1.10/v1');
+    expect(mk('https://gateway.example/v1')).toBe('https://gateway.example/v1');
+  });
+
+  it('rejects non-http(s) protocols', () => {
     expect(() => normalizeProviderInput({
-      id: 'p1', kind: 'openai_compatible', displayName: 'Local', enabled: true,
-      priority: 0, authType: 'api_key', apiKey: 'secret', baseURL: 'http://127.0.0.1:11434/v1', revision: 1,
-    })).toThrow(/本地 HTTP/);
-    expect(normalizeProviderInput({
-      id: 'p1', kind: 'openai_compatible', displayName: 'Local', enabled: true,
-      priority: 0, authType: 'api_key', apiKey: 'secret', baseURL: 'http://127.0.0.1:11434/v1',
-      allowInsecureLocal: true, revision: 1, defaultModel: 'gpt-default',
-    }).config.baseURL).toBe('http://127.0.0.1:11434/v1');
+      id: 'p1', kind: 'openai_compatible', displayName: 'X', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'secret', baseURL: 'ftp://host/x', revision: 1,
+    })).toThrow(/http 或 https/);
   });
 
   it('rejects query or fragment in the Base URL', () => {

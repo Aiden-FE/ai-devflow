@@ -69,8 +69,6 @@ export interface ProviderConfig {
 /** Provider 保存输入（携带可选明文 apiKey；归一化后明文只在 secret 字段返回，不进入 config）。 */
 export interface ProviderInput extends Omit<ProviderConfig, 'credentialRef'> {
   apiKey?: string;
-  /** 显式允许本地 HTTP（127.0.0.1 / [::1] / localhost）。 */
-  allowInsecureLocal?: boolean;
 }
 
 /** 脱敏后的提供商摘要（IPC 返回；不含 credentialRef/密文/明文）。 */
@@ -123,9 +121,6 @@ export interface ProviderAuthenticator {
 /** 需要用户提供 Base URL 的兼容网关类型。 */
 const COMPATIBLE_KINDS: ReadonlySet<ProviderKind> = new Set(['openai_compatible', 'anthropic_compatible']);
 
-/** 显式「本地兼容服务」允许的 http 主机。 */
-const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
-
 /** 去除模型名首尾空白；空字符串归一化为 undefined。 */
 function trimModel(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -147,7 +142,7 @@ function normalizeWorkloadModels(input?: Partial<Record<ModelRoleKey, string>>):
  * 归一化 Provider 保存输入并校验（§8.1/§8.3）。
  * - 首版仅接受 `authType: 'api_key'`。
  * - compatible 类型必须提供 Base URL；标准提供商不得覆盖 Base URL。
- * - Base URL 默认仅 https；http 仅限显式 allowInsecureLocal 的 loopback 主机。
+ * - Base URL 接受 http 或 https（http 会明文传输 API Key，由用户承担）。
  * - 拒绝 URL 用户名/密码、query、fragment。
  * 返回的 `config` 不含明文密钥（credentialRef 指向安全存储）；明文只在 `secret` 字段返回。
  */
@@ -160,9 +155,8 @@ export function normalizeProviderInput(input: ProviderInput): { config: Provider
   let baseURL: string | undefined;
   if (input.baseURL) {
     const url = new URL(input.baseURL);
-    const local = LOCAL_HOSTS.includes(url.hostname);
-    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local && input.allowInsecureLocal === true)) {
-      throw new Error(local ? '本地 HTTP 必须显式允许' : 'Base URL 必须使用 HTTPS');
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error('Base URL 必须使用 http 或 https');
     }
     if (url.username || url.password) throw new Error('Base URL 禁止包含用户名或密码');
     if (url.hash || url.search) throw new Error('Base URL 禁止包含 query 或 fragment');
