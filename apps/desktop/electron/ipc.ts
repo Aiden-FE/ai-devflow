@@ -488,7 +488,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       return;
     }
     try {
-      await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
+      const fullText = await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
         mode: payload.mode,
         context: payload.context,
         onToolResult: (toolName, payloadDraft) => {
@@ -500,6 +500,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
           }
         },
       });
+      sendAi({ type: 'done', sessionId: payload.sessionId, fullText });
     } catch (e) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
     }

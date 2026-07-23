@@ -7,11 +7,11 @@ import { execFileSync } from 'node:child_process';
 // Mock 'electron'：捕获 ipcMain.handle 注册的处理器，其余为 no-op。
 const { openPathMock } = vi.hoisted(() => ({ openPathMock: vi.fn(async () => '') }));
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
-const syncHandlers = new Map<string, (e: unknown) => unknown>();
+const syncHandlers = new Map<string, (...args: unknown[]) => unknown>();
 vi.mock('electron', () => ({
   ipcMain: {
     handle: (ch: string, fn: (...args: unknown[]) => unknown) => handlers.set(ch, fn),
-    on: (ch: string, fn: (e: unknown) => unknown) => syncHandlers.set(ch, fn),
+    on: (ch: string, fn: (...args: unknown[]) => unknown) => syncHandlers.set(ch, fn),
   },
   ipcRenderer: { sendSync: () => 'dark' },
   dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
@@ -36,7 +36,7 @@ import { encryptSecret, decryptSecret } from '../credentials.js';
 import { registerIpc, deriveProjectName } from '../ipc.js';
 import type { Services } from '../services.js';
 import type { Updater } from '../updater.js';
-import type { StreamEvent } from '../api.js';
+import type { StreamEvent, AiStreamEvent } from '../api.js';
 import type { DatabaseSync } from '@ai-devflow/persistence';
 import { now } from '@ai-devflow/core';
 import { ProviderStore } from '../provider-store.js';
@@ -56,6 +56,7 @@ let repos: Repositories;
 let services: Services;
 let workdir: string;
 let sent: StreamEvent[];
+let sentAi: AiStreamEvent[];
 
 function buildServices() {
   // Pi-only 编排器使用单一 AgentRunner；reviewer 与 dev 均产出含 PASS 结论的 done（供审查解析）。
@@ -106,6 +107,7 @@ beforeEach(() => {
   repos = createRepositories(db);
   workdir = mkdtempSync(join(tmpdir(), 'aidf-ipc-'));
   sent = [];
+  sentAi = [];
   handlers.clear();
   const built = buildServices();
   services = {
@@ -121,7 +123,7 @@ beforeEach(() => {
     decryptSecret,
     updater: noopUpdater,
   };
-  registerIpc(services, (e) => sent.push(e), () => {});
+  registerIpc(services, (e) => sent.push(e), (e) => sentAi.push(e));
 });
 
 afterEach(() => {
@@ -133,6 +135,10 @@ afterEach(() => {
 // 用 Promise.resolve().then() 包装，把处理器同步抛错转为 rejected promise（与 Electron 行为一致）。
 const call = (ns: string, method: string, ...args: unknown[]) =>
   Promise.resolve().then(() => handlers.get(`ai-devflow:${ns}:${method}`)!({}, ...args));
+
+// 触发 ipcMain.on 注册的事件处理器（ai:chat 等流式事件）。传入伪 event 对象 + payload。
+const sendEvent = (ns: string, method: string, ...args: unknown[]): unknown =>
+  syncHandlers.get(`ai-devflow:${ns}:${method}`)!({}, ...args);
 
 describe('typed IPC wiring', () => {
   it('projects.create validates and persists', async () => {
@@ -331,6 +337,21 @@ describe('typed IPC wiring', () => {
 
   it('ai.proposeRequirement throws when no provider configured', async () => {
     await expect(call('ai', 'proposeRequirement', [])).rejects.toThrow(/尚未配置/);
+  });
+
+  it('ai.chat emits done event with full text after streaming completes', async () => {
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
+      defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
+    } as never);
+    sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement' });
+    // fakeExecutor 返回 'hello'；等微任务让 async 处理器完成
+    await new Promise((r) => setTimeout(r, 10));
+    const types = sentAi.map((e) => e.type);
+    expect(types).toContain('done');
+    const done = sentAi.find((e) => e.type === 'done') as { fullText: string } | undefined;
+    expect(done?.fullText).toBe('hello');
   });
 
   it('tasks.listAll returns all tasks', async () => {
