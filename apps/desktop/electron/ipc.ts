@@ -1,8 +1,8 @@
 // IPC 处理器注册。每个 ns:method 对应一个显式通道；不存在任意命令执行入口。
 // 安全：路径校验、状态门禁、敏感字段加密落盘。
-import { ipcMain, dialog, BrowserWindow, nativeTheme } from 'electron';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { ipcMain, dialog, BrowserWindow, nativeTheme, shell } from 'electron';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
@@ -103,6 +103,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
         const path = res.filePaths[0]!;
         return { path, name: deriveProjectName(path) };
       });
+  });
+  ipcMain.handle(channel('projects', 'openFolder'), async (_e, projectId: string) => {
+    const project = repos.projects.get(projectId);
+    if (!project?.path || !isAbsolute(project.path) || !existsSync(project.path)) {
+      return { ok: false, error: '项目路径不可用' };
+    }
+    const err = await shell.openPath(project.path);
+    return err ? { ok: false, error: err } : { ok: true };
   });
   ipcMain.handle(channel('projects', 'createAtPath'), (_e, input: CreateProjectAtInput) => {
     const nv = validateProjectName(input.name);

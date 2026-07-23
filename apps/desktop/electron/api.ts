@@ -103,6 +103,8 @@ export interface DesktopApi {
     create(input: CreateProjectInput): Promise<Project>;
     /** 选择本地文件夹（导入已有仓库）。 */
     pickFolder(): Promise<PickedFolder | null>;
+    /** 在系统文件管理器中打开项目所在文件夹。 */
+    openFolder(id: string): Promise<{ ok: boolean; error?: string }>;
     /** 在指定父目录下新建项目目录，可选 git init。 */
     createAtPath(input: CreateProjectAtInput): Promise<Project>;
     update(project: Project): Promise<void>;

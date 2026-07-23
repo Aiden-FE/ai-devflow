@@ -99,6 +99,8 @@ export const en: Record<string, string> = {
   'ws.subtasks.prev': 'Prev',
   'ws.subtasks.next': 'Next',
   'ws.subtasks.page': 'Page {cur}/{total}',
+  'ws.openFolder': 'Reveal in folder',
+  'ws.openFolder.fail': 'Failed to open folder',
 
   // ---- requirement form ----
   'req.title': 'Title',

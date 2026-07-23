@@ -99,6 +99,8 @@ export const zh: Record<string, string> = {
   'ws.subtasks.prev': '上一页',
   'ws.subtasks.next': '下一页',
   'ws.subtasks.page': '第 {cur}/{total} 页',
+  'ws.openFolder': '在文件夹中打开',
+  'ws.openFolder.fail': '打开文件夹失败',
 
   // ---- 需求表单 ----
   'req.title': '标题',

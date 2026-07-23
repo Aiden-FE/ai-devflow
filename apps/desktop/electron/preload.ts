@@ -22,6 +22,7 @@ const api: DesktopApi = {
     list: () => invoke('projects', 'list')(),
     create: (input) => invoke('projects', 'create')(input),
     pickFolder: () => invoke('projects', 'pickFolder')(),
+    openFolder: (id: string) => invoke('projects', 'openFolder')(id),
     createAtPath: (input) => invoke('projects', 'createAtPath')(input),
     update: (p) => invoke('projects', 'update')(p),
     delete: (id) => invoke('projects', 'delete')(id),

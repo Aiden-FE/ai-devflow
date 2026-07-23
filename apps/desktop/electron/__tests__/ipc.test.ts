@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 // Mock 'electron'：捕获 ipcMain.handle 注册的处理器，其余为 no-op。
+const { openPathMock } = vi.hoisted(() => ({ openPathMock: vi.fn(async () => '') }));
 const handlers = new Map<string, (...args: unknown[]) => unknown>();
 const syncHandlers = new Map<string, (e: unknown) => unknown>();
 vi.mock('electron', () => ({
@@ -25,7 +26,7 @@ vi.mock('electron', () => ({
   BrowserWindow: class { static fromWebContents() { return null; } },
   session: { defaultSession: { webRequest: { onHeadersReceived() {} } } },
   protocol: { handle() {} },
-  shell: { openExternal() {} },
+  shell: { openExternal() {}, openPath: openPathMock },
 }));
 
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
@@ -152,6 +153,18 @@ describe('typed IPC wiring', () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+
+  it('projects.openFolder opens the resolved project path and rejects unknown ids', async () => {
+    openPathMock.mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-open-'));
+    const p = await call('projects', 'create', { name: 'P', path: dir, defaultBranch: 'main' }) as { id: string };
+    const r = (await call('projects', 'openFolder', p.id)) as { ok: boolean; error?: string };
+    expect(r.ok).toBe(true);
+    expect(openPathMock).toHaveBeenCalledWith(dir);
+    const bad = (await call('projects', 'openFolder', 'no-such-id')) as { ok: boolean };
+    expect(bad.ok).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('tasks.updateStatus enforces gate (rejects backlog->archived)', async () => {

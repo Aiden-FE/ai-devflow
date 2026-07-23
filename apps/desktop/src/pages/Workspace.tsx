@@ -18,7 +18,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 
 export function WorkspacePage({ project, projects, onSwitchProject }: {
@@ -27,6 +27,7 @@ export function WorkspacePage({ project, projects, onSwitchProject }: {
   onSwitchProject: (id: string) => void;
 }): React.ReactElement {
   const t = useT();
+  const [error, setError] = useState<string | undefined>();
   const activeProject = project ?? projects[0];
   const iterationsQ = useAsync(() => (activeProject ? api.iterations.list(activeProject.id) : Promise.resolve([])), [activeProject?.id]);
   const [iterationId, setIterationId] = useState<string | undefined>(undefined);
@@ -46,10 +47,24 @@ export function WorkspacePage({ project, projects, onSwitchProject }: {
             {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
           </SelectContent>
         </Select>
-        <div className="text-xs text-muted-foreground">{activeProject.path}</div>
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          <span className="truncate">{activeProject.path}</span>
+          <Button size="icon-xs" variant="ghost" title={t('ws.openFolder')}
+            onClick={async () => {
+              const r = await api.projects.openFolder(activeProject.id);
+              if (!r.ok) setError(r.error ?? t('ws.openFolder.fail'));
+            }}>
+            <FolderOpen className="h-3.5 w-3.5" />
+          </Button>
+        </div>
         <div className="flex-1" />
         <CreateIterationButton projectId={activeProject.id} onCreated={iterationsQ.reload} />
       </div>
+      {error && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <AlertCircle className="h-4 w-4" /> {error}
+        </div>
+      )}
       <div className="mb-3 flex items-center gap-2">
         <Select value={activeIter ?? ''} onValueChange={setIterationId}>
           <SelectTrigger className="h-9 w-64">
