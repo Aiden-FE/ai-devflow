@@ -1,19 +1,25 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createPiAiService,
   createProductionTextExecutor,
-  chatSkillsFor,
   materializeChatProfile,
+  materializeStepAgentProfile,
   buildChatPlan,
+  REQUIREMENT_PROPOSAL_TOOL,
 } from '../pi-ai.js';
+import { STEP_AGENTS, stepAgentForWorkload } from '@ai-devflow/agents';
 import type {
   ChatWorkload,
   PiTextExecutor,
   ProductionExecutorDeps,
 } from '../pi-ai.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const ASSETS_ROOT = join(here, '..', '..', '..', '..', 'packages', 'agents', 'assets', 'profiles');
 import type { ProviderRoute } from '@ai-devflow/agents';
 
 function makeFakeExecutor(scenario: { texts?: string[]; error?: Error }): PiTextExecutor {
@@ -146,6 +152,7 @@ function productionHarness(input: {
     supervisor,
     sessionsBaseDir: mkdtempSync(join(tmpdir(), 'pi-ai-production-')),
     projectToolPath: '/usr/bin:/bin',
+    assetsRoot: ASSETS_ROOT,
   } as unknown as ProductionExecutorDeps;
   return { executor: createProductionTextExecutor(deps), routerOptions };
 }
@@ -163,6 +170,31 @@ describe('production Pi text executor', () => {
     await expect(harness.executor('task_chat', [{ role: 'user', content: 'hi' }], (d) => deltas.push(d)))
       .resolves.toBe('hello');
     expect(deltas).toEqual(['hello']);
+  });
+
+  it('surfaces ai_devflow_propose_requirement tool result via onToolResult for requirement_chat', async () => {
+    const harness = productionHarness({
+      stdout: [
+        JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '草稿已生成' } }),
+        JSON.stringify({
+          type: 'tool_execution_end',
+          toolName: REQUIREMENT_PROPOSAL_TOOL,
+          result: { details: { aiDevflowRequirementProposal: { title: 'T', description: 'D', acceptance: 'A', priority: 'high' } } },
+        }),
+        JSON.stringify({ type: 'agent_end', messages: [] }),
+      ],
+      exitCode: 0,
+    });
+    let captured: { name?: string; payload?: unknown } = {};
+    await harness.executor(
+      'requirement_chat',
+      [{ role: 'user', content: '做一个登录页' }],
+      undefined,
+      undefined,
+      (name, payload) => { captured = { name, payload }; },
+    );
+    expect(captured.name).toBe(REQUIREMENT_PROPOSAL_TOOL);
+    expect(captured.payload).toEqual({ title: 'T', description: 'D', acceptance: 'A', priority: 'high' });
   });
 
   it('classifies nonzero exit as runtime and discards partial deltas', async () => {
@@ -218,32 +250,43 @@ describe('production Pi text executor', () => {
 });
 
 describe('requirement brainstorming skill loading', () => {
-  it('chatSkillsFor loads brainstorming only for requirement_chat', () => {
-    expect(chatSkillsFor('requirement_chat')).toEqual(['brainstorming']);
-    expect(chatSkillsFor('requirement_proposal')).toEqual([]);
-    expect(chatSkillsFor('task_chat')).toEqual([]);
-    expect(chatSkillsFor('task_proposal')).toEqual([]);
+  it('stepAgentForWorkload returns requirement_refiner only for requirement_chat', () => {
+    expect(stepAgentForWorkload('requirement_chat')?.step).toBe('requirement_refiner');
+    expect(stepAgentForWorkload('task_chat')).toBeUndefined();
+    expect(stepAgentForWorkload('requirement_proposal')).toBeUndefined();
+    expect(stepAgentForWorkload('task_proposal')).toBeUndefined();
   });
 
-  it('materializeChatProfile copies brainstorming skill into the profile dir when requested', () => {
+  it('materializeStepAgentProfile copies SYSTEM.md, brainstorming skill, and requirement-bridge extension', () => {
     const sessionDir = mkdtempSync(join(tmpdir(), 'pi-ai-skill-'));
-    const profileDir = materializeChatProfile(sessionDir, 'sys', ['brainstorming']);
+    const step = STEP_AGENTS['requirement_refiner'];
+    const profileDir = materializeStepAgentProfile(sessionDir, step, ASSETS_ROOT);
+    expect(existsSync(join(profileDir, 'SYSTEM.md'))).toBe(true);
     expect(existsSync(join(profileDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
-    // 不请求技能时不拷入
-    const emptyDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-skill-')), 'sys');
-    expect(existsSync(join(emptyDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(false);
+    expect(existsSync(join(profileDir, 'extensions', 'requirement-bridge.ts'))).toBe(true);
+    // 非步骤 profile 不含技能/扩展
+    const chatDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-skill-')), 'sys');
+    expect(existsSync(join(chatDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(false);
   });
 
-  it('buildChatPlan adds --skill for requirement_chat and omits it for task_chat', () => {
+  it('buildChatPlan adds --tools/--extension/--skill for requirement_chat and --no-tools for task_chat', () => {
     const sessionDir = mkdtempSync(join(tmpdir(), 'pi-ai-plan-'));
-    const profileDir = materializeChatProfile(sessionDir, 'sys', ['brainstorming']);
-    const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, profileDir, 'requirement_chat', 'hi', '/usr/bin');
-    const skillIdx = reqPlan.args.indexOf('--skill');
-    expect(skillIdx).toBeGreaterThan(-1);
-    expect(reqPlan.args[skillIdx + 1]).toMatch(/brainstorming[\\/]SKILL\.md$/);
+    const step = STEP_AGENTS['requirement_refiner'];
+    const assetsRoot = ASSETS_ROOT;
+    const reqProfileDir = materializeStepAgentProfile(sessionDir, step, assetsRoot);
+    const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, reqProfileDir, 'requirement_chat', 'hi', '/usr/bin', step);
+    expect(reqPlan.args).toContain('--tools');
+    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(REQUIREMENT_PROPOSAL_TOOL);
+    expect(reqPlan.args).toContain('--extension');
+    expect(reqPlan.args[reqPlan.args.indexOf('--extension') + 1]).toMatch(/requirement-bridge\.ts$/);
+    expect(reqPlan.args).toContain('--skill');
+    expect(reqPlan.args[reqPlan.args.indexOf('--skill') + 1]).toMatch(/brainstorming[\\/]SKILL\.md$/);
+    expect(reqPlan.args).not.toContain('--no-tools');
 
     const taskProfileDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-plan-')), 'sys');
     const taskPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, taskProfileDir, 'task_chat', 'hi', '/usr/bin');
-    expect(taskPlan.args.includes('--skill')).toBe(false);
+    expect(taskPlan.args).toContain('--no-tools');
+    expect(taskPlan.args).not.toContain('--skill');
+    expect(taskPlan.args).not.toContain('--extension');
   });
 });

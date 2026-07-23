@@ -491,6 +491,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
         mode: payload.mode,
         context: payload.context,
+        onToolResult: (toolName, payloadDraft) => {
+          if (toolName === 'ai_devflow_propose_requirement' && payloadDraft && typeof payloadDraft === 'object') {
+            const d = payloadDraft as { title?: unknown; description?: unknown; acceptance?: unknown; priority?: unknown };
+            if (typeof d.title === 'string' && typeof d.description === 'string' && typeof d.acceptance === 'string' && (d.priority === 'low' || d.priority === 'medium' || d.priority === 'high')) {
+              sendAi({ type: 'requirement_proposal', sessionId: payload.sessionId, draft: { title: d.title, description: d.description, acceptance: d.acceptance, priority: d.priority } });
+            }
+          }
+        },
       });
     } catch (e) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });

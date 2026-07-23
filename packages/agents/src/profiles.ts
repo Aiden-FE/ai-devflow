@@ -44,12 +44,13 @@ export interface RoleProfile {
 /** 两个内部工具：澄清/确认 与 结构化完成。对四角色都必须启用，非用户可配置（§7.5）。 */
 export const INTERNAL_TOOLS = ['ai_devflow_interaction', 'ai_devflow_report_result'] as const;
 
-/** 可用扩展注册池：shared/extensions/ 下维护的内置扩展名。各角色通过 RoleProfile.extensions 声明启用子集。 */
+/** 可用扩展注册池：shared/extensions/ 下维护的内置扩展名。各角色/步骤通过 .extensions 声明启用子集。 */
 export const BUILTIN_EXTENSIONS = [
   'event-bridge',
   'execution-policy',
   'structured-result',
   'checkpoint-context',
+  'requirement-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
@@ -66,6 +67,7 @@ export interface BuiltinSkill {
  * ProfileMaterializer 物化时定位源文件，不构成引用限制。物化后统一落在角色快照的 skills/<name>/。
  */
 export const BUILTIN_SKILLS = [
+  { name: 'brainstorming', source: 'shared' as const },
   { name: 'requirements-analysis',   source: 'planner' },
   { name: 'design-writing',          source: 'planner' },
   { name: 'implementation-planning', source: 'planner' },
@@ -115,6 +117,73 @@ export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
 export function roleToolsArg(role: TaskRole): string {
   return [...ROLE_PROFILES[role].tools, ...INTERNAL_TOOLS].join(',');
 }
+
+/**
+ * 专用步骤 Agent（设计 §2026-07-23-step-agent）：与 ROLE_PROFILES 并列，每个工作流环节一个条目。
+ * step agent 有独立的系统提示 / skills / tools / extensions，经 materializeStepAgentProfile 物化到
+ * 独立快照。AI 在环节完成时调用 step 声明的工具产出结果（而非用户点按钮）。
+ */
+export interface StepAgentProfile {
+  step: string;
+  version: number;
+  systemPromptFile: string;
+  /** 引用的内置 skills（来自 BUILTIN_SKILLS 池）。 */
+  skills: string[];
+  /** 该步骤启用的工具名称（非 Pi 内置 read/bash 等）。经 --tools 显式启用，取代 --no-tools。 */
+  tools: string[];
+  /** 引用的内置 extensions（来自 BUILTIN_EXTENSIONS 池）。 */
+  extensions: string[];
+  timeoutMs: number;
+}
+
+/** 对话 workload 名（与 apps/desktop/electron/pi-ai.ts 的 ChatWorkload 对齐）。 */
+export type StepWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
+
+export const STEP_AGENTS: Record<string, StepAgentProfile> = {
+  requirement_refiner: {
+    step: 'requirement_refiner',
+    version: 1,
+    systemPromptFile: 'SYSTEM.md',
+    skills: ['brainstorming'],
+    tools: ['ai_devflow_propose_requirement'],
+    extensions: ['requirement-bridge'],
+    timeoutMs: 10 * 60_000,
+  },
+};
+
+/** workload -> step agent（无则返回 undefined，调用方走原 chat/proposal 路径）。 */
+export function stepAgentForWorkload(workload: StepWorkload): StepAgentProfile | undefined {
+  switch (workload) {
+    case 'requirement_chat':
+      return STEP_AGENTS['requirement_refiner'];
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 校验每个 step agent 声明的 extensions/skills 都在注册池。模块加载期 fail-fast。
+ * tools 不校验（步骤专用工具不由 BUILTIN 池约束，由对应 bridge extension 注册）。
+ */
+export function validateStepAgents(
+  steps: Record<string, StepAgentProfile> = STEP_AGENTS,
+  extensionPool: readonly string[] = BUILTIN_EXTENSIONS,
+  skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+): void {
+  const extSet = new Set(extensionPool);
+  const skillNames = new Set(skillPool.map((s) => s.name));
+  for (const step of Object.keys(steps)) {
+    const profile = steps[step];
+    if (profile.step !== step) throw new Error(`步骤 agent 键名 ${step} 与 profile.step ${profile.step} 不一致`);
+    for (const ext of profile.extensions) {
+      if (!extSet.has(ext)) throw new Error(`步骤 ${step} 引用了未注册的扩展：${ext}`);
+    }
+    for (const skill of profile.skills) {
+      if (!skillNames.has(skill)) throw new Error(`步骤 ${step} 引用了未注册的技能：${skill}`);
+    }
+  }
+}
+validateStepAgents();
 
 /** 兼容网关类型 → Pi `api` 取值。 */
 export const COMPATIBLE_API: Record<'openai_compatible' | 'anthropic_compatible', string> = {

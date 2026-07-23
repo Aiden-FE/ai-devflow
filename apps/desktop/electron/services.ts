@@ -9,7 +9,7 @@ import { Orchestrator } from '@ai-devflow/scheduler';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
 import { createUpdater, type Updater } from './updater.js';
-import { createPiRuntime, type PiRuntimeServices } from './pi-runtime.js';
+import { createPiRuntime, assetsRootFor, type PiRuntimeServices } from './pi-runtime.js';
 import type { ProviderStore } from './provider-store.js';
 import { createPiAiService, createProductionTextExecutor, type PiAiService } from './pi-ai.js';
 
@@ -99,6 +99,7 @@ export function createServices(notifier: Notifier): Services {
       supervisor: new PiProcessSupervisor(),
       sessionsBaseDir: join(userData, 'pi-runtime', 'sessions'),
       projectToolPath: buildControlledPath(),
+      assetsRoot: assetsRootFor(),
     }),
   );
   let services: Services | undefined;

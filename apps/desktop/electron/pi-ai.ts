@@ -4,7 +4,6 @@
 import { randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
 import { redactText, validateProposalDag } from '@ai-devflow/core';
 import { z } from 'zod';
@@ -20,18 +19,16 @@ import {
   buildCompatibleModelsJson,
   classifyProviderFailure,
   isCompatibleKind,
+  stepAgentForWorkload,
 } from '@ai-devflow/agents';
 import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_TASK_SYSTEM } from './pi-ai-prompts.js';
 import { fetchCompatibleModels } from './provider-models.js';
 
-/** 对话 workload -> 加载的技能名列表（从 assets/chat/skills/<name>/ 读取并物化进 profileDir）。 */
-export function chatSkillsFor(workload: ChatWorkload): string[] {
-  // 仅需求对话加载 brainstorming：草稿生成是一次性结构化提取，不适合对话式提问范式。
-  return workload === 'requirement_chat' ? ['brainstorming'] : [];
-}
-
-/** 对话路径技能资源根目录（pi-ai.ts 同级 assets/chat）。 */
-const CHAT_ASSETS_ROOT = join(dirname(fileURLToPath(import.meta.url)), 'assets', 'chat');
+/**
+ * 对话路径产出工具：仅 requirement_chat 由 AI 调用 ai_devflow_propose_requirement 生成需求草稿。
+ * 调用结果经 tool_execution_end 事件回传，由 executeTextOnRoute 解析后经 onToolResult 上报。
+ */
+export const REQUIREMENT_PROPOSAL_TOOL = 'ai_devflow_propose_requirement';
 
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
@@ -41,11 +38,12 @@ export interface PiTextExecutor {
     messages: AiChatMessage[],
     onDelta?: (text: string) => void,
     options?: { onlyProviderId?: string },
+    onToolResult?: (toolName: string, payload: unknown) => void,
   ): Promise<string>;
 }
 
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement'; context?: string }): Promise<string>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement'; context?: string; onToolResult?: (toolName: string, payload: unknown) => void }): Promise<string>;
   propose(messages: AiChatMessage[], context?: string): Promise<AiTaskProposal[]>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
@@ -62,6 +60,8 @@ export interface ProductionExecutorDeps {
   supervisor: PiProcessSupervisor;
   sessionsBaseDir: string;
   projectToolPath: string;
+  /** 步骤 Agent 资源根（dev: packages/agents/assets/profiles；packaged: resources/pi-runtime/profiles）。 */
+  assetsRoot: string;
 }
 
 const CHAT_SETTINGS_JSON = JSON.stringify({
@@ -151,9 +151,10 @@ export function buildChatPlan(
   route: ProviderRoute,
   sessionDir: string,
   profileDir: string,
-  workload: ChatWorkload,
+  _workload: ChatWorkload,
   messagesText: string,
   projectToolPath: string,
+  step?: { tools: readonly string[]; skills: readonly string[]; extensions: readonly string[] },
 ) {
   const name = `chat-${randomUUID()}`;
   const args: string[] = [
@@ -167,11 +168,15 @@ export function buildChatPlan(
     '--no-themes',
     '--no-context-files',
     '--no-approve',
-    '--no-tools',
   ];
-  // --no-skills 关闭自动发现后，显式加载该 workload 声明的技能（requirement_chat 加 brainstorming）。
-  for (const skill of chatSkillsFor(workload)) {
-    args.push('--skill', join(profileDir, 'skills', skill, 'SKILL.md'));
+  if (step) {
+    // 步骤 Agent：显式启用 step 声明的工具（取代 --no-tools），加载 step 扩展与技能。
+    args.push('--tools', step.tools.join(','));
+    for (const ext of step.extensions) args.push('--extension', join(profileDir, 'extensions', `${ext}.ts`));
+    for (const skill of step.skills) args.push('--skill', join(profileDir, 'skills', skill, 'SKILL.md'));
+  } else {
+    // 非步骤 workload（task_chat/task_proposal/requirement_proposal）：无工具、无技能、无扩展。
+    args.push('--no-tools');
   }
   args.push(
     '--provider',
@@ -224,13 +229,34 @@ export function buildChatPlan(
   return { command: process.execPath, args, env, initialMessage: messagesText, modelsJson };
 }
 
-export function materializeChatProfile(sessionDir: string, systemPrompt: string, skills: string[] = []): string {
+export function materializeChatProfile(sessionDir: string, systemPrompt: string): string {
   const profileDir = join(sessionDir, 'pi-config');
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(join(profileDir, 'settings.json'), CHAT_SETTINGS_JSON);
   writeFileSync(join(profileDir, 'SYSTEM.md'), systemPrompt);
-  for (const name of skills) {
-    cpSync(join(CHAT_ASSETS_ROOT, 'skills', name), join(profileDir, 'skills', name), { recursive: true });
+  return profileDir;
+}
+
+/**
+ * 物化专用步骤 Agent 配置快照：<profileDir>/SYSTEM.md + skills/<name>/ + extensions/<name>.ts。
+ * step agent 资源统一在 packages/agents/assets/profiles/{steps/<step>/, shared/skills/, shared/extensions/}。
+ */
+export function materializeStepAgentProfile(
+  sessionDir: string,
+  step: { step: string; systemPromptFile: string; skills: readonly string[]; extensions: readonly string[] },
+  assetsRoot: string,
+): string {
+  const profileDir = join(sessionDir, 'pi-config');
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, 'settings.json'), CHAT_SETTINGS_JSON);
+  cpSync(join(assetsRoot, 'steps', step.step, step.systemPromptFile), join(profileDir, 'SYSTEM.md'));
+  for (const name of step.skills) {
+    cpSync(join(assetsRoot, 'shared', 'skills', name), join(profileDir, 'skills', name), { recursive: true });
+  }
+  const extDir = join(profileDir, 'extensions');
+  mkdirSync(extDir, { recursive: true });
+  for (const name of step.extensions) {
+    cpSync(join(assetsRoot, 'shared', 'extensions', `${name}.ts`), join(extDir, `${name}.ts`));
   }
   return profileDir;
 }
@@ -241,15 +267,17 @@ export async function executeTextOnRoute(
   onDelta: ((text: string) => void) | undefined,
   deps: ProductionExecutorDeps,
   workload: ChatWorkload,
+  onToolResult?: (toolName: string, payload: unknown) => void,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
   mkdirSync(sessionDir, { recursive: true });
-  const systemPrompt = systemPromptFor(workload);
-  const skills = chatSkillsFor(workload);
-  const profileDir = materializeChatProfile(sessionDir, systemPrompt, skills);
+  const step = stepAgentForWorkload(workload);
+  const profileDir = step
+    ? materializeStepAgentProfile(sessionDir, step, deps.assetsRoot)
+    : materializeChatProfile(sessionDir, systemPromptFor(workload));
   const messagesText = formatMessages(messages);
-  const plan = buildChatPlan(entry, route, sessionDir, profileDir, workload, messagesText, deps.projectToolPath);
+  const plan = buildChatPlan(entry, route, sessionDir, profileDir, workload, messagesText, deps.projectToolPath, step);
   if (plan.modelsJson) {
     writeFileSync(join(profileDir, 'models.json'), plan.modelsJson);
   }
@@ -287,6 +315,8 @@ export async function executeTextOnRoute(
           status?: number;
           message?: string | AssistantMessage;
           assistantMessageEvent?: { type?: string; delta?: string; content?: string };
+          toolName?: string;
+          result?: { details?: unknown; content?: Array<{ text?: string }> };
         };
         try {
           event = JSON.parse(line.text) as typeof event;
@@ -310,6 +340,12 @@ export async function executeTextOnRoute(
             status: typeof event.status === 'number' ? event.status : 0,
             message: typeof event.message === 'string' ? event.message : '',
           };
+        } else if (event.type === 'tool_execution_end' && event.toolName === REQUIREMENT_PROPOSAL_TOOL) {
+          // 需求生成步骤 Agent 调用 ai_devflow_propose_requirement 产出草稿：
+          // execute 回调返回 details=input，提取后经 onToolResult 上报给 UI 填表单。
+          const details = event.result?.details;
+          const payload = (details as { aiDevflowRequirementProposal?: unknown } | undefined)?.aiDevflowRequirementProposal ?? details;
+          if (payload && typeof payload === 'object') onToolResult?.(REQUIREMENT_PROPOSAL_TOOL, payload);
         } else if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
           // Pi 对提供商 HTTP 错误（401/404/5xx 等）不发射 error/provider_error 事件，而是把
           // stopReason:"error" + errorMessage 放在 message 事件上。捕获之以还原根因，否则会被
@@ -399,12 +435,12 @@ function buildPiFailureDetail(
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
-  return async (workload, messages, onDelta, options) => {
+  return async (workload, messages, onDelta, options, onToolResult) => {
     const result = await deps.router.execute(
       workload,
       async (route) => {
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload);
+          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult);
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -491,7 +527,7 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
         opts?.context && messages.length > 0
           ? [{ role: 'user', content: `【上下文】\n${opts.context}\n\n${messages[messages.length - 1]!.content}` }]
           : messages;
-      return executeText(workload, promptMessages, onDelta);
+      return executeText(workload, promptMessages, onDelta, undefined, opts?.onToolResult);
     },
 
     async propose(messages, context) {

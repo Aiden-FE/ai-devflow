@@ -3,7 +3,8 @@
 // 而不是只剩无信息的「Pi 返回的终止协议无效」。不依赖真实 Pi 二进制，确定性、快速。
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   ProviderExecutionError,
@@ -48,6 +49,7 @@ function makeDeps(lines: SupervisorRawLine[], exitCode: number | null): Producti
     supervisor,
     sessionsBaseDir: mkdtempSync(join(tmpdir(), 'pi-ai-protocol-')),
     projectToolPath: '/usr/bin:/bin',
+    assetsRoot: join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'packages', 'agents', 'assets', 'profiles'),
   } as ProductionExecutorDeps;
 }
 

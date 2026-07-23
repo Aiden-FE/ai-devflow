@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ProfileMaterializer, ROLE_PROFILES, BUILTIN_EXTENSIONS, BUILTIN_SKILLS, validateRoleProfiles, type BuiltinSkill } from '../profiles.js';
+import { ProfileMaterializer, ROLE_PROFILES, BUILTIN_EXTENSIONS, BUILTIN_SKILLS, validateRoleProfiles, STEP_AGENTS, stepAgentForWorkload, validateStepAgents, type BuiltinSkill } from '../profiles.js';
 
 const ASSETS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../assets/profiles');
 
@@ -186,5 +186,44 @@ describe('validateRoleProfiles', () => {
       BUILTIN_EXTENSIONS,
       [...BUILTIN_SKILLS, { name: 'git-hygiene', source: 'shared' }],
     )).not.toThrow();
+  });
+});
+
+describe('STEP_AGENTS', () => {
+  it('registers requirement_refiner with brainstorming skill + requirement-bridge extension + propose tool', () => {
+    const step = STEP_AGENTS['requirement_refiner'];
+    expect(step).toBeDefined();
+    expect(step.skills).toContain('brainstorming');
+    expect(step.extensions).toContain('requirement-bridge');
+    expect(step.tools).toContain('ai_devflow_propose_requirement');
+  });
+  it('stepAgentForWorkload maps requirement_chat to requirement_refiner and others to undefined', () => {
+    expect(stepAgentForWorkload('requirement_chat')?.step).toBe('requirement_refiner');
+    expect(stepAgentForWorkload('task_chat')).toBeUndefined();
+    expect(stepAgentForWorkload('requirement_proposal')).toBeUndefined();
+    expect(stepAgentForWorkload('task_proposal')).toBeUndefined();
+  });
+  it('validateStepAgents passes for built-in step agents', () => {
+    expect(() => validateStepAgents()).not.toThrow();
+  });
+  it('rejects a step agent referencing an unregistered extension', () => {
+    expect(() => validateStepAgents(
+      { ...STEP_AGENTS, requirement_refiner: { ...STEP_AGENTS['requirement_refiner'], extensions: ['ghost'] } },
+      BUILTIN_EXTENSIONS,
+      BUILTIN_SKILLS,
+    )).toThrow(/未注册的扩展/);
+  });
+  it('rejects a step agent referencing an unregistered skill', () => {
+    expect(() => validateStepAgents(
+      { ...STEP_AGENTS, requirement_refiner: { ...STEP_AGENTS['requirement_refiner'], skills: ['ghost'] } },
+      BUILTIN_EXTENSIONS,
+      BUILTIN_SKILLS,
+    )).toThrow(/未注册的技能/);
+  });
+  it('materializes requirement_refiner assets (SYSTEM.md, brainstorming skill, requirement-bridge extension)', () => {
+    // 直接验证 step agent 资源文件存在于 assets（物化由 pi-ai.ts materializeStepAgentProfile 负责，此处校验源资源就绪）。
+    expect(existsSync(join(ASSETS_ROOT, 'steps', 'requirement_refiner', 'SYSTEM.md'))).toBe(true);
+    expect(existsSync(join(ASSETS_ROOT, 'shared', 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(ASSETS_ROOT, 'shared', 'extensions', 'requirement-bridge.ts'))).toBe(true);
   });
 });

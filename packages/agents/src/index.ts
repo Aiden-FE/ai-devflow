@@ -20,6 +20,7 @@ export {
   ROLE_PROFILES,
   INTERNAL_TOOLS,
   BUILTIN_EXTENSIONS,
+  BUILTIN_SKILLS,
   ACTIVE_API_KEY_ENV,
   COMPATIBLE_API,
   roleToolsArg,
@@ -28,6 +29,11 @@ export {
   ProfileMaterializer,
   type RoleProfile,
   type MaterializeInput,
+  STEP_AGENTS,
+  stepAgentForWorkload,
+  validateStepAgents,
+  type StepAgentProfile,
+  type StepWorkload,
 } from './profiles.js';
 export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
 export { buildControlledPath } from './env-safety.js';

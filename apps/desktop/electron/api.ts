@@ -75,10 +75,18 @@ export interface CreateBatchInput {
 }
 
 /** AI 流式事件（chat 增量/完成/出错）。 */
+export type AiRequirementProposalDraft = {
+  title: string;
+  description: string;
+  acceptance: string;
+  priority: 'low' | 'medium' | 'high';
+};
+
 export type AiStreamEvent =
   | { type: 'delta'; sessionId: string; text: string }
   | { type: 'done'; sessionId: string; fullText: string }
-  | { type: 'error'; sessionId: string; error: string };
+  | { type: 'error'; sessionId: string; error: string }
+  | { type: 'requirement_proposal'; sessionId: string; draft: AiRequirementProposalDraft };
 
 export interface StreamEvent {
   kind:
@@ -232,7 +240,7 @@ export interface DesktopApi {
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement'; context?: string },
+      opts?: { mode?: 'task' | 'requirement'; context?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void },
     ): Promise<string>;
     /** 基于对话生成结构化任务草稿。context 可带入当前需求内容。 */
     propose(messages: AiChatMessage[], context?: string): Promise<AiTaskProposal[]>;

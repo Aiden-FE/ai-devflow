@@ -96,7 +96,7 @@ function resolveDevEntryVia(req: NodeRequire): string {
   return join(dirname(pkgPath), bin);
 }
 
-function assetsRootFor(): string {
+export function assetsRootFor(): string {
   if (app.isPackaged) return join(process.resourcesPath, 'pi-runtime', 'profiles');
   return join(app.getAppPath(), '..', '..', 'packages', 'agents', 'assets', 'profiles');
 }

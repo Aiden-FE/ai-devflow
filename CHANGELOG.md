@@ -11,6 +11,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 变更范围：[v0.2.1...v0.2.2](https://github.com/Aiden-FE/ai-devflow/compare/v0.2.1...v0.2.2)
 
 ### 新功能
+- **agents**：专用步骤 Agent 范式与需求环节重构——需求对话改由 requirement_refiner 步骤 Agent 驱动,AI 调用 ai_devflow_propose_requirement 工具生成需求草稿,移除「生成需求草稿」按钮（24a9c58）
 - **agents**：requirement brainstorming skill for AI refine requirement（878c3e0）
 - **agents**：shared skills registry with cross-role borrow support（088c7f8）
 - **scripts**：inspect:roles maintainer capability self-check（d6cb9a7）

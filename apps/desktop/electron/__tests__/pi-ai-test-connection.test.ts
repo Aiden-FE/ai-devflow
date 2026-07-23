@@ -64,6 +64,7 @@ describe.skipIf(!HAVE_RUNTIME)('testConnection surfaces the real provider error'
       supervisor: new PiProcessSupervisor(),
       sessionsBaseDir: mkdtempSync(join(tmpdir(), 'aidf-testconn-')),
       projectToolPath: buildControlledPath(),
+      assetsRoot: join(here, '..', '..', '..', '..', 'packages', 'agents', 'assets', 'profiles'),
     });
     const ai = createPiAiService(executor);
 

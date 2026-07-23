@@ -414,7 +414,6 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
   const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
 
   const send = async () => {
@@ -428,21 +427,16 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
       assistant = await api.ai.chat(next, (delta) => {
         assistant += delta;
         setMessages((prev) => { const c = [...prev]; c[c.length - 1] = { role: 'assistant', content: assistant }; return c; });
-      }, { mode: 'requirement' });
+      }, {
+        mode: 'requirement',
+        // AI 在需求足够清晰时调用 ai_devflow_propose_requirement 工具生成草稿；
+        // 工具结果经事件流回传，直接填入表单，无需用户点“生成需求草稿”按钮。
+        onRequirementProposal: (draft) => onApplied(draft),
+      });
     } catch (e) {
       setError((e as Error).message);
       setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
     } finally { setStreaming(false); }
-  };
-
-  const propose = async () => {
-    if (messages.length === 0) return;
-    setError(undefined); setBusy(true);
-    try {
-      const draft = await api.ai.proposeRequirement(messages.filter((m) => m.content));
-      onApplied(draft);
-    } catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
   };
 
   return (
@@ -465,9 +459,6 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
           placeholder={t('req.ai.placeholder')} disabled={streaming} />
         <Button size="sm" onClick={send} disabled={streaming || !input.trim()}>{t('task.ai.send')}</Button>
       </div>
-      <Button size="sm" variant="outline" onClick={propose} disabled={busy || streaming || messages.length === 0}>
-        {busy ? t('task.ai.generating') : t('req.ai.propose')}
-      </Button>
     </div>
   );
 }
