@@ -13,11 +13,12 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ModelRoleKey, ProviderMigrationStatus } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ModelRoleKey, ProviderMigrationStatus, AgentKey } from '@ai-devflow/core';
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
 const MODEL_ROLES: ModelRoleKey[] = ['planner', 'coder', 'reviewer', 'tester', 'chat', 'proposal'];
+const AGENT_KEYS: AgentKey[] = ['planner', 'coder', 'reviewer', 'tester', 'requirement_refiner', 'task_proposer', 'chat'];
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
 
@@ -31,6 +32,7 @@ export function SettingsPage(): React.ReactElement {
         <LanguageSection />
         <UpdateSection />
         <ProviderSection />
+        <AgentModelSection />
         <NotificationRulesSection />
         <WebhooksSection />
       </div>
@@ -594,7 +596,7 @@ function ProviderSection(): React.ReactElement {
               <div className="mt-2 flex flex-col gap-2">
                 {MODEL_ROLES.map((role) => (
                   <div key={role} className="flex flex-col gap-1">
-                    <Label className="text-[11px]">{role}</Label>
+                    <Label className="text-[11px]">{role} <span className="text-muted-foreground">({t(`settings.agentModels.workload.${role}`)})</span></Label>
                     <Input
                       value={workloadModels[role] ?? ''}
                       onChange={(e) => setWorkloadModels({ ...workloadModels, [role]: e.target.value })}
@@ -608,6 +610,74 @@ function ProviderSection(): React.ReactElement {
           <DialogFooter><Button onClick={save}>{t('common.save')}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function AgentModelSection(): React.ReactElement {
+  const t = useT();
+  const providersQ = useAsync(() => api.providers.list(), []);
+  const overridesQ = useAsync(() => api.agentOverrides.list(), []);
+  const [draft, setDraft] = useState<Record<AgentKey, { providerId: string; model: string }>>({} as Record<AgentKey, { providerId: string; model: string }>);
+  const [busy, setBusy] = useState<AgentKey | undefined>();
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    const map = {} as Record<AgentKey, { providerId: string; model: string }>;
+    for (const o of overridesQ.data ?? []) map[o.agentKey] = { providerId: o.providerId, model: o.model };
+    setDraft(map);
+  }, [overridesQ.data]);
+
+  const providers = (providersQ.data ?? []).filter((p) => p.enabled && p.hasCredential);
+  const reload = () => { overridesQ.reload(); };
+
+  const save = async (agentKey: AgentKey) => {
+    setBusy(agentKey); setError(undefined);
+    try {
+      const v = draft[agentKey];
+      if (v?.providerId && v?.model) {
+        await api.agentOverrides.save({ agentKey, providerId: v.providerId, model: v.model });
+      } else {
+        await api.agentOverrides.remove(agentKey);
+      }
+      reload();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(undefined); }
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <h3 className="m-0 text-sm font-semibold">{t('settings.agentModels')}</h3>
+      <p className="text-xs text-muted-foreground">{t('settings.agentModels.hint')}</p>
+      <div className="mt-2 flex flex-col gap-2">
+        {AGENT_KEYS.map((agentKey) => {
+          const ov = draft[agentKey];
+          const providerId = ov?.providerId ?? '';
+          const model = ov?.model ?? '';
+          const effective = providerId ? providers.find((p) => p.id === providerId)?.displayName ?? providerId : t('settings.agentModels.followDefault');
+          return (
+            <div key={agentKey} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-xs">
+              <div className="flex min-w-[160px] flex-col">
+                <span className="font-medium">{t(`settings.agentModels.agent.${agentKey}`)}</span>
+                <span className="text-muted-foreground">{t('settings.agentModels.workload')}：{t(`settings.agentModels.workload.${agentKey}`)}</span>
+              </div>
+              <div className="flex flex-1 flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">{t('settings.agentModels.effective')}：{effective}{model ? ` / ${model}` : ''}</span>
+                <Select value={providerId} onValueChange={(v) => setDraft({ ...draft, [agentKey]: { providerId: v, model: draft[agentKey]?.model ?? '' } })}>
+                  <SelectTrigger className="h-7 w-40"><SelectValue placeholder={t('settings.agentModels.followDefault')} /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">{t('settings.agentModels.followDefault')}</SelectItem>
+                    {providers.map((p) => <SelectItem key={p.id} value={p.id}>{p.displayName}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Input className="h-7 w-48" value={model} onChange={(e) => setDraft({ ...draft, [agentKey]: { providerId, model: e.target.value } })} placeholder={t('settings.providers.model.default.hint')} />
+                <Button size="sm" variant="outline" disabled={busy === agentKey} onClick={() => save(agentKey)}>{t('common.save')}</Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {error && <div className="mt-2 break-words text-xs text-destructive">{error}</div>}
     </div>
   );
 }
