@@ -1,5 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeProviderInput } from '../provider.js';
+import { normalizeProviderInput, workloadAgentKey } from '../provider.js';
+
+describe('workloadAgentKey', () => {
+  it('requirement_chat 映射到 requirement_refiner', () => {
+    expect(workloadAgentKey('requirement_chat')).toBe('requirement_refiner');
+  });
+  it('task_proposal 映射到 task_proposer', () => {
+    expect(workloadAgentKey('task_proposal')).toBe('task_proposer');
+  });
+  it('四角色同名', () => {
+    expect(workloadAgentKey('planner')).toBe('planner');
+    expect(workloadAgentKey('coder')).toBe('coder');
+    expect(workloadAgentKey('reviewer')).toBe('reviewer');
+    expect(workloadAgentKey('tester')).toBe('tester');
+  });
+  it('task_chat 映射到 chat', () => {
+    expect(workloadAgentKey('task_chat')).toBe('chat');
+  });
+  it('requirement_proposal 归并到 chat', () => {
+    expect(workloadAgentKey('requirement_proposal')).toBe('chat');
+  });
+});
 
 describe('normalizeProviderInput', () => {
   it('normalizes a compatible provider without retaining a plaintext key', () => {

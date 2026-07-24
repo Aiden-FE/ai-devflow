@@ -31,6 +31,41 @@ export type Workload =
  */
 export type ModelRoleKey = 'planner' | 'coder' | 'reviewer' | 'tester' | 'chat' | 'proposal';
 
+/**
+ * Agent 键：用户视角的「agent」标识，用于按 agent 覆盖 provider+模型。
+ * 四角色同名；requirement_chat->requirement_refiner、task_proposal->task_proposer 为步骤 agent；
+ * task_chat/requirement_proposal 归并到 chat。
+ */
+export type AgentKey =
+  | 'planner'
+  | 'coder'
+  | 'reviewer'
+  | 'tester'
+  | 'requirement_refiner'
+  | 'task_proposer'
+  | 'chat';
+
+/** 按 agent 覆盖 provider + 模型（用户配置；无密钥，引用 ProviderConfig.id）。 */
+export interface AgentModelOverride {
+  agentKey: AgentKey;
+  providerId: string;
+  model: string;
+}
+
+/** workload -> agent 键（用于覆盖路由解析）。 */
+export function workloadAgentKey(workload: Workload): AgentKey {
+  switch (workload) {
+    case 'planner': return 'planner';
+    case 'coder': return 'coder';
+    case 'reviewer': return 'reviewer';
+    case 'tester': return 'tester';
+    case 'requirement_chat': return 'requirement_refiner';
+    case 'task_proposal': return 'task_proposer';
+    case 'task_chat':
+    case 'requirement_proposal': return 'chat';
+  }
+}
+
 /** 故障分类（设计 §9.4）。 */
 export type FailureKind =
   | 'authentication'
