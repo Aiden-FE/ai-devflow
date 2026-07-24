@@ -362,6 +362,7 @@ async function runPackagedIsolation(releaseRoot) {
         revision: 0,
         apiKey,
         allowInsecureLocal: true,
+        defaultModel: 'fake-default',
       });
       const project = await window.api.projects.create({ name: 'Packaged isolation', path: repoPath, defaultBranch: 'main' });
       const iteration = await window.api.iterations.create(project.id, 'Isolation', '1');
@@ -548,6 +549,7 @@ try {
       revision: 0,
       apiKey,
       allowInsecureLocal: true,
+      defaultModel: 'fake-default',
     });
   }, { baseURL: provider.baseURL, apiKey: fakeKey });
 
@@ -575,7 +577,9 @@ try {
   // 3. 创建需求（含验收标准）
   await win.getByRole('button', { name: '新建需求' }).click();
   await dialog().waitFor();
-  await dialog().locator('input').nth(0).fill('Req1');
+  // AI 两步入口：等待 AI 沟通区渲染（确认 providersQ 已加载），再填确认区字段。
+  await dialog().getByPlaceholder(/描述你的产品想法/).waitFor({ timeout: 5000 });
+  await dialog().locator('input').nth(1).fill('Req1');
   await dialog().locator('textarea').nth(0).fill('描述');
   await dialog().locator('textarea').nth(1).fill('验收标准1');
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
@@ -585,6 +589,8 @@ try {
   // 4. 创建任务 -> 直接进入待开发泳道（需求池已移除）
   await win.getByRole('button', { name: '创建任务' }).click();
   await dialog().waitFor();
+  // CreateTaskModal 默认 AI 模式；切回手动模式填字段创建。
+  await dialog().getByRole('button', { name: '创建任务', exact: true }).click();
   await dialog().locator('input').nth(0).fill('Task1');
   await dialog().locator('textarea').nth(0).fill('做点事');
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
@@ -658,6 +664,8 @@ try {
   const longUrl = 'https://example.com/' + 'a'.repeat(260);
   await win.getByRole('button', { name: '创建任务' }).click();
   await dialog().waitFor();
+  // CreateTaskModal 默认 AI 模式；切回手动模式填字段创建。
+  await dialog().getByRole('button', { name: '创建任务', exact: true }).click();
   await dialog().locator('input').nth(0).fill('Overflow ' + longWord);
   await dialog().locator('textarea').nth(0).fill('说明 ' + longUrl + ' 末 ' + longWord);
   await dialog().getByRole('button', { name: '创建', exact: true }).click();
