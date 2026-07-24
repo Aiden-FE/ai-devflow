@@ -46,6 +46,7 @@ const api: DesktopApi = {
     listAll: () => invoke('tasks', 'listAll')(),
     listByRequirement: (requirementId) => invoke('tasks', 'listByRequirement')(requirementId),
     get: (id) => invoke('tasks', 'get')(id),
+    delete: (id) => invoke('tasks', 'delete')(id),
     create: (input) => invoke('tasks', 'create')(input),
     createBatch: (input) => invoke('tasks', 'createBatch')(input),
     update: (input) => invoke('tasks', 'update')(input),

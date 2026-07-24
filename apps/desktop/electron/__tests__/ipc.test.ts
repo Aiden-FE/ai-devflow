@@ -486,3 +486,38 @@ describe('deriveProjectName', () => {
     expect(deriveProjectName('https://github.com/org/foo-bar/')).toBe('Foo Bar');
   });
 });
+
+describe('tasks:delete (依赖守卫)', () => {
+  function seedDependency(): void {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: '', createdAt: 1, archived: false });
+    const mk = (id: string, title: string, dependsOn: string[]) => repos.tasks.insert({
+      id, requirementId: 'r', iterationId: 'i', projectId: 'p',
+      title, description: '', status: 'ready', role: 'coder',
+      stages: [], currentStage: 0, statusChangedAt: 1, createdAt: 1, updatedAt: 1, retryCount: 0, dependsOn,
+    });
+    mk('A', '任务A', []);
+    mk('B', '任务B', ['A']);
+  }
+
+  it('被其它任务 dependsOn 引用时拒绝删除并返回阻塞列表', async () => {
+    seedDependency();
+    const res = await call('tasks', 'delete', 'A');
+    expect(res).toEqual({ ok: false, blockedBy: [{ id: 'B', title: '任务B' }] });
+    // 守卫未通过，任务仍在
+    expect(repos.tasks.get('A')).toBeDefined();
+  });
+
+  it('无依赖引用时硬删除成功', async () => {
+    seedDependency();
+    const res = await call('tasks', 'delete', 'B');
+    expect(res).toEqual({ ok: true });
+    expect(repos.tasks.get('B')).toBeUndefined();
+    expect(repos.tasks.get('A')).toBeDefined();
+  });
+
+  it('删除不存在的任务抛错', async () => {
+    await expect(call('tasks', 'delete', 'nope')).rejects.toThrow('任务不存在');
+  });
+});

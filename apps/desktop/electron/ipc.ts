@@ -204,6 +204,18 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('tasks', 'listAll'), () => repos.tasks.list());
   ipcMain.handle(channel('tasks', 'listByRequirement'), (_e, requirementId) => repos.tasks.listByRequirement(requirementId));
   ipcMain.handle(channel('tasks', 'get'), (_e, id) => repos.tasks.get(id));
+  // 子任务删除（硬删除 + 依赖守卫）：被同需求下其它任务的 dependsOn 引用时拒绝删除，返回阻塞列表。
+  ipcMain.handle(channel('tasks', 'delete'), (_e, id: string): { ok: true } | { ok: false; blockedBy: { id: string; title: string }[] } => {
+    const task = repos.tasks.get(id);
+    if (!task) throw new Error('任务不存在');
+    const siblings = repos.tasks.listByRequirement(task.requirementId);
+    const blockers = siblings.filter((t) => t.id !== id && (t.dependsOn ?? []).includes(id));
+    if (blockers.length > 0) {
+      return { ok: false, blockedBy: blockers.map((b) => ({ id: b.id, title: b.title })) };
+    }
+    repos.tasks.delete(id);
+    return { ok: true };
+  });
   ipcMain.handle(channel('tasks', 'create'), (_e, input) => {
     const req = repos.requirements.get(input.requirementId);
     if (!req) throw new Error('需求不存在');

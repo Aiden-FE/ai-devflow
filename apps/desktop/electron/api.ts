@@ -154,6 +154,8 @@ export interface DesktopApi {
     /** 同一需求下的子任务（卡片详情展示关联用）。 */
     listByRequirement(requirementId: string): Promise<Task[]>;
     get(id: string): Promise<Task | undefined>;
+    /** 删除子任务（硬删除）；被其它任务 dependsOn 引用时拒绝并返回阻塞列表。 */
+    delete(id: string): Promise<{ ok: true } | { ok: false; blockedBy: { id: string; title: string }[] }>;
     create(input: CreateTaskInput): Promise<Task>;
     /** 批量创建（AI 提议）：把 dependsOn 的草稿引用映射为真实 taskId，事务化原子落库。 */
     createBatch(input: CreateBatchInput): Promise<Task[]>;
