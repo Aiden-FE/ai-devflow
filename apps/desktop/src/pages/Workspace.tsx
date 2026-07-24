@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, StatusBadge, useStream } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { TaskDetail } from './TaskDetail.js';
@@ -21,6 +21,7 @@ import {
 import { ScrollArea } from '../components/ui/scroll-area.js';
 import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
+import type { AskTabs, AskAnswer } from '../../electron/api.js';
 
 export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSettings }: {
   project?: Project;
@@ -430,11 +431,99 @@ function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { itera
   );
 }
 
+type AskCardState = { toolUseId: string; tabs: AskTabs; submitted: boolean };
+
+function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (answers: AskAnswer) => void }): React.ReactElement {
+  const t = useT();
+  const [activeTab, setActiveTab] = useState(0);
+  const [error, setError] = useState<string | undefined>();
+  const [local, setLocal] = useState<Record<string, Record<string, string | string[]>>>(() => {
+    const init: Record<string, Record<string, string | string[]>> = {};
+    for (const tab of state.tabs) {
+      init[tab.id] = {};
+      for (const q of tab.questions) init[tab.id][q.id] = q.kind === 'multi' ? [] : '';
+    }
+    return init;
+  });
+
+  const submit = () => {
+    for (const tab of state.tabs) {
+      for (const q of tab.questions) {
+        if (q.required) {
+          const v = local[tab.id]?.[q.id];
+          if (q.kind === 'multi' ? !Array.isArray(v) || v.length === 0 : !v) { setError(t('chat.ask.required')); return; }
+        }
+      }
+    }
+    setError(undefined);
+    const answers: AskAnswer = state.tabs.map((tab) => ({
+      tabId: tab.id,
+      answers: tab.questions.map((q) => ({ questionId: q.id, value: local[tab.id]?.[q.id] ?? (q.kind === 'multi' ? [] : '') })),
+    }));
+    onSubmit(answers);
+  };
+
+  if (state.submitted) {
+    return <div className="rounded-md border border-border bg-secondary/40 p-2 text-xs text-muted-foreground">{t('chat.ask.submitted')}</div>;
+  }
+  const tab = state.tabs[activeTab];
+  const lastTab = activeTab >= state.tabs.length - 1;
+
+  return (
+    <div className="rounded-md border border-border p-2 text-xs">
+      {state.tabs.length > 1 && (
+        <div className="flex gap-1 border-b border-border pb-1.5 mb-1.5">
+          {state.tabs.map((tb, i) => (
+            <button key={tb.id} onClick={() => setActiveTab(i)} className={`px-2 py-0.5 rounded ${i === activeTab ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>{tb.title}</button>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-col gap-2">
+        {tab.questions.map((q) => (
+          <div key={q.id} className="flex flex-col gap-1">
+            <label className="font-medium">{q.question}{q.required && <span className="text-destructive"> *</span>}</label>
+            {q.kind === 'text' ? (
+              <Textarea rows={2} value={(local[tab.id]?.[q.id] as string) ?? ''} onChange={(e) => setLocal((p) => ({ ...p, [tab.id]: { ...p[tab.id], [q.id]: e.target.value } }))} />
+            ) : q.kind === 'single' ? (
+              <Select value={(local[tab.id]?.[q.id] as string) ?? ''} onValueChange={(v) => setLocal((p) => ({ ...p, [tab.id]: { ...p[tab.id], [q.id]: v } }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>{q.options?.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+              </Select>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {q.options?.map((o) => {
+                  const arr = (local[tab.id]?.[q.id] as string[]) ?? [];
+                  return (
+                    <label key={o.value} className="flex items-center gap-1">
+                      <Checkbox checked={arr.includes(o.value)} onCheckedChange={() => setLocal((p) => {
+                        const cur = (p[tab.id]?.[q.id] as string[]) ?? [];
+                        return { ...p, [tab.id]: { ...p[tab.id], [q.id]: cur.includes(o.value) ? cur.filter((x) => x !== o.value) : [...cur, o.value] } };
+                      })} />
+                      <span>{o.label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {error && <div className="mt-1.5 text-destructive">{error}</div>}
+      <div className="mt-2 flex justify-end gap-1">
+        {state.tabs.length > 1 && !lastTab && <Button size="sm" variant="ghost" onClick={() => setActiveTab((i) => i + 1)}>{t('chat.ask.next')}</Button>}
+        <Button size="sm" onClick={submit} disabled={state.tabs.length > 1 && !lastTab}>{t('chat.ask.submit')}</Button>
+      </div>
+    </div>
+  );
+}
+
 function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const [askCards, setAskCards] = useState<Record<string, AskCardState>>({});
+  const sessionRef = useRef<string | undefined>(undefined);
 
   const send = async (text: string) => {
     if (streaming) return;
@@ -454,6 +543,11 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
         // AI 在需求足够清晰时调用 ai_devflow_propose_requirement 工具生成草稿；
         // 工具结果经事件流回传，直接填入表单，无需用户点“生成需求草稿”按钮。
         onRequirementProposal: (draft) => onApplied(draft),
+        onQuestion: (sessionId, toolUseId, tabs) => {
+          sessionRef.current = sessionId;
+          setAskCards((prev) => ({ ...prev, [toolUseId]: { toolUseId, tabs, submitted: false } }));
+          setMessages((prev) => [...prev, { id: `q-${toolUseId}`, role: 'assistant', kind: 'question', content: '' }]);
+        },
       });
     } catch (e) {
       setError((e as Error).message);
@@ -477,6 +571,20 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
         thinkingLabel={t('req.ai.thinking')}
         sendLabel={t('task.ai.send')}
         error={error}
+        renderMessage={(msg) => {
+          if (!('kind' in msg) || msg.kind !== 'question') return null;
+          const card = askCards[msg.id.replace(/^q-/, '')];
+          if (!card) return null;
+          return (
+            <AskCard
+              state={card}
+              onSubmit={async (answers) => {
+                if (sessionRef.current) await api.ai.answer(sessionRef.current, card.toolUseId, answers);
+                setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
+              }}
+            />
+          );
+        }}
       />
     </div>
   );
@@ -563,6 +671,8 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
+  const [askCards, setAskCards] = useState<Record<string, AskCardState>>({});
+  const sessionRef = useRef<string | undefined>(undefined);
   // 已有子任务：拼入上下文供 task_proposer 避免重复创建，并允许新任务跨批依赖这些 taskId。
   const [existingTasks, setExistingTasks] = useState<Task[]>([]);
   useEffect(() => {
@@ -598,6 +708,11 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
         context,
         projectPath,
         onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, role: x.role, dependsOn: x.dependsOn })) as AiTaskProposal[]),
+        onQuestion: (sessionId, toolUseId, tabs) => {
+          sessionRef.current = sessionId;
+          setAskCards((prev) => ({ ...prev, [toolUseId]: { toolUseId, tabs, submitted: false } }));
+          setMessages((prev) => [...prev, { id: `q-${toolUseId}`, role: 'assistant', kind: 'question', content: '' }]);
+        },
       });
       if (!assistant.trim()) {
         setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
@@ -656,6 +771,20 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
           thinkingLabel={t('task.ai.thinking')}
           sendLabel={t('task.ai.send')}
           error={error}
+          renderMessage={(msg) => {
+            if (!('kind' in msg) || msg.kind !== 'question') return null;
+            const card = askCards[msg.id.replace(/^q-/, '')];
+            if (!card) return null;
+            return (
+              <AskCard
+                state={card}
+                onSubmit={async (answers) => {
+                  if (sessionRef.current) await api.ai.answer(sessionRef.current, card.toolUseId, answers);
+                  setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
+                }}
+              />
+            );
+          }}
         />
       </div>
       {proposals && proposals.length > 0 && (

@@ -288,7 +288,7 @@ export interface DesktopApi {
         projectPath?: string;
         onRequirementProposal?: (draft: AiRequirementProposalDraft) => void;
         onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void;
-        onQuestion?: (toolUseId: string, tabs: AskTabs) => void;
+        onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void;
       },
     ): Promise<string>;
     /** 提交问答工具的答案（统一提交所有 tab）。 */

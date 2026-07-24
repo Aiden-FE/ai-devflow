@@ -120,7 +120,7 @@ const api: DesktopApi = {
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void; onQuestion?: (toolUseId: string, tabs: AskTabs) => void },
+      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void; onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void },
     ): Promise<string> {
       return new Promise((resolve, reject) => {
         const sessionId = globalThis.crypto.randomUUID();
@@ -129,7 +129,7 @@ const api: DesktopApi = {
           if (ev.type === 'delta') {
             onChunk(ev.text);
           } else if (ev.type === 'question') {
-            opts?.onQuestion?.(ev.toolUseId, ev.tabs);
+            opts?.onQuestion?.(sessionId, ev.toolUseId, ev.tabs);
           } else if (ev.type === 'requirement_proposal') {
             opts?.onRequirementProposal?.(ev.draft);
           } else if (ev.type === 'task_proposal') {

@@ -18,6 +18,10 @@ export const zh: Record<string, string> = {
 
   // ---- 对话 ----
   'chat.newMessages': '↓ {n} 条新消息',
+  'chat.ask.submit': '提交',
+  'chat.ask.required': '请回答必填问题',
+  'chat.ask.submitted': '已提交',
+  'chat.ask.next': '下一步',
 
   // ---- 导航 ----
   'nav.projects': '项目',

@@ -18,6 +18,10 @@ export const en: Record<string, string> = {
 
   // ---- chat ----
   'chat.newMessages': '↓ {n} new',
+  'chat.ask.submit': 'Submit',
+  'chat.ask.required': 'Please answer required questions',
+  'chat.ask.submitted': 'Submitted',
+  'chat.ask.next': 'Next',
 
   // ---- nav ----
   'nav.projects': 'Projects',
