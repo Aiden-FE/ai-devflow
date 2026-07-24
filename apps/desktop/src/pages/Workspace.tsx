@@ -475,7 +475,7 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
 
 function CreateTaskModal({ requirementId, onClose, onCreated }: { requirementId: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
-  const [mode, setMode] = useState<'manual' | 'ai'>('manual');
+  const [mode, setMode] = useState<'manual' | 'ai'>('ai');
   // 加载当前需求与已有兄弟任务：AI 生成带入需求上下文；手动创建可选择前置依赖。
   const reqQ = useAsync(() => api.requirements.get(requirementId), [requirementId]);
   const sibsQ = useAsync(() => api.tasks.listByRequirement(requirementId), [requirementId]);
@@ -551,7 +551,6 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
   const t = useT();
   const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [input, setInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
@@ -562,26 +561,20 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
     ? `【当前需求】\n标题：${requirement.title}\n描述：${requirement.description || '(无)'}\n验收标准：${requirement.acceptance || '(无)'}`
     : undefined;
 
-  const send = async () => {
-    if (!input.trim() || streaming) return;
-    const userMsg = { role: 'user' as const, content: input.trim() };
-    const next = [...messages, userMsg];
-    setMessages(next); setInput(''); setStreaming(true); setError(undefined);
-    let assistant = '';
-    setMessages([...next, { role: 'assistant', content: '' }]);
-    try {
-      assistant = await api.ai.chat(next, (delta) => {
-        assistant += delta;
-        setMessages((prev) => { const c = [...prev]; c[c.length - 1] = { role: 'assistant', content: assistant }; return c; });
-      }, { mode: 'task', context });
-    } catch (e) {
-      setError((e as Error).message);
-      setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
-    } finally { setStreaming(false); }
-  };
-
-  const propose = async () => {
-    if (messages.length === 0) return;
+  // 生成任务草稿：允许空消息（仅用需求上下文）。supplement 非空时作为补充说明追加到历史。
+  const generate = async (supplement?: string) => {
+    if (creating) return;
+    if (supplement?.trim()) {
+      const next = [...messages, { role: 'user' as const, content: supplement.trim() }];
+      setMessages(next);
+      setError(undefined); setProposals(undefined); setCreating(true);
+      try {
+        const list = await api.ai.propose(next.filter((m) => m.content), context);
+        setProposals(list);
+      } catch (e) { setError((e as Error).message); }
+      finally { setCreating(false); }
+      return;
+    }
     setError(undefined); setProposals(undefined); setCreating(true);
     try {
       const list = await api.ai.propose(messages.filter((m) => m.content), context);
@@ -590,19 +583,38 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
     finally { setCreating(false); }
   };
 
+  const regenerate = async () => {
+    if (!confirm(t('task.ai.regenerate.confirm'))) return;
+    await generate(input.trim() || undefined);
+    setInput('');
+  };
+
+  // 逐条编辑草稿。
+  const updateDraft = (draftId: string, patch: Partial<AiTaskProposal>) => {
+    setProposals((prev) => prev?.map((p) => (p.draftId === draftId ? { ...p, ...patch } : p)));
+  };
+  const deleteDraft = (draftId: string) => {
+    setProposals((prev) => prev?.filter((p) => p.draftId !== draftId));
+  };
+  const addDraft = () => {
+    const draftId = `draft-${Date.now()}`;
+    setProposals((prev) => [...(prev ?? []), { draftId, title: '', description: '', role: 'coder', dependsOn: [] }]);
+  };
+
   const createAll = async () => {
-    if (!proposals) return;
+    if (!proposals || proposals.length === 0) return;
+    const valid = proposals.filter((p) => p.title.trim());
+    if (valid.length === 0) { setError(t('task.ai.proposals')); return; }
+    if (!confirm(t('task.ai.createAll.confirm'))) return;
     setCreating(true); setError(undefined);
     try {
       // 事务化批量创建：主进程把 dependsOn 的草稿引用映射为真实 taskId 并原子落库。
       // 无依赖任务保持并行，仅为真实串行关系建立依赖（无需手动“串行”开关）。
-      const created = await api.tasks.createBatch({ requirementId, proposals });
+      const created = await api.tasks.createBatch({ requirementId, proposals: valid });
       onCreated(created[created.length - 1]?.id ?? '');
     } catch (e) { setError((e as Error).message); }
     finally { setCreating(false); }
   };
-
-  const titleOf = (draftId?: string) => proposals?.find((p) => p.draftId === draftId)?.title ?? draftId ?? '';
 
   return (
     <div className="mt-3 flex flex-col gap-3">
@@ -624,32 +636,57 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
         ))}
       </div>
       {error && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-      <div className="flex gap-2">
-        <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={t('task.ai.placeholder')} disabled={streaming} />
-        <Button size="sm" onClick={send} disabled={streaming || !input.trim()}>{t('task.ai.send')}</Button>
+      {/* 补充说明 + 生成/重生成 */}
+      <div className="flex flex-col gap-1.5">
+        <Label>{t('task.ai.supplement')}</Label>
+        <div className="flex gap-2">
+          <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generate(input.trim() || undefined); } }}
+            placeholder={t('task.ai.placeholder')} disabled={creating} />
+          {!proposals || proposals.length === 0
+            ? <Button size="sm" onClick={() => generate(input.trim() || undefined)} disabled={creating}>{creating ? t('task.ai.generating') : t('task.ai.generate')}</Button>
+            : <Button size="sm" variant="outline" onClick={regenerate} disabled={creating}>{t('task.ai.regenerate')}</Button>}
+        </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" onClick={propose} disabled={creating || messages.length === 0}>
-          {creating ? t('task.ai.generating') : t('task.ai.propose')}
-        </Button>
-      </div>
-      {proposals && (
+      {proposals && proposals.length > 0 && (
         <div className="flex flex-col gap-2">
-          <div className="text-xs font-medium text-muted-foreground">{t('task.ai.proposals')}</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-medium text-muted-foreground">{t('task.ai.proposals')}</div>
+            <Button size="sm" variant="ghost" onClick={addDraft}>{t('task.ai.addDraft')}</Button>
+          </div>
           {proposals.map((p) => (
             <div key={p.draftId} className="rounded-md border border-border p-2 text-xs">
-              <div className="flex flex-wrap items-center gap-1 font-medium">
-                <span className="break-words">{p.title}</span>
-                <Badge variant="outline" className="text-[10px]">{t(`role.${p.role}`)}</Badge>
-                {(p.dependsOn?.length ?? 0) > 0 && (
-                  <Badge variant="secondary" className="text-[10px]">
-                    {t('task.dependsOn')}: {p.dependsOn!.map(titleOf).join('、')}
-                  </Badge>
-                )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Input className="h-7 flex-1" value={p.title} onChange={(e) => updateDraft(p.draftId, { title: e.target.value })} placeholder={t('task.title')} />
+                <Select value={p.role} onValueChange={(v) => updateDraft(p.draftId, { role: v as TaskRole })}>
+                  <SelectTrigger className="h-7 w-24"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="planner">{t('role.planner')}</SelectItem>
+                    <SelectItem value="coder">{t('role.coder')}</SelectItem>
+                    <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
+                    <SelectItem value="tester">{t('role.tester')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deleteDraft(p.draftId)}>{t('task.ai.deleteDraft')}</Button>
               </div>
-              <div className="mt-0.5 break-words text-muted-foreground">{p.description}</div>
+              <Textarea className="mt-1.5 min-h-[40px]" value={p.description} onChange={(e) => updateDraft(p.draftId, { description: e.target.value })} rows={2} placeholder={t('task.description')} />
+              {(proposals.filter((x) => x.draftId !== p.draftId).length) > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {proposals.filter((x) => x.draftId !== p.draftId).map((sib) => (
+                    <label key={sib.draftId} className="flex items-center gap-1 text-[11px]">
+                      <Checkbox
+                        checked={(p.dependsOn ?? []).includes(sib.draftId)}
+                        onCheckedChange={() => updateDraft(p.draftId, {
+                          dependsOn: (p.dependsOn ?? []).includes(sib.draftId)
+                            ? (p.dependsOn ?? []).filter((d) => d !== sib.draftId)
+                            : [...(p.dependsOn ?? []), sib.draftId],
+                        })}
+                      />
+                      <span className="truncate">{sib.title || sib.draftId}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
           <Button size="sm" onClick={createAll} disabled={creating}>{t('task.ai.createAll')}</Button>
