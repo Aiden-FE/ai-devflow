@@ -261,7 +261,7 @@ export interface AiTaskProposal {
   title: string;
   description: string;
   role: TaskRole;
-  /** 依赖的其它草稿 draftId 列表（DAG；无依赖则保持并行）。 */
+  /** 依赖的任务标识列表（DAG；无依赖则保持并行）。可引用同批 draftId 或已有任务 taskId。 */
   dependsOn?: string[];
 }
 

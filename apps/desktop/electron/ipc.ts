@@ -252,13 +252,19 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (!validation.ok) throw new Error(`任务依赖不合法：${validation.reasons.join('；')}`);
     // 依赖在前排序，确保被依赖任务先拿到真实 ID。
     const ordered = topoSortProposals(proposals);
+    // 已有子任务 taskId 集合：跨批依赖允许引用它们（原样保留）。
+    const existing = repos.tasks.listByRequirement(input.requirementId);
+    const existingIds = new Set(existing.map((t) => t.id));
     const draftToId = new Map<string, string>();
     const created: Task[] = [];
     for (const p of ordered) {
       const id = randomId();
       draftToId.set(p.draftId, id);
       const dependsOn = (p.dependsOn ?? [])
-        .map((d) => draftToId.get(d))
+        .map((d) => {
+          if (existingIds.has(d)) return d;          // 已有 taskId：原样保留
+          return draftToId.get(d);                    // 同批 draftId：映射为真实 taskId
+        })
         .filter((x): x is string => !!x);
       created.push({
         id,

@@ -62,7 +62,8 @@ export function validateProposalDag(proposals: DraftRef[]): ProposalDagResult {
   for (const p of proposals) {
     for (const dep of p.dependsOn ?? []) {
       if (dep === p.draftId) reasons.push(`任务「${p.draftId}」不能依赖自身`);
-      else if (!ids.has(dep)) reasons.push(`任务「${p.draftId}」依赖了不存在的草稿「${dep}」`);
+      // 跨批依赖：dependsOn 可引用已有任务 taskId（不在本批内），不再强制引用必须在本批存在。
+      // 已有 taskId 合法性由 createBatch 的 existingIds 判断，此处仅校验无环与无自引用。
     }
   }
   if (proposalHasCycle(proposals)) reasons.push('依赖关系存在环，无法构成 DAG');

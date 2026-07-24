@@ -51,10 +51,9 @@ describe('validateProposalDag', () => {
     expect(r.reasons.join()).toMatch(/自身/);
   });
 
-  it('rejects references to non-existent drafts', () => {
-    const r = validateProposalDag([{ draftId: 't1', dependsOn: ['ghost'] }]);
-    expect(r.ok).toBe(false);
-    expect(r.reasons.join()).toMatch(/不存在/);
+  it('accepts references to existing taskIds (cross-batch dependencies)', () => {
+    const r = validateProposalDag([{ draftId: 't1', dependsOn: ['T-abc123'] }]);
+    expect(r.ok).toBe(true);
   });
 
   it('rejects a direct cycle', () => {
