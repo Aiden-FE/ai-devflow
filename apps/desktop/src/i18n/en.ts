@@ -16,6 +16,9 @@ export const en: Record<string, string> = {
   'common.ok': 'OK',
   'common.fail': 'Failed',
 
+  // ---- chat ----
+  'chat.newMessages': '↓ {n} new',
+
   // ---- nav ----
   'nav.projects': 'Projects',
   'nav.workspace': 'Workspace',

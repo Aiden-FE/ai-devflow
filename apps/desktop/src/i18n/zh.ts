@@ -16,6 +16,9 @@ export const zh: Record<string, string> = {
   'common.ok': '成功',
   'common.fail': '失败',
 
+  // ---- 对话 ----
+  'chat.newMessages': '↓ {n} 条新消息',
+
   // ---- 导航 ----
   'nav.projects': '项目',
   'nav.workspace': '工作台',
