@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, StatusBadge, useStream } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { TaskDetail } from './TaskDetail.js';
+import { useStickToBottom } from '../hooks/useStickToBottom.js';
+import { NewMessagesButton } from '../components/NewMessagesButton.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
@@ -415,6 +417,7 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
+  const stick = useStickToBottom([messages]);
 
   const send = async () => {
     if (!input.trim() || streaming) return;
@@ -441,7 +444,8 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
 
   return (
     <div className="mt-1 flex flex-col gap-3">
-      <div className="h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
+      <div ref={stick.containerRef} className="relative h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
+        <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">{t('req.ai.placeholder')}</div>
         ) : messages.map((m, i) => (
@@ -545,6 +549,7 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
+  const stick = useStickToBottom([messages]);
 
   // 把当前需求内容作为上下文注入 AI，使生成的任务对齐需求与验收标准。
   const context = requirement
@@ -600,7 +605,8 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
           <span className="text-muted-foreground">{t('detail.linkage.req')}：</span>{requirement.title}
         </div>
       )}
-      <div className="h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
+      <div ref={stick.containerRef} className="relative h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
+        <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">{t('task.ai.placeholder')}</div>
         ) : messages.map((m, i) => (
