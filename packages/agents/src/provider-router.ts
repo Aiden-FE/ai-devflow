@@ -14,7 +14,6 @@
 // modelRouteFor 为集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入。
 import { createHash } from 'node:crypto';
 import type { FailureKind, ModelRoleKey, ProviderConfig, ProviderHealth, ProviderKind, Workload } from '@ai-devflow/core';
-
 export interface ModelChoice {
   model: string;
   thinking: 'low' | 'medium' | 'high' | 'xhigh';
@@ -171,18 +170,50 @@ export interface ProviderRouterDeps {
   sleep(ms: number): Promise<void>;
   /** 集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入非生产模型。 */
   modelRouteFor?: (provider: ProviderConfig, workload: Workload) => ModelRoute | undefined;
+  /** 生产级 agent 覆盖：按 workload 返回用户配置的 {providerId, model}；命中则仅用该 provider+model，不可用时回退默认路由。 */
+  agentOverrideFor?: (workload: Workload) => { providerId: string; model: string } | undefined;
 }
 
 export class ProviderRouter {
   constructor(private deps: ProviderRouterDeps) {}
 
-  /** 生成某 workload 的候选路线（每提供商至多一条：用户配置解析出的模型），跳过冷却路线；全冷却时仅 half-open 探测最早到期者。 */
+  /** 生成某 workload 的候选路线。覆盖存在且可用时仅返回该 provider+model；不可用回退默认有序路由。 */
   routesFor(workload: Workload, now = this.deps.now()): ProviderRoute[] {
-    const providers = this.deps
-      .listProviders()
-      .filter((p) => p.enabled)
-      .sort((a, b) => a.priority - b.priority);
+    const override = this.deps.agentOverrideFor?.(workload);
+    if (override) {
+      const overrideCandidates = this.collectCandidates(
+        this.deps.listProviders().filter((p) => p.enabled && p.id === override.providerId),
+        workload,
+        now,
+        override,
+      );
+      const overrideActive = overrideCandidates.filter((c) => !c.cooling).map((c) => c.route);
+      if (overrideActive.length > 0) return overrideActive;
+      // 覆盖 provider 不可用（禁用/无凭证/冷却中无 half-open）-> 回退默认路由。
+    }
+    const candidates = this.collectCandidates(
+      this.deps.listProviders().filter((p) => p.enabled).sort((a, b) => a.priority - b.priority),
+      workload,
+      now,
+      undefined,
+    );
+    const active = candidates.filter((c) => !c.cooling).map((c) => c.route);
+    if (active.length > 0) return active;
+    // 全部冷却：仅选最早到期的一条 half-open 探测（无到期者如 auth 不可探测）。
+    const probes = candidates
+      .filter((c) => c.probeEligible)
+      .sort((a, b) => (a.cooldownUntil ?? 0) - (b.cooldownUntil ?? 0));
+    if (probes.length > 0) return [probes[0]!.route];
+    return [];
+  }
 
+  /** 收集候选：遍历 providers，按 override/seam/默认解析模型与 thinking，叠加健康/冷却状态。 */
+  private collectCandidates(
+    providers: ProviderConfig[],
+    workload: Workload,
+    now: number,
+    override: { providerId: string; model: string } | undefined,
+  ): { route: ProviderRoute; cooling: boolean; cooldownUntil?: number; probeEligible: boolean }[] {
     interface Candidate {
       route: ProviderRoute;
       cooling: boolean;
@@ -195,11 +226,13 @@ export class ProviderRouter {
       if (authHealth?.state === 'open' || authHealth?.state === 'half_open') continue;
       const secret = this.deps.resolveSecret(provider.id);
       if (!secret) continue;
-      // modelRouteFor 缝存在时覆盖用户配置解析（含 thinking）；否则按 defaultModel/workloadModels 解析。
       const seam = this.deps.modelRouteFor?.(provider, workload);
       let model: string | undefined;
       let thinking: ModelChoice['thinking'];
-      if (seam) {
+      if (override && provider.id === override.providerId) {
+        model = override.model;
+        thinking = DEFAULT_THINKING_BY_ROLE[workloadRoleKey(workload)];
+      } else if (seam) {
         model = seam.primary.model;
         thinking = seam.primary.thinking;
       } else {
@@ -232,15 +265,7 @@ export class ProviderRouter {
         probeEligible: !!isOpen && h?.cooldownUntil !== undefined,
       });
     }
-
-    const active = candidates.filter((c) => !c.cooling).map((c) => c.route);
-    if (active.length > 0) return active;
-    // 全部冷却：仅选最早到期的一条 half-open 探测（无到期者如 auth 不可探测）。
-    const probes = candidates
-      .filter((c) => c.probeEligible)
-      .sort((a, b) => (a.cooldownUntil ?? 0) - (b.cooldownUntil ?? 0));
-    if (probes.length > 0) return [probes[0]!.route];
-    return [];
+    return candidates;
   }
 
   /**

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
 import { ProviderExecutionError, ProviderRouter, classifyProviderFailure } from '../provider-router.js';
-
 function makeRouterHarness(ids: string[]) {
   const providers: ProviderConfig[] = ids.map((id, priority) => ({
     id, kind: 'openai' as const, displayName: id, enabled: true, priority,
@@ -286,5 +285,56 @@ describe('classifyProviderFailure', () => {
     expect(classifyProviderFailure({ message: 'getaddrinfo ENOTFOUND api.example.com' })).toBe('transient_provider');
     expect(classifyProviderFailure({ message: 'unexpected token in JSON' })).toBe('protocol');
     expect(classifyProviderFailure({ message: 'spawn pi ENOENT', code: 'ENOENT' })).toBe('runtime');
+  });
+});
+
+function overrideHarness(providers: ProviderConfig[], opts: { secret?: (id: string) => string | undefined; agentOverrideFor?: (w: string) => { providerId: string; model: string } | undefined }) {
+  const health = new Map<string, { state: 'closed' | 'open' | 'half_open'; cooldownUntil?: number; lastFailureKind?: string }>();
+  const router = new ProviderRouter({
+    listProviders: () => providers,
+    resolveSecret: opts.secret ?? ((id) => `secret-${id}`),
+    health: {
+      get: (pid: string, rid: string) => health.get(`${pid}:${rid}`) as any,
+      listByProvider: (pid: string) => [...health.entries()].filter(([k]) => k.startsWith(pid + ':')).map(([, v]) => ({ providerId: pid, routeId: '', consecutiveFailures: 0, updatedAt: 0, ...v }) as any),
+      upsert: (v: any) => { health.set(`${v.providerId}:${v.routeId}`, { state: v.state, cooldownUntil: v.cooldownUntil, lastFailureKind: v.lastFailureKind }); },
+      clearProvider: (pid: string) => { for (const k of [...health.keys()]) if (k.startsWith(pid + ':')) health.delete(k); },
+    },
+    now: () => 1000,
+    sleep: async () => {},
+    agentOverrideFor: opts.agentOverrideFor,
+  });
+  return { router };
+}
+
+describe('ProviderRouter agent override', () => {
+  const p1: ProviderConfig = { id: 'p1', kind: 'openai', displayName: 'P1', enabled: true, priority: 0, authType: 'api_key', credentialRef: 'provider:p1', defaultModel: 'gpt-4o', revision: 1 };
+  const p2: ProviderConfig = { id: 'p2', kind: 'anthropic', displayName: 'P2', enabled: true, priority: 1, authType: 'api_key', credentialRef: 'provider:p2', defaultModel: 'claude-3-5-sonnet', revision: 1 };
+
+  it('覆盖存在时仅返回该 provider 并强制 model', () => {
+    const { router } = overrideHarness([p1, p2], { agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
+    const routes = router.routesFor('requirement_chat');
+    expect(routes).toHaveLength(1);
+    expect(routes[0]!.providerId).toBe('p2');
+    expect(routes[0]!.model).toBe('claude-opus');
+  });
+
+  it('覆盖 provider 被禁用时回退到默认有序路由', () => {
+    const p2Disabled = { ...p2, enabled: false };
+    const { router } = overrideHarness([p1, p2Disabled], { agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
+    const routes = router.routesFor('requirement_chat');
+    expect(routes.map((r) => r.providerId)).toEqual(['p1']);
+    expect(routes[0]!.model).toBe('gpt-4o');
+  });
+
+  it('覆盖 provider 无凭证时回退到默认路由', () => {
+    const { router } = overrideHarness([p1, p2], { secret: (id) => (id === 'p2' ? undefined : `secret-${id}`), agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
+    const routes = router.routesFor('requirement_chat');
+    expect(routes.map((r) => r.providerId)).toEqual(['p1']);
+  });
+
+  it('无覆盖时走默认 workloadModels/defaultModel', () => {
+    const { router } = overrideHarness([p1, p2], {});
+    const routes = router.routesFor('coder');
+    expect(routes.map((r) => r.providerId)).toEqual(['p1', 'p2']);
   });
 });
