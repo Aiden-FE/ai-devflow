@@ -1,6 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api, StatusBadge, fmtTime, useStream, EmptyState } from '../lib.js';
 import { useT } from '../i18n/index.js';
+import { useStickToBottom } from '../hooks/useStickToBottom.js';
+import { NewMessagesButton } from '../components/NewMessagesButton.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
@@ -33,7 +35,6 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
   const [showHistory, setShowHistory] = useState(false);
   const [confirmAccept, setConfirmAccept] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
-  const convRef = useRef<HTMLDivElement>(null);
 
   const load = async () => {
     const [tg, lg, ex, pn, msgs, inters] = await Promise.all([
@@ -71,10 +72,8 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
     }
   });
 
-  // 对话窗口自动滚动到底部
-  useEffect(() => {
-    if (convRef.current) convRef.current.scrollTop = convRef.current.scrollHeight;
-  }, [messages, interactions]);
+  // 对话窗口粘底滚动：用户上滚越过阈值则暂停并提示新消息。
+  const stick = useStickToBottom([messages, interactions]);
 
   const act = async (fn: () => Promise<void>) => {
     setBusy(true); setError(undefined);
@@ -172,7 +171,8 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
       {/* 对话窗口：消息气泡 + 工具调用折叠 + 自动滚动；底部固定输入区（仅 awaiting_input 出现） */}
       <div className="flex min-w-0 flex-col rounded-lg border border-border bg-card p-3">
         <h4 className="mt-0 text-sm font-semibold">{t('detail.conversation')}</h4>
-        <div ref={convRef} className="mt-1 max-h-[52vh] min-h-[160px] flex-1 overflow-y-auto rounded p-2 text-xs scrollbar-thin" style={{ backgroundColor: 'var(--console-bg)', color: 'var(--console-fg)' }}>
+        <div ref={stick.containerRef} className="relative mt-1 max-h-[52vh] min-h-[160px] flex-1 overflow-y-auto rounded p-2 text-xs scrollbar-thin" style={{ backgroundColor: 'var(--console-bg)', color: 'var(--console-fg)' }}>
+          <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
           {messages.length === 0
             ? <span className="text-muted-foreground">{t('detail.conversation.empty')}</span>
             : messages.map((m) => <MessageBubble key={m.id} m={m} />)}

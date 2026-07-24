@@ -6,7 +6,7 @@ export function isAtBottom(scrollTop: number, scrollHeight: number, clientHeight
 }
 
 export interface StickToBottom {
-  containerRef: React.RefObject<HTMLDivElement | null>;
+  containerRef: React.RefObject<HTMLDivElement>;
   paused: boolean;
   unreadCount: number;
   resume: () => void;
@@ -18,7 +18,7 @@ export interface StickToBottom {
  * - 用户手动滚回底部（isAtBottom）时自动恢复。
  */
 export function useStickToBottom(deps: unknown[], threshold = 120): StickToBottom {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [paused, setPaused] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const programmaticRef = useRef(false);
