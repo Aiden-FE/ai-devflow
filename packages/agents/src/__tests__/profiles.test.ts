@@ -197,11 +197,24 @@ describe('STEP_AGENTS', () => {
     expect(step.extensions).toContain('requirement-bridge');
     expect(step.tools).toContain('ai_devflow_propose_requirement');
   });
-  it('stepAgentForWorkload maps requirement_chat to requirement_refiner and others to undefined', () => {
+  it('registers task_proposer with brainstorming skill + read-only exploration tools + task-bridge extension + propose task tool', () => {
+    const step = STEP_AGENTS['task_proposer'];
+    expect(step).toBeDefined();
+    expect(step.tools).toContain('ai_devflow_propose_task');
+    // 研发视角：先探索相关项目逻辑（只读工具），再产出子任务。
+    expect(step.tools).toContain('read');
+    expect(step.tools).toContain('grep');
+    expect(step.tools).toContain('find');
+    expect(step.tools).toContain('ls');
+    // 用 brainstorming 一次一问地澄清研发侧不清晰的问题。
+    expect(step.skills).toEqual(['brainstorming']);
+    expect(step.extensions).toContain('task-bridge');
+  });
+  it('stepAgentForWorkload maps requirement_chat and task_proposal to their step agents, others to undefined', () => {
     expect(stepAgentForWorkload('requirement_chat')?.step).toBe('requirement_refiner');
+    expect(stepAgentForWorkload('task_proposal')?.step).toBe('task_proposer');
     expect(stepAgentForWorkload('task_chat')).toBeUndefined();
     expect(stepAgentForWorkload('requirement_proposal')).toBeUndefined();
-    expect(stepAgentForWorkload('task_proposal')).toBeUndefined();
   });
   it('validateStepAgents passes for built-in step agents', () => {
     expect(() => validateStepAgents()).not.toThrow();
@@ -225,5 +238,10 @@ describe('STEP_AGENTS', () => {
     expect(existsSync(join(ASSETS_ROOT, 'steps', 'requirement_refiner', 'SYSTEM.md'))).toBe(true);
     expect(existsSync(join(ASSETS_ROOT, 'shared', 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(ASSETS_ROOT, 'shared', 'extensions', 'requirement-bridge.ts'))).toBe(true);
+  });
+  it('materializes task_proposer assets (SYSTEM.md, brainstorming skill, task-bridge extension)', () => {
+    expect(existsSync(join(ASSETS_ROOT, 'steps', 'task_proposer', 'SYSTEM.md'))).toBe(true);
+    expect(existsSync(join(ASSETS_ROOT, 'shared', 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
+    expect(existsSync(join(ASSETS_ROOT, 'shared', 'extensions', 'task-bridge.ts'))).toBe(true);
   });
 });

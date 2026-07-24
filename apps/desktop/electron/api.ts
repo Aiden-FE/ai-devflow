@@ -76,6 +76,15 @@ export interface CreateBatchInput {
   proposals: AiTaskProposal[];
 }
 
+/** AI 任务草稿（多轮沟通后由 task_proposer 经工具产出；description 为实施计划）。 */
+export type AiTaskProposalDraft = {
+  draftId: string;
+  title: string;
+  description: string;
+  role: TaskRole;
+  dependsOn: string[];
+};
+
 /** AI 流式事件（chat 增量/完成/出错）。 */
 export type AiRequirementProposalDraft = {
   title: string;
@@ -88,7 +97,8 @@ export type AiStreamEvent =
   | { type: 'delta'; sessionId: string; text: string }
   | { type: 'done'; sessionId: string; fullText: string }
   | { type: 'error'; sessionId: string; error: string }
-  | { type: 'requirement_proposal'; sessionId: string; draft: AiRequirementProposalDraft };
+  | { type: 'requirement_proposal'; sessionId: string; draft: AiRequirementProposalDraft }
+  | { type: 'task_proposal'; sessionId: string; tasks: AiTaskProposalDraft[] };
 
 export interface StreamEvent {
   kind:
@@ -243,15 +253,21 @@ export interface DesktopApi {
   ai: {
     /**
      * 流式对话：onChunk 接收增量文本，resolve 完整文本。
-     * mode 决定系统提示聚焦（任务拆分 / 需求完善）；context 为附加上下文（如当前需求内容）。
+     * mode 决定聚焦：task（任务对话）/ requirement（需求完善）/ task_proposal（研发视角拆解子任务）。
+     * context 为附加上下文（如当前需求内容）。mode='task_proposal' 时需传 projectPath 以便 AI 探索仓库代码，
+     * 并通过 onTaskProposal 接收 AI 在方案确定后产出的任务草稿。
      */
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement'; context?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void },
+      opts?: {
+        mode?: 'task' | 'requirement' | 'task_proposal';
+        context?: string;
+        projectPath?: string;
+        onRequirementProposal?: (draft: AiRequirementProposalDraft) => void;
+        onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void;
+      },
     ): Promise<string>;
-    /** 基于对话生成结构化任务草稿。context 可带入当前需求内容。 */
-    propose(messages: AiChatMessage[], context?: string): Promise<AiTaskProposal[]>;
     /** 基于对话生成结构化需求草稿（标题/描述/验收标准/优先级）。 */
     proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   };

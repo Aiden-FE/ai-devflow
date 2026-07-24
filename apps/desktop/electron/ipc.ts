@@ -491,7 +491,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('updates', 'status'), () => updater.status());
 
   // ---- AI 沟通：流式对话 + 结构化草稿（任务 / 需求） ----
-  ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement'; context?: string }) => {
+  ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string }) => {
     if (!services.piAi) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: '应用运行组件未就绪' });
       return;
@@ -504,11 +504,30 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       const fullText = await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
         mode: payload.mode,
         context: payload.context,
+        projectPath: payload.projectPath,
         onToolResult: (toolName, payloadDraft) => {
           if (toolName === 'ai_devflow_propose_requirement' && payloadDraft && typeof payloadDraft === 'object') {
             const d = payloadDraft as { title?: unknown; description?: unknown; acceptance?: unknown; priority?: unknown };
             if (typeof d.title === 'string' && typeof d.description === 'string' && typeof d.acceptance === 'string' && (d.priority === 'low' || d.priority === 'medium' || d.priority === 'high')) {
               sendAi({ type: 'requirement_proposal', sessionId: payload.sessionId, draft: { title: d.title, description: d.description, acceptance: d.acceptance, priority: d.priority } });
+            }
+          } else if (toolName === 'ai_devflow_propose_task' && payloadDraft && typeof payloadDraft === 'object') {
+            // task_proposer 在方案确定后调用工具产出任务草稿：校验 tasks 形态后经 task_proposal 事件回传 UI 填草稿区。
+            const t = payloadDraft as { tasks?: unknown };
+            const arr = Array.isArray(t.tasks) ? t.tasks : [];
+            const tasks = arr
+              .map((x, i) => {
+                if (!x || typeof x !== 'object') return undefined;
+                const o = x as { draftId?: unknown; title?: unknown; description?: unknown; role?: unknown; dependsOn?: unknown };
+                if (typeof o.title !== 'string' || typeof o.description !== 'string') return undefined;
+                const role = o.role === 'planner' || o.role === 'coder' || o.role === 'reviewer' || o.role === 'tester' ? o.role : 'coder';
+                const draftId = typeof o.draftId === 'string' && o.draftId.trim() ? o.draftId.trim() : `t${i + 1}`;
+                const dependsOn = Array.isArray(o.dependsOn) ? o.dependsOn.filter((d): d is string => typeof d === 'string') : [];
+                return { draftId, title: o.title, description: o.description, role, dependsOn };
+              })
+              .filter((x): x is { draftId: string; title: string; description: string; role: 'planner' | 'coder' | 'reviewer' | 'tester'; dependsOn: string[] } => !!x);
+            if (tasks.length > 0) {
+              sendAi({ type: 'task_proposal', sessionId: payload.sessionId, tasks });
             }
           }
         },
@@ -517,11 +536,6 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     } catch (e) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
     }
-  });
-  ipcMain.handle(channel('ai', 'propose'), async (_e, messages: AiChatMessage[], context?: string) => {
-    if (!services.piAi) throw new Error('应用运行组件未就绪');
-    if (!providerStore?.list().length) throw new Error('尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。');
-    return services.piAi.propose(messages, context);
   });
   ipcMain.handle(channel('ai', 'proposeRequirement'), async (_e, messages: AiChatMessage[]) => {
     if (!services.piAi) throw new Error('应用运行组件未就绪');

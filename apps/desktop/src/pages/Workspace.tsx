@@ -84,12 +84,12 @@ export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSe
         </Select>
         {activeIter && <Button variant="ghost" size="sm" onClick={async () => { await api.iterations.archive(activeIter); iterationsQ.reload(); }}><Archive className="h-4 w-4" /> {t('ws.archiveIteration')}</Button>}
       </div>
-      {activeIter ? <WorkspaceBody iterationId={activeIter} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
+      {activeIter ? <WorkspaceBody iterationId={activeIter} projectPath={activeProject.path} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
     </div>
   );
 }
 
-function WorkspaceBody({ iterationId, onNavigateSettings }: { iterationId: string; onNavigateSettings?: () => void }): React.ReactElement {
+function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { iterationId: string; projectPath?: string; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const reqsQ = useAsync(() => api.requirements.list(iterationId), [iterationId]);
   const tasksQ = useAsync(() => api.tasks.listByIteration(iterationId), [iterationId]);
@@ -196,7 +196,7 @@ function WorkspaceBody({ iterationId, onNavigateSettings }: { iterationId: strin
       </Sheet>
 
       {createTaskFor && (
-        <CreateTaskModal requirementId={createTaskFor} onClose={() => setCreateTaskFor(undefined)}
+        <CreateTaskModal requirementId={createTaskFor} projectPath={projectPath} onClose={() => setCreateTaskFor(undefined)}
           onCreated={() => { setCreateTaskFor(undefined); tasksQ.reload(); }} />
       )}
     </div>
@@ -473,7 +473,7 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
   );
 }
 
-function CreateTaskModal({ requirementId, onClose, onCreated }: { requirementId: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
+function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { requirementId: string; projectPath?: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [mode, setMode] = useState<'manual' | 'ai'>('ai');
   // 加载当前需求与已有兄弟任务：AI 生成带入需求上下文；手动创建可选择前置依赖。
@@ -491,7 +491,7 @@ function CreateTaskModal({ requirementId, onClose, onCreated }: { requirementId:
         </div>
         {mode === 'manual'
           ? <ManualCreateTask requirementId={requirementId} siblings={siblings} onCreated={onCreated} />
-          : <AiCreateTask requirementId={requirementId} requirement={requirement} onCreated={onCreated} />}
+          : <AiCreateTask requirementId={requirementId} requirement={requirement} projectPath={projectPath} onCreated={onCreated} />}
       </DialogContent>
     </Dialog>
   );
@@ -547,46 +547,47 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
   );
 }
 
-function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId: string; requirement?: Requirement; onCreated: (taskId: string) => void }): React.ReactElement {
+function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { requirementId: string; requirement?: Requirement; projectPath?: string; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
   const [input, setInput] = useState('');
+  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
   const stick = useStickToBottom([messages]);
 
-  // 把当前需求内容作为上下文注入 AI，使生成的任务对齐需求与验收标准。
+  // 把当前需求内容作为上下文注入 AI，使拆解对齐需求与验收标准。
   const context = requirement
     ? `【当前需求】\n标题：${requirement.title}\n描述：${requirement.description || '(无)'}\n验收标准：${requirement.acceptance || '(无)'}`
     : undefined;
 
-  // 生成任务草稿：允许空消息（仅用需求上下文）。supplement 非空时作为补充说明追加到历史。
-  const generate = async (supplement?: string) => {
-    if (creating) return;
-    if (supplement?.trim()) {
-      const next = [...messages, { role: 'user' as const, content: supplement.trim() }];
-      setMessages(next);
-      setError(undefined); setProposals(undefined); setCreating(true);
-      try {
-        const list = await api.ai.propose(next.filter((m) => m.content), context);
-        setProposals(list);
-      } catch (e) { setError((e as Error).message); }
-      finally { setCreating(false); }
-      return;
-    }
-    setError(undefined); setProposals(undefined); setCreating(true);
+  // 多轮沟通：研发视角的 task_proposer 会先用 brainstorming 梳理、探索仓库代码、一次一问地澄清，
+  // 方案确定后调用 ai_devflow_propose_task 工具产出任务草稿（经 onTaskProposal 回传）。
+  const send = async () => {
+    if (!input.trim() || streaming) return;
+    const userMsg = { role: 'user' as const, content: input.trim() };
+    const next = [...messages, userMsg];
+    setMessages(next); setInput(''); setStreaming(true); setError(undefined);
+    let assistant = '';
+    setMessages([...next, { role: 'assistant', content: '' }]);
     try {
-      const list = await api.ai.propose(messages.filter((m) => m.content), context);
-      setProposals(list);
-    } catch (e) { setError((e as Error).message); }
-    finally { setCreating(false); }
-  };
-
-  const regenerate = async () => {
-    if (!confirm(t('task.ai.regenerate.confirm'))) return;
-    await generate(input.trim() || undefined);
-    setInput('');
+      assistant = await api.ai.chat(next, (delta) => {
+        assistant += delta;
+        setMessages((prev) => { const c = [...prev]; c[c.length - 1] = { role: 'assistant', content: assistant }; return c; });
+      }, {
+        mode: 'task_proposal',
+        context,
+        projectPath,
+        onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, role: x.role, dependsOn: x.dependsOn })) as AiTaskProposal[]),
+      });
+      if (!assistant.trim()) {
+        setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+      }
+    } catch (e) {
+      setError((e as Error).message);
+      setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+    } finally { setStreaming(false); }
   };
 
   // 逐条编辑草稿。
@@ -636,17 +637,11 @@ function AiCreateTask({ requirementId, requirement, onCreated }: { requirementId
         ))}
       </div>
       {error && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-      {/* 补充说明 + 生成/重生成 */}
-      <div className="flex flex-col gap-1.5">
-        <Label>{t('task.ai.supplement')}</Label>
-        <div className="flex gap-2">
-          <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generate(input.trim() || undefined); } }}
-            placeholder={t('task.ai.placeholder')} disabled={creating} />
-          {!proposals || proposals.length === 0
-            ? <Button size="sm" onClick={() => generate(input.trim() || undefined)} disabled={creating}>{creating ? t('task.ai.generating') : t('task.ai.generate')}</Button>
-            : <Button size="sm" variant="outline" onClick={regenerate} disabled={creating}>{t('task.ai.regenerate')}</Button>}
-        </div>
+      <div className="flex gap-2">
+        <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder={t('task.ai.placeholder')} disabled={streaming} />
+        <Button size="sm" onClick={send} disabled={streaming || !input.trim()}>{t('task.ai.send')}</Button>
       </div>
       {proposals && proposals.length > 0 && (
         <div className="flex flex-col gap-2">

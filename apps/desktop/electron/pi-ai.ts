@@ -1,11 +1,11 @@
-// AI 对话与结构化提案服务：Pi-only，无工具 workload（设计 §9.1 / §10）。
-// 所有 AI 沟通（任务对话、需求对话、任务草稿、需求草稿）都通过 ProviderRouter 路由到内置 Pi，
+// AI 对话与结构化提案服务：Pi-only。requirement_chat / task_proposal 走步骤 Agent（有工具/技能/扩展），
+// task_chat / requirement_proposal 走无工具对话路径。所有 AI 沟通都通过 ProviderRouter 路由到内置 Pi，
 // 在主进程内以 JSON 模式.spawn 一个独立 Pi attempt；不依赖 ai-sdk，不读取旧 ai_provider 凭证。
 import { randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AiChatMessage, AiRequirementProposal, AiTaskProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
-import { redactText, validateProposalDag } from '@ai-devflow/core';
+import type { AiChatMessage, AiRequirementProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
+import { redactText } from '@ai-devflow/core';
 import { z } from 'zod';
 import type {
   PiProcessSupervisor,
@@ -21,7 +21,7 @@ import {
   isCompatibleKind,
   stepAgentForWorkload,
 } from '@ai-devflow/agents';
-import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM, PROPOSE_TASK_SYSTEM } from './pi-ai-prompts.js';
+import { CHAT_SYSTEM_REQ, CHAT_SYSTEM_TASK, PROPOSE_REQUIREMENT_SYSTEM } from './pi-ai-prompts.js';
 import { fetchCompatibleModels } from './provider-models.js';
 
 /**
@@ -30,6 +30,13 @@ import { fetchCompatibleModels } from './provider-models.js';
  */
 export const REQUIREMENT_PROPOSAL_TOOL = 'ai_devflow_propose_requirement';
 
+/**
+ * 任务草稿生成步骤 Agent 调用的工具：task_proposer 在需求澄清、代码探索、方案确定后调用产出任务草稿
+ * （含依赖 DAG，每个 description 为切实可行的实施计划）。经 tool_execution_end 事件回传，由
+ * executeTextOnRoute 捕获后经 onToolResult 上报给 UI 填草稿区。
+ */
+export const TASK_PROPOSAL_TOOL = 'ai_devflow_propose_task';
+
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
 export interface PiTextExecutor {
@@ -37,14 +44,13 @@ export interface PiTextExecutor {
     workload: ChatWorkload,
     messages: AiChatMessage[],
     onDelta?: (text: string) => void,
-    options?: { onlyProviderId?: string },
+    options?: { onlyProviderId?: string; cwd?: string },
     onToolResult?: (toolName: string, payload: unknown) => void,
   ): Promise<string>;
 }
 
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement'; context?: string; onToolResult?: (toolName: string, payload: unknown) => void }): Promise<string>;
-  propose(messages: AiChatMessage[], context?: string): Promise<AiTaskProposal[]>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void }): Promise<string>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
   /**
@@ -93,15 +99,18 @@ function systemPromptFor(workload: ChatWorkload): string {
       return CHAT_SYSTEM_TASK;
     case 'requirement_chat':
       return CHAT_SYSTEM_REQ;
-    case 'task_proposal':
-      return PROPOSE_TASK_SYSTEM;
     case 'requirement_proposal':
       return PROPOSE_REQUIREMENT_SYSTEM;
+    // task_proposal 走 step agent（task_proposer），使用 materializeStepAgentProfile 物化的 SYSTEM.md，不取此处 prompt。
+    case 'task_proposal':
+      return CHAT_SYSTEM_TASK;
   }
 }
 
-function workloadFromMode(mode: 'task' | 'requirement' = 'task'): 'task_chat' | 'requirement_chat' {
-  return mode === 'requirement' ? 'requirement_chat' : 'task_chat';
+function workloadFromMode(mode: 'task' | 'requirement' | 'task_proposal' = 'task'): 'task_chat' | 'requirement_chat' | 'task_proposal' {
+  if (mode === 'requirement') return 'requirement_chat';
+  if (mode === 'task_proposal') return 'task_proposal';
+  return 'task_chat';
 }
 
 function formatMessages(messages: AiChatMessage[]): string {
@@ -268,6 +277,7 @@ export async function executeTextOnRoute(
   deps: ProductionExecutorDeps,
   workload: ChatWorkload,
   onToolResult?: (toolName: string, payload: unknown) => void,
+  cwdOverride?: string,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
@@ -282,8 +292,10 @@ export async function executeTextOnRoute(
     writeFileSync(join(profileDir, 'models.json'), plan.modelsJson);
   }
 
+  // task_proposal 需探索真实仓库代码：spawn 的 cwd 指向项目仓库根（cwdOverride），
+  // 令 read/grep/find/ls 看到真实工程。其余 workload 保持 cwd=sessionDir（隔离临时目录）。
   const spawned = deps.supervisor.spawn(plan, {
-    cwd: sessionDir,
+    cwd: cwdOverride ?? sessionDir,
     timeoutMs: 120_000,
     secrets: [route.secret],
   });
@@ -294,6 +306,9 @@ export async function executeTextOnRoute(
   let streamError: unknown;
   let providerError: { status: number; message: string } | undefined;
   const deltas: string[] = [];
+  // 步骤 Agent 的结构化草稿工具被调用过：task_proposal / requirement_chat 可能仅调用工具而不输出正文文本，
+  // 此时 full 为空是预期的，不应判为「终止协议无效」。只有既无文本又未捕获草稿时才视为异常。
+  let capturedProposal = false;
   // Pi 在配置/模型/网络类失败时（如模型不在网关列表、Base URL 错误、DNS/TLS 失败、未知 provider 名）
   // 通常把人类可读诊断写到 stderr 并以 exit 0 结束——既不产 message_update 文本，也不发 agent_end，
   // 更不会在 message 事件上带 stopReason:"error"。若不捕获 stderr，会落到「终止协议无效」分支而丢失根因。
@@ -340,12 +355,15 @@ export async function executeTextOnRoute(
             status: typeof event.status === 'number' ? event.status : 0,
             message: typeof event.message === 'string' ? event.message : '',
           };
-        } else if (event.type === 'tool_execution_end' && event.toolName === REQUIREMENT_PROPOSAL_TOOL) {
-          // 需求生成步骤 Agent 调用 ai_devflow_propose_requirement 产出草稿：
-          // execute 回调返回 details=input，提取后经 onToolResult 上报给 UI 填表单。
+        } else if (event.type === 'tool_execution_end' && (event.toolName === REQUIREMENT_PROPOSAL_TOOL || event.toolName === TASK_PROPOSAL_TOOL)) {
+          // 需求 / 任务草稿步骤 Agent 调用专用工具产出草稿：execute 回调返回 details=input，
+          // 提取后经 onToolResult 上报给 UI 填表单（requirement_chat）或填草稿区（task_proposal）。
           const details = event.result?.details;
-          const payload = (details as { aiDevflowRequirementProposal?: unknown } | undefined)?.aiDevflowRequirementProposal ?? details;
-          if (payload && typeof payload === 'object') onToolResult?.(REQUIREMENT_PROPOSAL_TOOL, payload);
+          const payload = (details as { aiDevflowRequirementProposal?: unknown; aiDevflowTaskProposal?: unknown } | undefined)?.aiDevflowRequirementProposal ?? details;
+          if (payload && typeof payload === 'object') {
+            capturedProposal = true;
+            onToolResult?.(event.toolName!, payload);
+          }
         } else if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
           // Pi 对提供商 HTTP 错误（401/404/5xx 等）不发射 error/provider_error 事件，而是把
           // stopReason:"error" + errorMessage 放在 message 事件上。捕获之以还原根因，否则会被
@@ -396,12 +414,12 @@ export async function executeTextOnRoute(
       buildPiFailureDetail([reason], stderrLines, unknownEventTypes),
     );
   }
-  if (streamError || malformedStdout || !sawAgentEnd || full.length === 0) {
+  if (streamError || malformedStdout || !sawAgentEnd || (full.length === 0 && !capturedProposal)) {
     const reasons: string[] = [];
     if (streamError) reasons.push(`流错误：${(streamError as Error).message ?? String(streamError)}`);
     if (malformedStdout) reasons.push('stdout 含非法 JSON');
     if (!sawAgentEnd) reasons.push('缺少 agent_end 终态事件');
-    if (full.length === 0) reasons.push('未收到任何文本输出');
+    if (full.length === 0 && !capturedProposal) reasons.push('未收到任何文本输出且未生成草稿');
     throw new ProviderExecutionError(
       'Pi 返回的终止协议无效',
       'protocol',
@@ -436,11 +454,13 @@ function buildPiFailureDetail(
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
   return async (workload, messages, onDelta, options, onToolResult) => {
+    // cwd 仅用于 task_proposal spawn 的工作目录，不属于路由选项；从 options 中取出后不透传给 router。
+    const { cwd, ...routerOptions } = options ?? {};
     const result = await deps.router.execute(
       workload,
       async (route) => {
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult);
+          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd);
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -449,23 +469,11 @@ export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTe
           throw err;
         }
       },
-      options,
+      routerOptions,
     );
     return result;
   };
 }
-
-const taskSchema = z.object({
-  tasks: z.array(
-    z.object({
-      draftId: z.string().min(1).optional(),
-      title: z.string().min(1),
-      description: z.string(),
-      role: z.enum(['planner', 'coder', 'reviewer', 'tester']),
-      dependsOn: z.array(z.string()).optional(),
-    }),
-  ),
-});
 
 const requirementSchema = z.object({
   title: z.string().min(1),
@@ -527,23 +535,9 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
         opts?.context && messages.length > 0
           ? [{ role: 'user', content: `【上下文】\n${opts.context}\n\n${messages[messages.length - 1]!.content}` }]
           : messages;
-      return executeText(workload, promptMessages, onDelta, undefined, opts?.onToolResult);
-    },
-
-    async propose(messages, context) {
-      const prompt = context ? [{ role: 'user', content: `【上下文】\n${context}` } as AiChatMessage, ...messages] : messages;
-      const data = await generateStructured('task_proposal', prompt, taskSchema, '任务列表');
-      const tasks: AiTaskProposal[] = data.tasks.map((t, i) => ({
-        draftId: (t.draftId ?? '').trim() || `t${i + 1}`,
-        title: t.title,
-        description: t.description,
-        role: t.role,
-        dependsOn: t.dependsOn ?? [],
-      }));
-      if (tasks.length === 0) return [];
-      const v = validateProposalDag(tasks);
-      if (!v.ok) throw new Error(`AI 任务依赖不合法：${v.reasons.join('；')}`);
-      return tasks;
+      // task_proposal（mode='task_proposal'）需要探索真实仓库代码：以项目仓库根作为 spawn cwd，
+      // 令 task_proposer 的 read/grep/find/ls 能读到实际工程。其余 workload 不传 cwd，保持隔离临时目录。
+      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult);
     },
 
     proposeRequirement(messages) {

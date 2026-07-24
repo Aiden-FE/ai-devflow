@@ -51,6 +51,7 @@ export const BUILTIN_EXTENSIONS = [
   'structured-result',
   'checkpoint-context',
   'requirement-bridge',
+  'task-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
@@ -149,6 +150,17 @@ export const STEP_AGENTS: Record<string, StepAgentProfile> = {
     extensions: ['requirement-bridge'],
     timeoutMs: 10 * 60_000,
   },
+  task_proposer: {
+    step: 'task_proposer',
+    version: 2,
+    systemPromptFile: 'SYSTEM.md',
+    skills: ['brainstorming'],
+    // read-only 探索工具用于「探索相关项目逻辑」：研读真实代码以判断子任务拆分与实施计划是否可行。
+    // 不给写工具：本环节只产出任务草稿，不落地任何代码改动。
+    tools: ['read', 'grep', 'find', 'ls', 'ai_devflow_propose_task'],
+    extensions: ['task-bridge'],
+    timeoutMs: 15 * 60_000,
+  },
 };
 
 /** workload -> step agent（无则返回 undefined，调用方走原 chat/proposal 路径）。 */
@@ -156,6 +168,8 @@ export function stepAgentForWorkload(workload: StepWorkload): StepAgentProfile |
   switch (workload) {
     case 'requirement_chat':
       return STEP_AGENTS['requirement_refiner'];
+    case 'task_proposal':
+      return STEP_AGENTS['task_proposer'];
     default:
       return undefined;
   }

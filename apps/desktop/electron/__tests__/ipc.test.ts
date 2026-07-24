@@ -93,7 +93,6 @@ function buildServices() {
     () => undefined,
   );
   const fakeExecutor: PiTextExecutor = async (workload) => {
-    if (workload === 'task_proposal') return '{"tasks":[]}';
     if (workload === 'requirement_proposal') return '{"title":"T","description":"D","acceptance":"A","priority":"medium"}';
     return 'hello';
   };

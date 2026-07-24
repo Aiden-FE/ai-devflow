@@ -1,6 +1,6 @@
 // preload：通过 contextBridge 暴露受限的类型化 API。Renderer 无 Node 权限。
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, StreamEvent, AiStreamEvent, AiRequirementProposalDraft } from './api.js';
+import type { DesktopApi, StreamEvent, AiStreamEvent, AiRequirementProposalDraft, AiTaskProposalDraft } from './api.js';
 import type { AiChatMessage, ThemeMode } from '@ai-devflow/core';
 
 const invoke = (ns: string, method: string) => (...args: unknown[]) =>
@@ -115,11 +115,11 @@ const api: DesktopApi = {
     status: () => invoke('updates', 'status')(),
   },
   ai: {
-    // 流式对话：主进程通过 ai-devflow:ai-stream 频道回传增量/完成/错误/需求草稿。
+    // 流式对话：主进程通过 ai-devflow:ai-stream 频道回传增量/完成/错误/需求草稿/任务草稿。
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement'; context?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void },
+      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void },
     ): Promise<string> {
       return new Promise((resolve, reject) => {
         const sessionId = globalThis.crypto.randomUUID();
@@ -129,6 +129,8 @@ const api: DesktopApi = {
             onChunk(ev.text);
           } else if (ev.type === 'requirement_proposal') {
             opts?.onRequirementProposal?.(ev.draft);
+          } else if (ev.type === 'task_proposal') {
+            opts?.onTaskProposal?.(ev.tasks);
           } else if (ev.type === 'done') {
             ipcRenderer.removeListener('ai-devflow:ai-stream', listener);
             resolve(ev.fullText);
@@ -138,10 +140,9 @@ const api: DesktopApi = {
           }
         };
         ipcRenderer.on('ai-devflow:ai-stream', listener);
-        ipcRenderer.send('ai-devflow:ai:chat', { sessionId, messages, mode: opts?.mode, context: opts?.context });
+        ipcRenderer.send('ai-devflow:ai:chat', { sessionId, messages, mode: opts?.mode, context: opts?.context, projectPath: opts?.projectPath });
       });
     },
-    propose: (messages, context) => invoke('ai', 'propose')(messages, context),
     proposeRequirement: (messages) => invoke('ai', 'proposeRequirement')(messages),
   },
   events: {

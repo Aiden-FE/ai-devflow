@@ -10,6 +10,7 @@ import {
   materializeStepAgentProfile,
   buildChatPlan,
   REQUIREMENT_PROPOSAL_TOOL,
+  TASK_PROPOSAL_TOOL,
 } from '../pi-ai.js';
 import { STEP_AGENTS, stepAgentForWorkload } from '@ai-devflow/agents';
 import type {
@@ -22,12 +23,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ASSETS_ROOT = join(here, '..', '..', '..', '..', 'packages', 'agents', 'assets', 'profiles');
 import type { ProviderRoute } from '@ai-devflow/agents';
 
-function makeFakeExecutor(scenario: { texts?: string[]; error?: Error }): PiTextExecutor {
+function makeFakeExecutor(scenario: {
+  texts?: string[];
+  error?: Error;
+  toolResults?: Array<{ tool: string; payload: unknown }>;
+}): PiTextExecutor {
   const outputs = [...(scenario.texts ?? [])];
-  return async (_workload, _messages, onDelta) => {
+  const toolResultsQueue = [...(scenario.toolResults ?? [])];
+  return async (_workload, _messages, onDelta, _options, onToolResult) => {
     if (scenario.error) throw scenario.error;
     const text = outputs.shift() ?? '';
     onDelta?.(text);
+    // 步骤 Agent 的工具调用经 onToolResult 回传；propose 依赖此拿到结构化草稿。
+    for (const r of toolResultsQueue) onToolResult?.(r.tool, r.payload);
     return text;
   };
 }
@@ -52,10 +60,54 @@ describe('PiAiService', () => {
     expect(workloads).toEqual(['requirement_chat']);
   });
 
-  it('retries an invalid proposal response on the same workload', async () => {
-    const service = createPiAiService(makeFakeExecutor({ texts: ['not-json', '{"tasks":[]}'] }));
-    const result = await service.propose([{ role: 'user', content: 'split' }]);
-    expect(result).toEqual([]);
+  it('uses task_proposal workload for task_proposal mode', async () => {
+    const workloads: ChatWorkload[] = [];
+    const service = createPiAiService(async (workload, _messages, onDelta) => {
+      workloads.push(workload);
+      onDelta?.('ok');
+      return 'ok';
+    });
+    await service.chat([{ role: 'user', content: 'hi' }], () => {}, { mode: 'task_proposal' });
+    expect(workloads).toEqual(['task_proposal']);
+  });
+
+  it('passes projectPath as cwd to the executor for task_proposal mode (so AI can explore the repo)', async () => {
+    const options: Array<{ cwd?: string; onlyProviderId?: string } | undefined> = [];
+    const service = createPiAiService(async (_workload, _messages, _onDelta, opts) => {
+      options.push(opts);
+      return 'ok';
+    });
+    await service.chat([{ role: 'user', content: 'hi' }], () => {}, { mode: 'task_proposal', projectPath: '/repo/path' });
+    expect(options).toEqual([{ cwd: '/repo/path' }]);
+  });
+
+  it('surfaces ai_devflow_propose_task tool result via onToolResult for task_proposal mode', async () => {
+    const service = createPiAiService(
+      makeFakeExecutor({
+        texts: ['草稿已生成'],
+        toolResults: [
+          {
+            tool: 'ai_devflow_propose_task',
+            payload: {
+              tasks: [
+                { draftId: 't1', title: '实现登录', description: '实施计划：改 auth.ts…', role: 'coder', dependsOn: [] },
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    let captured: { name?: string; payload?: unknown } = {};
+    await service.chat([{ role: 'user', content: '做一个登录' }], () => {}, {
+      mode: 'task_proposal',
+      onToolResult: (name, payload) => { captured = { name, payload }; },
+    });
+    expect(captured.name).toBe(TASK_PROPOSAL_TOOL);
+    expect(captured.payload).toEqual({
+      tasks: [
+        { draftId: 't1', title: '实现登录', description: '实施计划：改 auth.ts…', role: 'coder', dependsOn: [] },
+      ],
+    });
   });
 
   it('parses a structured requirement proposal', async () => {
@@ -64,13 +116,6 @@ describe('PiAiService', () => {
     );
     const req = await service.proposeRequirement([{ role: 'user', content: 'x' }]);
     expect(req).toEqual({ title: 'T', description: 'D', acceptance: 'A', priority: 'high' });
-  });
-
-  it('validates task proposal DAG', async () => {
-    const service = createPiAiService(
-      makeFakeExecutor({ texts: ['{"tasks":[{"draftId":"a","title":"A","description":"","role":"coder","dependsOn":["b"]},{"draftId":"b","title":"B","description":"","role":"coder","dependsOn":["a"]}]}'] }),
-    );
-    await expect(service.propose([{ role: 'user', content: 'x' }])).rejects.toThrow(/依赖/);
   });
 
   it('reports test connection failure when executor throws', async () => {
@@ -252,9 +297,9 @@ describe('production Pi text executor', () => {
 describe('requirement brainstorming skill loading', () => {
   it('stepAgentForWorkload returns requirement_refiner only for requirement_chat', () => {
     expect(stepAgentForWorkload('requirement_chat')?.step).toBe('requirement_refiner');
+    expect(stepAgentForWorkload('task_proposal')?.step).toBe('task_proposer');
     expect(stepAgentForWorkload('task_chat')).toBeUndefined();
     expect(stepAgentForWorkload('requirement_proposal')).toBeUndefined();
-    expect(stepAgentForWorkload('task_proposal')).toBeUndefined();
   });
 
   it('materializeStepAgentProfile copies SYSTEM.md, brainstorming skill, and requirement-bridge extension', () => {
@@ -288,5 +333,21 @@ describe('requirement brainstorming skill loading', () => {
     expect(taskPlan.args).toContain('--no-tools');
     expect(taskPlan.args).not.toContain('--skill');
     expect(taskPlan.args).not.toContain('--extension');
+  });
+
+  it('buildChatPlan adds read-only exploration tools + brainstorming skill + task-bridge for task_proposal', () => {
+    const sessionDir = mkdtempSync(join(tmpdir(), 'pi-ai-plan-'));
+    const step = STEP_AGENTS['task_proposer'];
+    const profileDir = materializeStepAgentProfile(sessionDir, step, ASSETS_ROOT);
+    const plan = buildChatPlan('/pi.js', ROUTE, sessionDir, profileDir, 'task_proposal', 'hi', '/usr/bin', step);
+    // 研发视角：read/grep/find/ls 探索仓库 + ai_devflow_propose_task 产出草稿。
+    expect(plan.args).toContain('--tools');
+    expect(plan.args[plan.args.indexOf('--tools') + 1]).toBe('read,grep,find,ls,ai_devflow_propose_task');
+    expect(plan.args).toContain('--extension');
+    expect(plan.args[plan.args.indexOf('--extension') + 1]).toMatch(/task-bridge\.ts$/);
+    // brainstorming 技能：一次一问澄清研发问题。
+    expect(plan.args).toContain('--skill');
+    expect(plan.args[plan.args.indexOf('--skill') + 1]).toMatch(/brainstorming[\\/]SKILL\.md$/);
+    expect(plan.args).not.toContain('--no-tools');
   });
 });
