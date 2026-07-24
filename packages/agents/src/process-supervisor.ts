@@ -16,6 +16,10 @@ export interface SpawnedPi {
   cancel(): Promise<void>;
   done(): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   pid?: number;
+  /** 通过 Node IPC 向子进程发消息（问答答案回灌）。 */
+  send(msg: unknown): boolean;
+  /** 注册子进程 IPC 消息监听（问答请求接收）；问答挂起期间暂停超时，收到答案后恢复。 */
+  onMessage(cb: (msg: unknown) => void): void;
 }
 
 export type RawOutputObserver = (stream: RawLine['stream'], chunk: Buffer) => void;
@@ -64,7 +68,7 @@ export class RawSecretDetector {
 export type SpawnFn = (
   command: string,
   args: string[],
-  opts: { cwd: string; env: Record<string, string>; detached: boolean; stdio: ['pipe', 'pipe', 'pipe'] },
+  opts: { cwd: string; env: Record<string, string>; detached: boolean; stdio: ['pipe', 'pipe', 'pipe', 'ipc'] },
 ) => ChildProcess;
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
@@ -95,7 +99,7 @@ export class PiProcessSupervisor {
       cwd: opts.cwd,
       env: plan.env,
       detached,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     });
     child.stdin?.end();
     let processMarker: string | undefined;
@@ -228,6 +232,20 @@ export class PiProcessSupervisor {
     return {
       pid: child.pid,
       lines: merged(),
+      send(msg: unknown): boolean {
+        if (typeof child.send === 'function') return child.send(msg as Parameters<typeof child.send>[0]);
+        return false;
+      },
+      onMessage(cb: (msg: unknown) => void): void {
+        if (typeof child.on !== 'function') return;
+        child.on('message', (msg: unknown) => {
+          // 问答挂起期间暂停超时，避免用户思考时被 120s 超时误杀；收到答案后恢复。
+          const m = msg as { kind?: string };
+          if (m?.kind === 'ask') clearTimeout(timer);
+          else if (m?.kind === 'ask_answer') timer.refresh();
+          cb(msg);
+        });
+      },
       async cancel() {
         clearTimeout(timer);
         await killProcess();

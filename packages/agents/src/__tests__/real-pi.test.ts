@@ -193,6 +193,8 @@ class CapturingSupervisor extends PiProcessSupervisor {
     return {
       pid: spawned.pid,
       lines,
+      send: (msg) => spawned.send(msg),
+      onMessage: (cb) => spawned.onMessage(cb),
       cancel: () => spawned.cancel(),
       done: () => spawned.done(),
     };
