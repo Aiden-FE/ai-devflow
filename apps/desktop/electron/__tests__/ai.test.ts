@@ -323,7 +323,7 @@ describe('requirement brainstorming skill loading', () => {
     const reqProfileDir = materializeStepAgentProfile(sessionDir, step, assetsRoot);
     const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, reqProfileDir, 'requirement_chat', 'hi', '/usr/bin', step);
     expect(reqPlan.args).toContain('--tools');
-    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(REQUIREMENT_PROPOSAL_TOOL);
+    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(`${REQUIREMENT_PROPOSAL_TOOL},ai_devflow_ask`);
     expect(reqPlan.args).toContain('--extension');
     expect(reqPlan.args[reqPlan.args.indexOf('--extension') + 1]).toMatch(/requirement-bridge\.ts$/);
     expect(reqPlan.args).toContain('--skill');
@@ -342,9 +342,9 @@ describe('requirement brainstorming skill loading', () => {
     const step = STEP_AGENTS['task_proposer'];
     const profileDir = materializeStepAgentProfile(sessionDir, step, ASSETS_ROOT);
     const plan = buildChatPlan('/pi.js', ROUTE, sessionDir, profileDir, 'task_proposal', 'hi', '/usr/bin', step);
-    // 研发视角：read/grep/find/ls 探索仓库 + ai_devflow_propose_task 产出草稿。
+    // 研发视角：read/grep/find/ls 探索仓库 + ai_devflow_propose_task 产出草稿 + ai_devflow_ask 问答工具。
     expect(plan.args).toContain('--tools');
-    expect(plan.args[plan.args.indexOf('--tools') + 1]).toBe('read,grep,find,ls,ai_devflow_propose_task');
+    expect(plan.args[plan.args.indexOf('--tools') + 1]).toBe('read,grep,find,ls,ai_devflow_propose_task,ai_devflow_ask');
     expect(plan.args).toContain('--extension');
     expect(plan.args[plan.args.indexOf('--extension') + 1]).toMatch(/task-bridge\.ts$/);
     // brainstorming 技能：一次一问澄清研发问题。
