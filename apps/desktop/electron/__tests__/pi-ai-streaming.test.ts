@@ -29,6 +29,8 @@ function harness(stdout: string[], exitCode = 0) {
         })(),
         cancel: async () => undefined,
         done: async () => ({ exitCode, signal: null }),
+        send: () => false,
+        onMessage: () => {},
       };
     },
   };

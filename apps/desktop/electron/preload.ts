@@ -1,6 +1,6 @@
 // preload：通过 contextBridge 暴露受限的类型化 API。Renderer 无 Node 权限。
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, StreamEvent, AiStreamEvent, AiRequirementProposalDraft, AiTaskProposalDraft } from './api.js';
+import type { DesktopApi, StreamEvent, AiStreamEvent, AiRequirementProposalDraft, AiTaskProposalDraft, AskAnswer, AskTabs } from './api.js';
 import type { AiChatMessage, ThemeMode } from '@ai-devflow/core';
 
 const invoke = (ns: string, method: string) => (...args: unknown[]) =>
@@ -120,7 +120,7 @@ const api: DesktopApi = {
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void },
+      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void; onQuestion?: (toolUseId: string, tabs: AskTabs) => void },
     ): Promise<string> {
       return new Promise((resolve, reject) => {
         const sessionId = globalThis.crypto.randomUUID();
@@ -128,6 +128,8 @@ const api: DesktopApi = {
           if (ev.sessionId !== sessionId) return;
           if (ev.type === 'delta') {
             onChunk(ev.text);
+          } else if (ev.type === 'question') {
+            opts?.onQuestion?.(ev.toolUseId, ev.tabs);
           } else if (ev.type === 'requirement_proposal') {
             opts?.onRequirementProposal?.(ev.draft);
           } else if (ev.type === 'task_proposal') {
@@ -145,6 +147,7 @@ const api: DesktopApi = {
       });
     },
     proposeRequirement: (messages) => invoke('ai', 'proposeRequirement')(messages),
+    answer: (sessionId: string, toolUseId: string, answers: AskAnswer) => { ipcRenderer.send('ai-devflow:ai:answer', { sessionId, toolUseId, answers }); return Promise.resolve(); },
   },
   events: {
     subscribe(handler) {

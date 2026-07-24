@@ -38,6 +38,8 @@ function fakeSpawned(lines: SupervisorRawLine[], exitCode: number | null): Spawn
     })(),
     cancel: async () => undefined,
     done: async () => ({ exitCode, signal: null }),
+    send: () => false,
+    onMessage: () => {},
   };
 }
 

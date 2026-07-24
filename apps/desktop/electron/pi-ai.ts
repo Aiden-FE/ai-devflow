@@ -46,11 +46,12 @@ export interface PiTextExecutor {
     onDelta?: (text: string) => void,
     options?: { onlyProviderId?: string; cwd?: string },
     onToolResult?: (toolName: string, payload: unknown) => void,
+    onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
   ): Promise<string>;
 }
 
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void }): Promise<string>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void }): Promise<string>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
   /**
@@ -278,6 +279,7 @@ export async function executeTextOnRoute(
   workload: ChatWorkload,
   onToolResult?: (toolName: string, payload: unknown) => void,
   cwdOverride?: string,
+  onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
@@ -298,6 +300,14 @@ export async function executeTextOnRoute(
     cwd: cwdOverride ?? sessionDir,
     timeoutMs: 120_000,
     secrets: [route.secret],
+  });
+  // 问答工具桥接：子进程 ai_devflow_ask.execute 经 IPC 发 { kind:'ask', toolUseId, payload }，
+  // onMessage 捕获后经 onAsk 上报（携带 send 回调，供 answer 回灌 { kind:'ask_answer', ... }）。
+  spawned.onMessage((msg) => {
+    const m = msg as { kind?: string; toolUseId?: string; payload?: unknown };
+    if (m?.kind === 'ask' && m.toolUseId) {
+      onAsk?.(m.toolUseId, m.payload, (reply: unknown) => spawned.send(reply));
+    }
   });
 
   let full = '';
@@ -453,14 +463,14 @@ function buildPiFailureDetail(
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
-  return async (workload, messages, onDelta, options, onToolResult) => {
+  return async (workload, messages, onDelta, options, onToolResult, onAsk) => {
     // cwd 仅用于 task_proposal spawn 的工作目录，不属于路由选项；从 options 中取出后不透传给 router。
     const { cwd, ...routerOptions } = options ?? {};
     const result = await deps.router.execute(
       workload,
       async (route) => {
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd);
+          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk);
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -537,7 +547,7 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
           : messages;
       // task_proposal（mode='task_proposal'）需要探索真实仓库代码：以项目仓库根作为 spawn cwd，
       // 令 task_proposer 的 read/grep/find/ls 能读到实际工程。其余 workload 不传 cwd，保持隔离临时目录。
-      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult);
+      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk);
     },
 
     proposeRequirement(messages) {

@@ -188,6 +188,8 @@ function productionHarness(input: {
         })(),
         cancel: async () => undefined,
         done: async () => ({ exitCode: input.exitCode, signal: null }),
+        send: () => false,
+        onMessage: () => {},
       };
     },
   };

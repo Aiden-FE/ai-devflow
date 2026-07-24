@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, isAbsolute } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
-import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
+import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput, AskAnswer, AskTabs } from './api.js';
 import { hasModelConfig } from './provider-store.js';
 import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey } from '@ai-devflow/core';
 import {
@@ -20,6 +20,9 @@ import {
 } from '@ai-devflow/core';
 
 const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
+
+// 问答待答：sessionId -> { toolUseId, send }。ai:answer 回灌答案到对应子进程。
+const pendingAsks = new Map<string, { toolUseId: string; send: (msg: unknown) => boolean }>();
 
 /** 读取持久化主题模式（默认 system）。 */
 function readThemeMode(): ThemeMode {
@@ -549,10 +552,25 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
             }
           }
         },
+        onAsk: (toolUseId, tabs, send) => {
+          // 问答工具请求：推 question 事件给 renderer，保存 send 供 ai:answer 回灌。
+          sendAi({ type: 'question', sessionId: payload.sessionId, toolUseId, tabs: tabs as AskTabs });
+          pendingAsks.set(payload.sessionId, { toolUseId, send });
+        },
       });
+      pendingAsks.delete(payload.sessionId);
       sendAi({ type: 'done', sessionId: payload.sessionId, fullText });
     } catch (e) {
+      pendingAsks.delete(payload.sessionId);
       sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
+    }
+  });
+  // 问答工具答案回灌：renderer 提交后经 IPC send 到 main，转成 ask_answer 发回子进程。
+  ipcMain.on('ai-devflow:ai:answer', (_e, payload: { sessionId: string; toolUseId: string; answers: AskAnswer }) => {
+    const pending = pendingAsks.get(payload.sessionId);
+    if (pending && pending.toolUseId === payload.toolUseId) {
+      pending.send({ kind: 'ask_answer', toolUseId: payload.toolUseId, answers: payload.answers });
+      pendingAsks.delete(payload.sessionId);
     }
   });
   ipcMain.handle(channel('ai', 'proposeRequirement'), async (_e, messages: AiChatMessage[]) => {

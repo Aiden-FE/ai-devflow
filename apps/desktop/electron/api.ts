@@ -93,12 +93,32 @@ export type AiRequirementProposalDraft = {
   priority: 'low' | 'medium' | 'high';
 };
 
+/** 问答工具的问题结构（多 tab）。 */
+export type AskTabs = Array<{
+  id: string;
+  title: string;
+  questions: Array<{
+    id: string;
+    kind: 'single' | 'multi' | 'text';
+    question: string;
+    options?: Array<{ value: string; label: string }>;
+    required?: boolean;
+  }>;
+}>;
+
+/** 问答工具的答案结构。 */
+export type AskAnswer = Array<{
+  tabId: string;
+  answers: Array<{ questionId: string; value: string | string[] }>;
+}>;
+
 export type AiStreamEvent =
   | { type: 'delta'; sessionId: string; text: string }
   | { type: 'done'; sessionId: string; fullText: string }
   | { type: 'error'; sessionId: string; error: string }
   | { type: 'requirement_proposal'; sessionId: string; draft: AiRequirementProposalDraft }
-  | { type: 'task_proposal'; sessionId: string; tasks: AiTaskProposalDraft[] };
+  | { type: 'task_proposal'; sessionId: string; tasks: AiTaskProposalDraft[] }
+  | { type: 'question'; sessionId: string; toolUseId: string; tabs: AskTabs };
 
 export interface StreamEvent {
   kind:
@@ -268,8 +288,11 @@ export interface DesktopApi {
         projectPath?: string;
         onRequirementProposal?: (draft: AiRequirementProposalDraft) => void;
         onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void;
+        onQuestion?: (toolUseId: string, tabs: AskTabs) => void;
       },
     ): Promise<string>;
+    /** 提交问答工具的答案（统一提交所有 tab）。 */
+    answer(sessionId: string, toolUseId: string, answers: AskAnswer): Promise<void>;
     /** 基于对话生成结构化需求草稿（标题/描述/验收标准/优先级）。 */
     proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   };
