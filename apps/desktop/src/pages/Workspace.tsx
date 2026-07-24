@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, StatusBadge, useStream } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { TaskDetail } from './TaskDetail.js';
@@ -563,11 +563,20 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
+  // 已有子任务：拼入上下文供 task_proposer 避免重复创建，并允许新任务跨批依赖这些 taskId。
+  const [existingTasks, setExistingTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    if (!requirementId) return;
+    api.tasks.listByRequirement(requirementId).then(setExistingTasks).catch(() => {});
+  }, [requirementId]);
 
   // 把当前需求内容作为上下文注入 AI，使拆解对齐需求与验收标准。
+  const existingBlock = existingTasks.length > 0
+    ? `\n\n【已有子任务】（请勿重复创建，新任务可依赖这些任务，依赖时用其 taskId）\n${existingTasks.map((t) => `- [${t.id}] 「${t.title}」 状态:${t.status} 依赖:[${(t.dependsOn ?? []).join(',')}]`).join('\n')}`
+    : '';
   const context = requirement
-    ? `【当前需求】\n标题：${requirement.title}\n描述：${requirement.description || '(无)'}\n验收标准：${requirement.acceptance || '(无)'}`
-    : undefined;
+    ? `【当前需求】\n标题：${requirement.title}\n描述：${requirement.description || '(无)'}\n验收标准：${requirement.acceptance || '(无)'}${existingBlock}`
+    : existingBlock || undefined;
 
   // 多轮沟通：研发视角的 task_proposer 会先用 brainstorming 梳理、探索仓库代码、一次一问地澄清，
   // 方案确定后调用 ai_devflow_propose_task 工具产出任务草稿（经 onTaskProposal 回传）。

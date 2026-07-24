@@ -32,7 +32,7 @@ export default function (pi: ExtensionAPI) {
             { description: "任务角色" },
           ),
           dependsOn: Type.Array(Type.String(), {
-            description: "依赖的其它 draftId 列表；无依赖则为空数组",
+            description: "依赖的任务标识列表；可引用同批次 draftId 或已有任务 taskId（形如 T-xxx）。无依赖则为空数组",
           }),
         }),
         { description: "任务草稿列表（至少 1 个）" },
