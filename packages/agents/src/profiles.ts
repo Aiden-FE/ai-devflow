@@ -52,6 +52,7 @@ export const BUILTIN_EXTENSIONS = [
   'checkpoint-context',
   'requirement-bridge',
   'task-bridge',
+  'ask-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
@@ -143,22 +144,22 @@ export type StepWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 
 export const STEP_AGENTS: Record<string, StepAgentProfile> = {
   requirement_refiner: {
     step: 'requirement_refiner',
-    version: 1,
+    version: 2,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
-    tools: ['ai_devflow_propose_requirement'],
-    extensions: ['requirement-bridge'],
+    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask'],
+    extensions: ['requirement-bridge', 'ask-bridge'],
     timeoutMs: 10 * 60_000,
   },
   task_proposer: {
     step: 'task_proposer',
-    version: 2,
+    version: 3,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
     // read-only 探索工具用于「探索相关项目逻辑」：研读真实代码以判断子任务拆分与实施计划是否可行。
     // 不给写工具：本环节只产出任务草稿，不落地任何代码改动。
-    tools: ['read', 'grep', 'find', 'ls', 'ai_devflow_propose_task'],
-    extensions: ['task-bridge'],
+    tools: ['read', 'grep', 'find', 'ls', 'ai_devflow_propose_task', 'ai_devflow_ask'],
+    extensions: ['task-bridge', 'ask-bridge'],
     timeoutMs: 15 * 60_000,
   },
 };
