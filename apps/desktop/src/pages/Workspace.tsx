@@ -19,7 +19,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen } from 'lucide-react';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 
 export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSettings }: {
@@ -296,9 +296,23 @@ export function ReqItem({ req, tasks, onCreateTask, onArchived }: {
           {!collapsed && (
             <div className="mt-1.5 flex flex-col gap-1">
               {view.items.map((s) => (
-                <div key={s.id} data-testid="req-subtask-title" className="flex items-center gap-2 text-xs">
+                <div key={s.id} data-testid="req-subtask-title" className="group flex items-center gap-2 text-xs">
                   <StatusBadge status={s.status} />
-                  <span className="truncate">{s.title}</span>
+                  <span className="flex-1 truncate">{s.title}</span>
+                  <Button
+                    size="sm" variant="ghost" className="h-5 w-5 p-0 opacity-0 group-hover:opacity-100"
+                    onClick={async () => {
+                      if (!confirm(t('ws.subtasks.delete.confirm', { title: s.title }))) return;
+                      const res = await api.tasks.delete(s.id);
+                      if (!res.ok) {
+                        setError(t('ws.subtasks.delete.blocked', { titles: res.blockedBy.map((b) => b.title).join('、') }));
+                      } else {
+                        onArchived();
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
                 </div>
               ))}
               {view.totalPages > 1 && (

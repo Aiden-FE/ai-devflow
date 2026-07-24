@@ -102,6 +102,9 @@ export const en: Record<string, string> = {
   'ws.subtasks.prev': 'Prev',
   'ws.subtasks.next': 'Next',
   'ws.subtasks.page': 'Page {cur}/{total}',
+  'ws.subtasks.delete': 'Delete',
+  'ws.subtasks.delete.confirm': 'Delete subtask "{title}"?',
+  'ws.subtasks.delete.blocked': 'Cannot delete: depended on by: {titles}',
   'ws.openFolder': 'Reveal in folder',
   'ws.openFolder.fail': 'Failed to open folder',
 

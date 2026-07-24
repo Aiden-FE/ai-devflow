@@ -102,6 +102,9 @@ export const zh: Record<string, string> = {
   'ws.subtasks.prev': '上一页',
   'ws.subtasks.next': '下一页',
   'ws.subtasks.page': '第 {cur}/{total} 页',
+  'ws.subtasks.delete': '删除',
+  'ws.subtasks.delete.confirm': '确定删除子任务「{title}」？',
+  'ws.subtasks.delete.blocked': '无法删除：被以下任务依赖：{titles}',
   'ws.openFolder': '在文件夹中打开',
   'ws.openFolder.fail': '打开文件夹失败',
 
