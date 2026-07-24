@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput } from './api.js';
 import { hasModelConfig } from './provider-store.js';
-import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig } from '@ai-devflow/core';
+import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey } from '@ai-devflow/core';
 import {
   randomId,
   now,
@@ -470,6 +470,19 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     const secret = providerStore.resolveSecret(id) ?? '';
     if (!services.piAi) throw new Error('AI 服务未就绪');
     return services.piAi.listModels(config, secret);
+  });
+
+  // ---- Agent 模型覆盖（按 agent 钉选 provider+model；无密钥） ----
+  ipcMain.handle(channel('agent-overrides', 'list'), () => providerStore?.listAgentOverrides() ?? []);
+  ipcMain.handle(channel('agent-overrides', 'save'), (_e, o: AgentModelOverride) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    providerStore.saveAgentOverride(o);
+    return providerStore.listAgentOverrides();
+  });
+  ipcMain.handle(channel('agent-overrides', 'remove'), (_e, agentKey: AgentKey) => {
+    if (!providerStore) throw new Error('provider store 不可用');
+    providerStore.removeAgentOverride(agentKey);
+    return providerStore.listAgentOverrides();
   });
 
   // ---- 自动更新 ----

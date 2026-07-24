@@ -104,6 +104,11 @@ const api: DesktopApi = {
     completeReentry: (input) => invoke('providers', 'completeReentry')(input),
     listModels: (id) => invoke('providers', 'listModels')(id),
   },
+  agentOverrides: {
+    list: () => invoke('agent-overrides', 'list')(),
+    save: (o) => invoke('agent-overrides', 'save')(o),
+    remove: (agentKey) => invoke('agent-overrides', 'remove')(agentKey),
+  },
   updates: {
     check: () => invoke('updates', 'check')(),
     installUpdate: () => invoke('updates', 'installUpdate')(),

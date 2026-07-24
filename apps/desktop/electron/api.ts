@@ -28,6 +28,8 @@ import type {
   ProviderTestResult,
   ProviderHealthSummary,
   ProviderMigrationStatus,
+  AgentModelOverride,
+  AgentKey,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -221,6 +223,12 @@ export interface DesktopApi {
      * 标准提供商返回空数组）。不回显密钥；仅返回 `{ id }` 列表供 Renderer 选择默认模型。
      */
     listModels(providerId: string): Promise<{ id: string }[]>;
+  };
+  // ---- Agent 模型覆盖 ----
+  agentOverrides: {
+    list(): Promise<AgentModelOverride[]>;
+    save(o: AgentModelOverride): Promise<AgentModelOverride[]>;
+    remove(agentKey: AgentKey): Promise<AgentModelOverride[]>;
   };
   // ---- 自动更新（Part 6，仅 app.isPackaged 时可用） ----
   updates: {
