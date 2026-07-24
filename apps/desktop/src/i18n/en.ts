@@ -147,6 +147,7 @@ export const en: Record<string, string> = {
   'task.ai.deleteDraft': 'Delete',
   'task.ai.addDraft': 'Add row',
   'task.ai.createAll.confirm': 'This will create all tasks above. Continue?',
+  'task.ai.interrupted': '(generation interrupted)',
   'task.ai.unconfigured': 'No AI provider configured. Set one under "Settings -> AI provider".',
   'task.ai.goSettings': 'Configure',
   'task.ai.thinking': 'AI is thinking…',

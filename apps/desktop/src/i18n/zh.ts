@@ -147,6 +147,7 @@ export const zh: Record<string, string> = {
   'task.ai.deleteDraft': '删除',
   'task.ai.addDraft': '新增空行',
   'task.ai.createAll.confirm': '将创建以上全部任务，是否继续？',
+  'task.ai.interrupted': '（生成中断）',
   'task.ai.unconfigured': '尚未配置 AI 服务商，请先在“设置 -> AI 服务商”中填写。',
   'task.ai.goSettings': '去配置',
   'task.ai.thinking': 'AI 思考中…',

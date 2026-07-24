@@ -305,7 +305,6 @@ export async function executeTextOnRoute(
   let malformedStdout = false;
   let streamError: unknown;
   let providerError: { status: number; message: string } | undefined;
-  const deltas: string[] = [];
   // 步骤 Agent 的结构化草稿工具被调用过：task_proposal / requirement_chat 可能仅调用工具而不输出正文文本，
   // 此时 full 为空是预期的，不应判为「终止协议无效」。只有既无文本又未捕获草稿时才视为异常。
   let capturedProposal = false;
@@ -340,13 +339,15 @@ export async function executeTextOnRoute(
           continue;
         }
         if (event.type === 'message_update') {
-          // Pi 的文本增量在 assistantMessageEvent.delta（text_delta 事件）；顶层无 delta/text 字段。
-          // 早期实现误读 event.delta，导致任何能正常返回的提供商都被判为「未收到任何文本输出」。
+          // 流式输出：仅转发 text_delta（正文增量），丢弃 thinking_delta（思维链抑制）。
+          // 早期实现缓冲到末尾才 flush，体验差；改为立即转发 onDelta。
           const ame = event.assistantMessageEvent;
-          const delta = typeof ame?.delta === 'string' ? ame.delta : '';
-          if (delta) {
-            full += delta;
-            deltas.push(delta);
+          if (ame?.type === 'text_delta') {
+            const delta = typeof ame.delta === 'string' ? ame.delta : '';
+            if (delta) {
+              full += delta;
+              onDelta?.(delta);
+            }
           }
         } else if (event.type === 'agent_end') {
           sawAgentEnd = true;
@@ -428,7 +429,6 @@ export async function executeTextOnRoute(
       buildPiFailureDetail(reasons, stderrLines, unknownEventTypes),
     );
   }
-  for (const delta of deltas) onDelta?.(delta);
   return full;
 }
 

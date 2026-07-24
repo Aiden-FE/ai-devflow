@@ -444,7 +444,13 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
       });
     } catch (e) {
       setError((e as Error).message);
+      // 流式后错误前已发 delta 会让 assistant 消息非空；标注中断而非删除，避免残留半截无标注文本。
       setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+      setMessages((prev) => prev.map((m, i) =>
+        i === prev.length - 1 && m.role === 'assistant' && m.content
+          ? { ...m, content: `${m.content}\n\n${t('task.ai.interrupted')}` }
+          : m,
+      ));
     } finally { setStreaming(false); }
   };
 
@@ -587,6 +593,11 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
     } catch (e) {
       setError((e as Error).message);
       setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+      setMessages((prev) => prev.map((m, i) =>
+        i === prev.length - 1 && m.role === 'assistant' && m.content
+          ? { ...m, content: `${m.content}\n\n${t('task.ai.interrupted')}` }
+          : m,
+      ));
     } finally { setStreaming(false); }
   };
 
