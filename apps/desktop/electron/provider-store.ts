@@ -5,10 +5,11 @@
 // 加密；list()/listConfigs() 绝不返回明文密钥或 credentialRef。crypto 与 credentials 均构造注入，
 // 使本模块可在 Vitest 中脱离 Electron 测试。
 import { randomUUID } from 'node:crypto';
-import type { ProviderConfig, ProviderInput, ProviderSummary } from '@ai-devflow/core';
+import type { AgentKey, AgentModelOverride, ProviderConfig, ProviderInput, ProviderSummary } from '@ai-devflow/core';
 import { normalizeProviderInput } from '@ai-devflow/core';
 
 const PROVIDERS_KEY = 'providers:v1';
+const AGENT_OVERRIDES_KEY = 'agent-overrides:v1';
 const MIGRATION_MARKER = 'provider-migration:v1';
 const LEGACY_KEY = 'ai_provider';
 
@@ -182,6 +183,32 @@ export class ProviderStore {
     } catch {
       return undefined;
     }
+  }
+
+  /** 读取全部 agent 模型覆盖（解密失败视为空）。 */
+  listAgentOverrides(): AgentModelOverride[] {
+    const raw = this.credentials.get(AGENT_OVERRIDES_KEY);
+    if (!raw) return [];
+    try {
+      const json = this.crypto.decrypt(raw);
+      const parsed = JSON.parse(json) as AgentModelOverride[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** 按 agentKey upsert 一条覆盖。 */
+  saveAgentOverride(o: AgentModelOverride): void {
+    const list = this.listAgentOverrides().filter((x) => x.agentKey !== o.agentKey);
+    list.push(o);
+    this.credentials.upsert(AGENT_OVERRIDES_KEY, this.crypto.encrypt(JSON.stringify(list)));
+  }
+
+  /** 删除指定 agentKey 的覆盖。 */
+  removeAgentOverride(agentKey: AgentKey): void {
+    const list = this.listAgentOverrides().filter((x) => x.agentKey !== agentKey);
+    this.credentials.upsert(AGENT_OVERRIDES_KEY, this.crypto.encrypt(JSON.stringify(list)));
   }
 
   /** Replace an unreadable legacy record with an explicitly re-entered provider in one transaction. */
