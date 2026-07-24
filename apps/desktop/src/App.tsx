@@ -94,6 +94,7 @@ export function App(): React.ReactElement {
             project={project}
             projects={projects}
             onSwitchProject={switchProject}
+            onNavigateSettings={() => setRoute('settings')}
           />
         )}
         {route === 'settings' && <SettingsPage />}

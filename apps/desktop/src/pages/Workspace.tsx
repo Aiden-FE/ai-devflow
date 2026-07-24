@@ -23,10 +23,11 @@ import { ScrollArea } from '../components/ui/scroll-area.js';
 import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 
-export function WorkspacePage({ project, projects, onSwitchProject }: {
+export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSettings }: {
   project?: Project;
   projects: Project[];
   onSwitchProject: (id: string) => void;
+  onNavigateSettings?: () => void;
 }): React.ReactElement {
   const t = useT();
   const [error, setError] = useState<string | undefined>();
@@ -83,12 +84,12 @@ export function WorkspacePage({ project, projects, onSwitchProject }: {
         </Select>
         {activeIter && <Button variant="ghost" size="sm" onClick={async () => { await api.iterations.archive(activeIter); iterationsQ.reload(); }}><Archive className="h-4 w-4" /> {t('ws.archiveIteration')}</Button>}
       </div>
-      {activeIter ? <WorkspaceBody iterationId={activeIter} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
+      {activeIter ? <WorkspaceBody iterationId={activeIter} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
     </div>
   );
 }
 
-function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactElement {
+function WorkspaceBody({ iterationId, onNavigateSettings }: { iterationId: string; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const reqsQ = useAsync(() => api.requirements.list(iterationId), [iterationId]);
   const tasksQ = useAsync(() => api.tasks.listByIteration(iterationId), [iterationId]);
@@ -134,7 +135,7 @@ function WorkspaceBody({ iterationId }: { iterationId: string }): React.ReactEle
             <Checkbox checked={showArchived} onCheckedChange={(v) => setShowArchived(v === true)} />
             {showArchived ? t('ws.hideArchived') : t('ws.showArchived')}
           </label>
-          <CreateReqButton iterationId={iterationId} onCreated={reqsQ.reload} />
+          <CreateReqButton iterationId={iterationId} onCreated={reqsQ.reload} onNavigateSettings={onNavigateSettings} />
         </div>
         <LoadingOrError loading={reqsQ.loading} error={reqsQ.error} data={visibleReqs} reload={reqsQ.reload}>
           {(rs) => (
@@ -348,17 +349,19 @@ function CreateIterationButton({ projectId, onCreated }: { projectId: string; on
   );
 }
 
-function CreateReqButton({ iterationId, onCreated }: { iterationId: string; onCreated: () => void }): React.ReactElement {
+function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { iterationId: string; onCreated: () => void; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<'manual' | 'ai'>('manual');
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [acceptance, setAcceptance] = useState('');
   const [appliedHint, setAppliedHint] = useState(false);
+  // 检测是否存在可用服务商（启用 + 有凭证 + 有模型配置）。
+  const providersQ = useAsync(() => api.providers.list(), [open]);
+  const hasUsableProvider = (providersQ.data ?? []).some((p) => p.enabled && p.hasCredential && p.health !== 'configuration_error');
 
-  const reset = () => { setTitle(''); setDesc(''); setAcceptance(''); setPriority('medium'); setMode('manual'); setAppliedHint(false); };
+  const reset = () => { setTitle(''); setDesc(''); setAcceptance(''); setPriority('medium'); setAppliedHint(false); };
 
   const submit = async () => {
     await api.requirements.create(iterationId, title, desc, priority, acceptance);
@@ -370,40 +373,43 @@ function CreateReqButton({ iterationId, onCreated }: { iterationId: string; onCr
       <Button variant="outline" size="sm" onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> {t('ws.createReq')}</Button>
       <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset(); }}>
         <DialogContent className="max-w-lg">
-          <DialogHeader><DialogTitle>{t('ws.createReq')}</DialogTitle></DialogHeader>
-          <div className="flex gap-2">
-            <Button size="sm" variant={mode === 'manual' ? 'default' : 'outline'} onClick={() => setMode('manual')}>{t('ws.createReq')}</Button>
-            <Button size="sm" variant={mode === 'ai' ? 'default' : 'outline'} onClick={() => setMode('ai')}><MessageSquarePlus className="h-4 w-4" /> {t('req.ai.create')}</Button>
-          </div>
+          <DialogHeader><DialogTitle>{t('req.ai.twoStepTitle')}</DialogTitle></DialogHeader>
           {appliedHint && <div className="rounded-md border border-ok/30 bg-ok/10 px-3 py-1.5 text-xs text-ok">{t('req.ai.applied')}</div>}
-          {mode === 'manual' ? (
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1.5"><Label>{t('req.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
-              <div className="flex flex-col gap-1.5"><Label>{t('req.description')}</Label><Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} /></div>
-              <div className="flex flex-col gap-1.5">
-                <Label>{t('ws.priority')}</Label>
-                <Select value={priority} onValueChange={(v) => setPriority(v as 'low' | 'medium' | 'high')}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="low">{t('ws.priority.low')}</SelectItem>
-                    <SelectItem value="medium">{t('ws.priority.medium')}</SelectItem>
-                    <SelectItem value="high">{t('ws.priority.high')}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col gap-1.5"><Label>{t('req.acceptance')}</Label><Textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} rows={2} placeholder={t('req.acceptance.hint')} /></div>
-            </div>
-          ) : (
+          {/* Step 1：AI 沟通 */}
+          {hasUsableProvider ? (
             <AiRefineRequirement
               onApplied={(p) => {
                 setTitle(p.title); setDesc(p.description); setAcceptance(p.acceptance); setPriority(p.priority);
-                setMode('manual'); setAppliedHint(true);
+                setAppliedHint(true);
               }}
             />
+          ) : (
+            <div className="flex flex-col items-center gap-2 py-6 text-center text-xs text-muted-foreground">
+              <span>{t('req.ai.noProvider')}</span>
+              <Button size="sm" variant="outline" onClick={() => { setOpen(false); onNavigateSettings?.(); }}>{t('req.ai.goSettings')}</Button>
+            </div>
           )}
+          {/* Step 2：确认需求（可编辑；草稿到达前为空但允许直接编辑） */}
+          <div className="mt-2 flex flex-col gap-3 border-t border-border pt-3">
+            <div className="text-xs font-semibold text-muted-foreground">{t('req.ai.confirmTitle')}</div>
+            <div className="flex flex-col gap-1.5"><Label>{t('req.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+            <div className="flex flex-col gap-1.5"><Label>{t('req.description')}</Label><Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} /></div>
+            <div className="flex flex-col gap-1.5">
+              <Label>{t('ws.priority')}</Label>
+              <Select value={priority} onValueChange={(v) => setPriority(v as 'low' | 'medium' | 'high')}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="low">{t('ws.priority.low')}</SelectItem>
+                  <SelectItem value="medium">{t('ws.priority.medium')}</SelectItem>
+                  <SelectItem value="high">{t('ws.priority.high')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col gap-1.5"><Label>{t('req.acceptance')}</Label><Textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} rows={2} placeholder={t('req.acceptance.hint')} /></div>
+          </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => { setOpen(false); reset(); }}>{t('common.cancel')}</Button>
-            <Button disabled={!title} onClick={submit}>{t('common.create')}</Button>
+            <Button disabled={!title.trim() || !hasUsableProvider} onClick={submit}>{t('common.create')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

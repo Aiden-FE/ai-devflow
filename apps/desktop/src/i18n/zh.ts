@@ -115,6 +115,10 @@ export const zh: Record<string, string> = {
   'req.ai.propose': '生成需求草稿',
   'req.ai.applied': '已填入草稿，请检查后创建',
   'req.ai.thinking': 'AI 思考中…',
+  'req.ai.twoStepTitle': '与 AI 沟通需求',
+  'req.ai.confirmTitle': '确认需求',
+  'req.ai.noProvider': '尚未配置可用的 AI 服务商，请先前往「设置 -> AI 服务商」配置。',
+  'req.ai.goSettings': '去配置',
 
   // ---- 迭代表单 ----
   'iter.name': '名称',

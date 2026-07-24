@@ -115,6 +115,10 @@ export const en: Record<string, string> = {
   'req.ai.propose': 'Draft requirement',
   'req.ai.applied': 'Draft filled in; review and create',
   'req.ai.thinking': 'AI is thinking…',
+  'req.ai.twoStepTitle': 'Refine with AI',
+  'req.ai.confirmTitle': 'Confirm requirement',
+  'req.ai.noProvider': 'No AI provider available. Configure one under "Settings -> AI providers" first.',
+  'req.ai.goSettings': 'Configure',
 
   // ---- iteration form ----
   'iter.name': 'Name',
