@@ -2,8 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { api, useAsync, LoadingOrError, EmptyState, LANES, laneForTask, StatusBadge, useStream } from '../lib.js';
 import { useT } from '../i18n/index.js';
 import { TaskDetail } from './TaskDetail.js';
-import { useStickToBottom } from '../hooks/useStickToBottom.js';
-import { NewMessagesButton } from '../components/NewMessagesButton.js';
+import { ChatPanel, type ChatPanelMessage } from '../components/ChatPanel.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
@@ -372,7 +371,7 @@ function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { itera
     <>
       <Button variant="outline" size="sm" onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> {t('ws.createReq')}</Button>
       <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset(); }}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-[min(1100px,92vw)] w-[92vw] h-[88vh] max-h-[88vh] flex flex-col gap-4 overflow-hidden">
           <DialogHeader><DialogTitle>{t('req.ai.twoStepTitle')}</DialogTitle></DialogHeader>
           {appliedHint && <div className="rounded-md border border-ok/30 bg-ok/10 px-3 py-1.5 text-xs text-ok">{t('req.ai.applied')}</div>}
           {/* Step 1：AI 沟通 */}
@@ -419,23 +418,23 @@ function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { itera
 
 function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
   const t = useT();
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
-  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
-  const stick = useStickToBottom([messages]);
 
-  const send = async () => {
-    if (!input.trim() || streaming) return;
-    const userMsg = { role: 'user' as const, content: input.trim() };
+  const send = async (text: string) => {
+    if (streaming) return;
+    const userMsg: ChatPanelMessage = { id: `u-${Date.now()}`, role: 'user', content: text };
     const next = [...messages, userMsg];
-    setMessages(next); setInput(''); setStreaming(true); setError(undefined);
+    setMessages(next); setStreaming(true); setError(undefined);
     let assistant = '';
-    setMessages([...next, { role: 'assistant', content: '' }]);
+    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '' }]);
     try {
-      assistant = await api.ai.chat(next, (delta) => {
+      assistant = await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
         assistant += delta;
-        setMessages((prev) => { const c = [...prev]; c[c.length - 1] = { role: 'assistant', content: assistant }; return c; });
+        setMessages((prev) => prev.map((m, i) =>
+          i === prev.length - 1 && m.role === 'assistant' ? { ...m, content: assistant } : m,
+        ));
       }, {
         mode: 'requirement',
         // AI 在需求足够清晰时调用 ai_devflow_propose_requirement 工具生成草稿；
@@ -455,26 +454,16 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
   };
 
   return (
-    <div className="mt-1 flex flex-col gap-3">
-      <div ref={stick.containerRef} className="relative h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
-        <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
-        {messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">{t('req.ai.placeholder')}</div>
-        ) : messages.map((m, i) => (
-          <div key={i} className={`mb-2 ${m.role === 'user' ? 'text-right' : ''}`}>
-            <span className={`inline-block max-w-[85%] rounded-md px-2 py-1 ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
-              {m.content || t('req.ai.thinking')}
-            </span>
-          </div>
-        ))}
-      </div>
-      {error && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-      <div className="flex gap-2">
-        <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={t('req.ai.placeholder')} disabled={streaming} />
-        <Button size="sm" onClick={send} disabled={streaming || !input.trim()}>{t('task.ai.send')}</Button>
-      </div>
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      <ChatPanel
+        messages={messages}
+        onSend={send}
+        loading={streaming}
+        placeholder={t('req.ai.placeholder')}
+        thinkingLabel={t('req.ai.thinking')}
+        sendLabel={t('task.ai.send')}
+        error={error}
+      />
     </div>
   );
 }
@@ -489,7 +478,7 @@ function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { r
   const siblings = sibsQ.data ?? [];
   return (
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-[min(1100px,92vw)] w-[92vw] h-[88vh] max-h-[88vh] flex flex-col gap-4 overflow-hidden">
         <DialogHeader><DialogTitle>{t('task.create')}</DialogTitle></DialogHeader>
         <div className="flex gap-2">
           <Button size="sm" variant={mode === 'manual' ? 'default' : 'outline'} onClick={() => setMode('manual')}>{t('task.create')}</Button>
@@ -555,13 +544,11 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
 
 function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { requirementId: string; requirement?: Requirement; projectPath?: string; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
-  const [messages, setMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
-  const [input, setInput] = useState('');
+  const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [proposals, setProposals] = useState<AiTaskProposal[] | undefined>();
   const [creating, setCreating] = useState(false);
-  const stick = useStickToBottom([messages]);
 
   // 把当前需求内容作为上下文注入 AI，使拆解对齐需求与验收标准。
   const context = requirement
@@ -570,17 +557,19 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
 
   // 多轮沟通：研发视角的 task_proposer 会先用 brainstorming 梳理、探索仓库代码、一次一问地澄清，
   // 方案确定后调用 ai_devflow_propose_task 工具产出任务草稿（经 onTaskProposal 回传）。
-  const send = async () => {
-    if (!input.trim() || streaming) return;
-    const userMsg = { role: 'user' as const, content: input.trim() };
+  const send = async (text: string) => {
+    if (streaming) return;
+    const userMsg: ChatPanelMessage = { id: `u-${Date.now()}`, role: 'user', content: text };
     const next = [...messages, userMsg];
-    setMessages(next); setInput(''); setStreaming(true); setError(undefined);
+    setMessages(next); setStreaming(true); setError(undefined);
     let assistant = '';
-    setMessages([...next, { role: 'assistant', content: '' }]);
+    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '' }]);
     try {
-      assistant = await api.ai.chat(next, (delta) => {
+      assistant = await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
         assistant += delta;
-        setMessages((prev) => { const c = [...prev]; c[c.length - 1] = { role: 'assistant', content: assistant }; return c; });
+        setMessages((prev) => prev.map((m, i) =>
+          i === prev.length - 1 && m.role === 'assistant' ? { ...m, content: assistant } : m,
+        ));
       }, {
         mode: 'task_proposal',
         context,
@@ -629,33 +618,25 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   };
 
   return (
-    <div className="mt-3 flex flex-col gap-3">
+    <div className="flex flex-col gap-3 flex-1 min-h-0">
       {requirement && (
         <div className="rounded-md border border-border bg-secondary/40 p-2 text-xs">
           <span className="text-muted-foreground">{t('detail.linkage.req')}：</span>{requirement.title}
         </div>
       )}
-      <div ref={stick.containerRef} className="relative h-48 overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
-        <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
-        {messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">{t('task.ai.placeholder')}</div>
-        ) : messages.map((m, i) => (
-          <div key={i} className={`mb-2 ${m.role === 'user' ? 'text-right' : ''}`}>
-            <span className={`inline-block max-w-[85%] whitespace-pre-wrap break-words rounded-md px-2 py-1 ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
-              {m.content || t('task.ai.thinking')}
-            </span>
-          </div>
-        ))}
-      </div>
-      {error && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
-      <div className="flex gap-2">
-        <Input className="flex-1" value={input} onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={t('task.ai.placeholder')} disabled={streaming} />
-        <Button size="sm" onClick={send} disabled={streaming || !input.trim()}>{t('task.ai.send')}</Button>
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <ChatPanel
+          messages={messages}
+          onSend={send}
+          loading={streaming}
+          placeholder={t('task.ai.placeholder')}
+          thinkingLabel={t('task.ai.thinking')}
+          sendLabel={t('task.ai.send')}
+          error={error}
+        />
       </div>
       {proposals && proposals.length > 0 && (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto">
           <div className="flex items-center justify-between">
             <div className="text-xs font-medium text-muted-foreground">{t('task.ai.proposals')}</div>
             <Button size="sm" variant="ghost" onClick={addDraft}>{t('task.ai.addDraft')}</Button>
