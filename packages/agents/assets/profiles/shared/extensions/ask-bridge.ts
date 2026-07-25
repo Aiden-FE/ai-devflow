@@ -59,10 +59,14 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(id, input) {
-      // 通过 Node IPC 向父进程发请求。子进程未启用 IPC 时 process.send 不存在，工具退化为「无答案」返回。
-      if (typeof process !== "undefined" && typeof process.send === "function") {
-        process.send({ kind: "ask", toolUseId: id, payload: input });
+      // 子进程未启用 IPC 时（process.send 不存在）：无法向父进程发请求，立即返回空答案，避免永久阻塞。
+      if (typeof process === "undefined" || typeof process.send !== "function") {
+        return {
+          content: [{ type: "text", text: JSON.stringify({ aiDevflowAsk: input, answers: [] }) }],
+          details: { input, answers: [] },
+        };
       }
+      process.send({ kind: "ask", toolUseId: id, payload: input });
       // 阻塞等待父进程回灌答案。
       const answers = await new Promise<unknown>((resolve) => {
         pending.set(id, resolve);

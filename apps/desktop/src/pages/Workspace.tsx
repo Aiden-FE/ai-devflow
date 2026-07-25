@@ -579,7 +579,8 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
             <AskCard
               state={card}
               onSubmit={async (answers) => {
-                if (sessionRef.current) await api.ai.answer(sessionRef.current, card.toolUseId, answers);
+                if (!sessionRef.current) return;
+                await api.ai.answer(sessionRef.current, card.toolUseId, answers);
                 setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
               }}
             />
@@ -779,7 +780,8 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
               <AskCard
                 state={card}
                 onSubmit={async (answers) => {
-                  if (sessionRef.current) await api.ai.answer(sessionRef.current, card.toolUseId, answers);
+                  if (!sessionRef.current) return;
+                  await api.ai.answer(sessionRef.current, card.toolUseId, answers);
                   setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
                 }}
               />

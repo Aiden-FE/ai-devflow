@@ -228,6 +228,18 @@ export class PiProcessSupervisor {
 
     const timer = setTimeout(() => void killProcess(), opts.timeoutMs);
     timer.unref?.();
+    // 问答挂起期间的看门狗：用户长时间不提交答案（如关闭弹窗）时，避免子进程与 pendingAsks 条目永久泄漏。
+    // 设计 §“待验证风险点”将“问答超时”列为需保障项；此处给一个宽裕上限（10 分钟）后强制杀死进程。
+    const ASK_WATCHDOG_MS = 10 * 60_000;
+    let askWatchdog: NodeJS.Timeout | undefined;
+    const armAskWatchdog = (): void => {
+      if (askWatchdog) clearTimeout(askWatchdog);
+      askWatchdog = setTimeout(() => void killProcess(), ASK_WATCHDOG_MS);
+      askWatchdog.unref?.();
+    };
+    const clearAskWatchdog = (): void => {
+      if (askWatchdog) { clearTimeout(askWatchdog); askWatchdog = undefined; }
+    };
 
     return {
       pid: child.pid,
@@ -240,14 +252,16 @@ export class PiProcessSupervisor {
         if (typeof child.on !== 'function') return;
         child.on('message', (msg: unknown) => {
           // 问答挂起期间暂停超时，避免用户思考时被 120s 超时误杀；收到答案后恢复。
+          // 另上 10 分钟看门狗：用户放弃提交（关闭弹窗）时强制终止，避免子进程永久阻塞。
           const m = msg as { kind?: string };
-          if (m?.kind === 'ask') clearTimeout(timer);
-          else if (m?.kind === 'ask_answer') timer.refresh();
+          if (m?.kind === 'ask') { clearTimeout(timer); armAskWatchdog(); }
+          else if (m?.kind === 'ask_answer') { clearAskWatchdog(); timer.refresh(); }
           cb(msg);
         });
       },
       async cancel() {
         clearTimeout(timer);
+        clearAskWatchdog();
         await killProcess();
       },
       async done() {
@@ -255,6 +269,7 @@ export class PiProcessSupervisor {
           return await settledPromise;
         } finally {
           clearTimeout(timer);
+          clearAskWatchdog();
         }
       },
     };
