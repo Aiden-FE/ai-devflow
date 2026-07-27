@@ -7,14 +7,14 @@
 // 子进程 env 从空白白名单构造，绝不展开 process.env：隔离 HOME/临时目录、受控 PATH、PI_* 隔离、
 // 唯一候选凭证（标准提供商对应 *_API_KEY；兼容网关用 AI_DEVFLOW_ACTIVE_API_KEY + models.json 引用）。
 import { dirname } from 'node:path';
-import type { ProviderKind, TaskRole } from '@ai-devflow/core';
+import type { ProviderKind, ExpertKey } from '@ai-devflow/core';
 import type { ProviderRoute } from './provider-router.js';
 import {
   ACTIVE_API_KEY_ENV,
-  ROLE_PROFILES,
+  EXPERT_PROFILES,
   buildCompatibleModelsJson,
   isCompatibleKind,
-  roleToolsArg,
+  expertToolsArg,
 } from './profiles.js';
 
 /** 标准提供商 → 子进程凭证环境变量名。 */
@@ -34,7 +34,7 @@ export interface PiRunPlanInput {
   tempDir: string;
   executionId: string;
   attemptId: string;
-  role: TaskRole;
+  expert: ExpertKey;
   initialMessage: string;
   route: ProviderRoute;
   /** 角色工具执行所需的受控 PATH（不参与 Pi 入口解析）。 */
@@ -74,7 +74,7 @@ const CERT_PROXY_PASSTHROUGH = [
 ];
 
 export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
-  const profile = ROLE_PROFILES[input.role];
+  const profile = EXPERT_PROFILES[input.expert as Exclude<ExpertKey, 'chat'>] ?? EXPERT_PROFILES.dev;
   const name = `${input.executionId}-${input.attemptId}`;
 
   // §6.3：command=process.execPath，args=[absolutePiEntry, ...piArgs]。
@@ -94,7 +94,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
     '--no-context-files',
     '--no-approve',
     '--tools',
-    roleToolsArg(input.role),
+    expertToolsArg(input.expert as Exclude<ExpertKey, 'chat'>),
   );
   if (profile.excludedTools.length > 0) {
     args.push('--exclude-tools', profile.excludedTools.join(','));
@@ -124,7 +124,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
     TMPDIR: input.tempDir,
     TEMP: input.tempDir,
     TMP: input.tempDir,
-    AI_DEVFLOW_ROLE: input.role,
+    AI_DEVFLOW_EXPERT: input.expert,
     AI_DEVFLOW_EXECUTION_ID: input.executionId,
     AI_DEVFLOW_ATTEMPT_ID: input.attemptId,
   };

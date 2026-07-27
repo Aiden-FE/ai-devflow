@@ -43,15 +43,15 @@ describe('ProviderRouter', () => {
       sleep: async () => undefined,
       modelRouteFor: () => ({ primary: { model: 'integration-model', thinking: 'medium' } }),
     });
-    expect(router.routesFor('planner')).toEqual([
+    expect(router.routesFor('dev')).toEqual([
       expect.objectContaining({ providerId: 'p1', model: 'integration-model', models: ['integration-model'] }),
     ]);
   });
 
-  it('uses user-configured default model for all workloads', () => {
+  it('uses user-configured default model for all experts', () => {
     const harness = makeRouterHarness(['p1']);
     harness.providers[0]!.defaultModel = 'my-default';
-    const routes = harness.router.routesFor('coder');
+    const routes = harness.router.routesFor('dev');
     expect(routes[0]?.model).toBe('my-default');
     expect(routes[0]?.models).toEqual(['my-default']);
   });
@@ -60,76 +60,74 @@ describe('ProviderRouter', () => {
     const harness = makeRouterHarness(['p1']);
     harness.providers[0]!.defaultModel = 'my-default';
     harness.providers[0]!.workloadModels = { chat: 'chat-override' };
-    const chat = harness.router.routesFor('task_chat');
+    const chat = harness.router.routesFor('chat');
     expect(chat[0]?.model).toBe('chat-override');
-    const coder = harness.router.routesFor('coder');
+    const coder = harness.router.routesFor('dev');
     expect(coder[0]?.model).toBe('my-default');
   });
 
-  it('applies per-role default thinking levels for user-configured models', () => {
+  it('applies per-expert default thinking levels for user-configured models', () => {
     const harness = makeRouterHarness(['p1']);
     harness.providers[0]!.defaultModel = 'my-default';
-    expect(harness.router.routesFor('planner')[0]?.thinking).toBe('high');
-    expect(harness.router.routesFor('coder')[0]?.thinking).toBe('xhigh');
-    expect(harness.router.routesFor('reviewer')[0]?.thinking).toBe('high');
-    expect(harness.router.routesFor('tester')[0]?.thinking).toBe('medium');
-    expect(harness.router.routesFor('task_chat')[0]?.thinking).toBe('medium');
-    expect(harness.router.routesFor('requirement_chat')[0]?.thinking).toBe('medium');
-    expect(harness.router.routesFor('task_proposal')[0]?.thinking).toBe('high');
-    expect(harness.router.routesFor('requirement_proposal')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('product')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('ux')[0]?.thinking).toBe('medium');
+    expect(harness.router.routesFor('dev_lead')[0]?.thinking).toBe('high');
+    expect(harness.router.routesFor('dev')[0]?.thinking).toBe('xhigh');
+    expect(harness.router.routesFor('test')[0]?.thinking).toBe('medium');
+    expect(harness.router.routesFor('chat')[0]?.thinking).toBe('medium');
   });
 
   it('skips provider when no model can be resolved for workload', () => {
     const harness = makeRouterHarness(['p1']);
     harness.providers[0]!.defaultModel = undefined;
     harness.providers[0]!.workloadModels = { chat: 'chat-only' };
-    expect(harness.router.routesFor('coder')).toHaveLength(0);
-    expect(harness.router.routesFor('task_chat')).toHaveLength(1);
+    expect(harness.router.routesFor('dev')).toHaveLength(0);
+    expect(harness.router.routesFor('chat')).toHaveLength(1);
   });
 
   it('tries the next provider after a model-unavailable failure', async () => {
     const harness = makeRouterHarness(['p1', 'p2', 'p3']);
     const visited: string[] = [];
-    const value = await harness.router.execute('coder', async (route) => {
+    const value = await harness.router.execute('dev', async (route) => {
       visited.push(route.routeId);
       if (visited.length < 3) throw new ProviderExecutionError('model unavailable', 'model_unavailable', 404);
       return 'ok';
     });
     expect(value).toBe('ok');
-    expect(visited).toEqual(['p1:coder', 'p2:coder', 'p3:coder']);
+    expect(visited).toEqual(['p1:dev', 'p2:dev', 'p3:dev']);
   });
 
   it('opens authentication failures provider-wide and skips to the next provider', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     const visited: string[] = [];
-    await harness.router.execute('tester', async (route) => {
+    await harness.router.execute('test', async (route) => {
       visited.push(route.routeId);
       if (route.providerId === 'p1') throw new ProviderExecutionError('unauthorized', 'authentication', 401);
       return 'ok';
     });
-    expect(visited).toEqual(['p1:tester', 'p2:tester']);
+    expect(visited).toEqual(['p1:test', 'p2:test']);
     const authHealth = harness.health.listByProvider('p1')
       .filter((entry) => entry.lastFailureKind === 'authentication');
     expect(authHealth).toHaveLength(1);
     expect(authHealth[0]).toMatchObject({ state: 'open', cooldownUntil: undefined });
-    // The same provider is quarantined for every workload until its revision changes.
-    expect(harness.router.routesFor('coder').map((route) => route.providerId)).not.toContain('p1');
+    // The same provider is quarantined for every expert until its revision changes.
+    expect(harness.router.routesFor('dev').map((route) => route.providerId)).not.toContain('p1');
   });
 
   it('keeps model-unavailable health route-local across workloads', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
-    await harness.router.execute('coder', async (route) => {
+    await harness.router.execute('dev', async (route) => {
       if (route.providerId === 'p1') throw new ProviderExecutionError('model unavailable', 'model_unavailable', 404);
       return 'ok';
     });
 
-    expect(harness.router.routesFor('tester').map((route) => route.providerId)).toContain('p1');
+    expect(harness.router.routesFor('test').map((route) => route.providerId)).toContain('p1');
   });
 
   it('never exceeds eight operation calls', async () => {
     const harness = makeRouterHarness(['p1', 'p2', 'p3', 'p4', 'p5']);
     let calls = 0;
-    await expect(harness.router.execute('planner', async () => {
+    await expect(harness.router.execute('dev', async () => {
       calls += 1;
       throw new ProviderExecutionError('offline', 'transient_provider', 503);
     })).rejects.toThrow(/所有已配置 AI 服务/);
@@ -141,7 +139,7 @@ describe('ProviderRouter', () => {
     const harness = makeRouterHarness(['p1']);
     let caught: ProviderExecutionError | undefined;
     try {
-      await harness.router.execute('tester', async () => {
+      await harness.router.execute('test', async () => {
         throw new ProviderExecutionError('AI 服务请求失败：401: invalid key', 'authentication', 401);
       });
     } catch (err) {
@@ -157,7 +155,7 @@ describe('ProviderRouter', () => {
     const harness = makeRouterHarness(['p1']);
     let caught: ProviderExecutionError | undefined;
     try {
-      await harness.router.execute('tester', async () => {
+      await harness.router.execute('test', async () => {
         throw new ProviderExecutionError(
           'Pi 返回的终止协议无效',
           'protocol',
@@ -177,7 +175,7 @@ describe('ProviderRouter', () => {
   it('does not fail over or open health for a task-result failure', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     let calls = 0;
-    await expect(harness.router.execute('reviewer', async () => {
+    await expect(harness.router.execute('test', async () => {
       calls += 1;
       throw new ProviderExecutionError('review evidence invalid', 'task_result');
     })).rejects.toThrow(/review evidence invalid/);
@@ -188,24 +186,24 @@ describe('ProviderRouter', () => {
   it('retries a transient route once before degrading to the next provider', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     const visited: string[] = [];
-    const value = await harness.router.execute('tester', async (route) => {
+    const value = await harness.router.execute('test', async (route) => {
       visited.push(route.routeId);
       if (route.providerId === 'p1') throw new ProviderExecutionError('flaky', 'transient_provider', 503);
       return 'done';
     });
     expect(value).toBe('done');
     // p1 attempted twice (original + one retry), then p2 succeeds.
-    expect(visited).toEqual(['p1:tester', 'p1:tester', 'p2:tester']);
+    expect(visited).toEqual(['p1:test', 'p1:test', 'p2:test']);
   });
 
   it('records retryAfterMs cooldown and immediately falls back without sleeping', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
-    await harness.router.execute('tester', async (route) => {
+    await harness.router.execute('test', async (route) => {
       if (route.providerId === 'p1') throw new ProviderExecutionError('slow down', 'rate_limit', 429, 5_000);
       return 'ok';
     });
     expect(harness.sleeps).toEqual([]);
-    const h = harness.health.get('p1', 'p1:tester');
+    const h = harness.health.get('p1', 'p1:test');
     expect(h?.state).toBe('open');
     expect(h?.cooldownUntil).toBe(1_000 + 5_000);
   });
@@ -213,11 +211,11 @@ describe('ProviderRouter', () => {
   it('resets health to closed on success', async () => {
     const harness = makeRouterHarness(['p1']);
     harness.health.upsert({
-      providerId: 'p1', routeId: 'p1:coder', state: 'open',
+      providerId: 'p1', routeId: 'p1:dev', state: 'open',
       consecutiveFailures: 3, cooldownUntil: 0, updatedAt: 0,
     });
-    await harness.router.execute('coder', async () => 'ok');
-    const h = harness.health.get('p1', 'p1:coder');
+    await harness.router.execute('dev', async () => 'ok');
+    const h = harness.health.get('p1', 'p1:dev');
     expect(h?.state).toBe('closed');
     expect(h?.consecutiveFailures).toBe(0);
   });
@@ -225,7 +223,7 @@ describe('ProviderRouter', () => {
   it('atomically allows only one concurrent half-open probe per route', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     harness.health.upsert({
-      providerId: 'p1', routeId: 'p1:coder', state: 'open',
+      providerId: 'p1', routeId: 'p1:dev', state: 'open',
       consecutiveFailures: 2, cooldownUntil: 900, updatedAt: 0,
     });
     let releaseProbe!: () => void;
@@ -233,7 +231,7 @@ describe('ProviderRouter', () => {
     let probeStarted!: () => void;
     const started = new Promise<void>((resolve) => { probeStarted = resolve; });
     const firstVisited: string[] = [];
-    const first = harness.router.execute('coder', async (route) => {
+    const first = harness.router.execute('dev', async (route) => {
       firstVisited.push(route.routeId);
       if (route.providerId === 'p1') {
         probeStarted();
@@ -242,33 +240,33 @@ describe('ProviderRouter', () => {
       return 'first';
     });
     await started;
-    expect(harness.health.get('p1', 'p1:coder')?.state).toBe('half_open');
+    expect(harness.health.get('p1', 'p1:dev')?.state).toBe('half_open');
 
     const secondVisited: string[] = [];
-    await expect(harness.router.execute('coder', async (route) => {
+    await expect(harness.router.execute('dev', async (route) => {
       secondVisited.push(route.routeId);
       return 'second';
     })).resolves.toBe('second');
-    expect(secondVisited[0]).toBe('p2:coder');
+    expect(secondVisited[0]).toBe('p2:dev');
 
     releaseProbe();
     await expect(first).resolves.toBe('first');
-    expect(firstVisited).toEqual(['p1:coder']);
+    expect(firstVisited).toEqual(['p1:dev']);
   });
 
   it('half-open probes only the earliest-expiring route when all are cooling down', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     // now() === 1000; both routes cooling, p2 expires earlier.
-    harness.health.upsert({ providerId: 'p1', routeId: 'p1:coder', state: 'open', consecutiveFailures: 1, cooldownUntil: 9_000, updatedAt: 0 });
-    harness.health.upsert({ providerId: 'p2', routeId: 'p2:coder', state: 'open', consecutiveFailures: 1, cooldownUntil: 5_000, updatedAt: 0 });
-    const routes = harness.router.routesFor('coder');
-    expect(routes.map((r) => r.routeId)).toEqual(['p2:coder']);
+    harness.health.upsert({ providerId: 'p1', routeId: 'p1:dev', state: 'open', consecutiveFailures: 1, cooldownUntil: 9_000, updatedAt: 0 });
+    harness.health.upsert({ providerId: 'p2', routeId: 'p2:dev', state: 'open', consecutiveFailures: 1, cooldownUntil: 5_000, updatedAt: 0 });
+    const routes = harness.router.routesFor('dev');
+    expect(routes.map((r) => r.routeId)).toEqual(['p2:dev']);
   });
 
   it('onlyProviderId never fails over to another provider', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     const visited: string[] = [];
-    await expect(harness.router.execute('coder', async (route) => {
+    await expect(harness.router.execute('dev', async (route) => {
       visited.push(route.routeId);
       throw new ProviderExecutionError('down', 'transient_provider', 503);
     }, { onlyProviderId: 'p1' })).rejects.toThrow(/所有已配置 AI 服务/);
@@ -288,7 +286,7 @@ describe('classifyProviderFailure', () => {
   });
 });
 
-function overrideHarness(providers: ProviderConfig[], opts: { secret?: (id: string) => string | undefined; agentOverrideFor?: (w: string) => { providerId: string; model: string } | undefined }) {
+function overrideHarness(providers: ProviderConfig[], opts: { secret?: (id: string) => string | undefined; agentOverrideFor?: (e: string) => { providerId: string; model: string } | undefined }) {
   const health = new Map<string, { state: 'closed' | 'open' | 'half_open'; cooldownUntil?: number; lastFailureKind?: string }>();
   const router = new ProviderRouter({
     listProviders: () => providers,
@@ -312,7 +310,7 @@ describe('ProviderRouter agent override', () => {
 
   it('覆盖存在时仅返回该 provider 并强制 model', () => {
     const { router } = overrideHarness([p1, p2], { agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
-    const routes = router.routesFor('requirement_chat');
+    const routes = router.routesFor('product');
     expect(routes).toHaveLength(1);
     expect(routes[0]!.providerId).toBe('p2');
     expect(routes[0]!.model).toBe('claude-opus');
@@ -321,20 +319,20 @@ describe('ProviderRouter agent override', () => {
   it('覆盖 provider 被禁用时回退到默认有序路由', () => {
     const p2Disabled = { ...p2, enabled: false };
     const { router } = overrideHarness([p1, p2Disabled], { agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
-    const routes = router.routesFor('requirement_chat');
+    const routes = router.routesFor('product');
     expect(routes.map((r) => r.providerId)).toEqual(['p1']);
     expect(routes[0]!.model).toBe('gpt-4o');
   });
 
   it('覆盖 provider 无凭证时回退到默认路由', () => {
     const { router } = overrideHarness([p1, p2], { secret: (id) => (id === 'p2' ? undefined : `secret-${id}`), agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
-    const routes = router.routesFor('requirement_chat');
+    const routes = router.routesFor('product');
     expect(routes.map((r) => r.providerId)).toEqual(['p1']);
   });
 
   it('无覆盖时走默认 workloadModels/defaultModel', () => {
     const { router } = overrideHarness([p1, p2], {});
-    const routes = router.routesFor('coder');
+    const routes = router.routesFor('dev');
     expect(routes.map((r) => r.providerId)).toEqual(['p1', 'p2']);
   });
 });

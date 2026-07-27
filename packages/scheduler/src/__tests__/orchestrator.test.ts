@@ -94,14 +94,15 @@ describe('orchestrator pipeline', () => {
     expect(events.some((e) => e.event.type === 'file_change')).toBe(true);
   });
 
-  it('passes the stage role + executionId to the runner for dev and review', async () => {
+  it('passes the dev+test experts + executionId to the runner for dev and review', async () => {
     const t = makeTask({
       role: 'coder',
       stages: [{ id: 'plan', name: '规划', role: 'planner' }],
     });
     repos.tasks.insert(t);
     await orch.start(t.id);
-    expect(runner.requests.map((r) => r.role)).toEqual(['planner', 'reviewer']);
+    // 专家化重构：按泳道派发，in_progress->dev，testing->test（忽略 stages.role）
+    expect(runner.requests.map((r) => r.expert)).toEqual(['dev', 'test']);
     expect(runner.requests.every((r) => !!r.executionId)).toBe(true);
   });
 });
@@ -411,7 +412,7 @@ describe('orchestrator review (testing lane)', () => {
     const t = makeTask();
     repos.tasks.insert(t);
     await orch.start(t.id);
-    const reviewReq = runner.requests.find((r) => r.role === 'reviewer');
+    const reviewReq = runner.requests.find((r) => r.expert === 'test');
     expect(reviewReq).toBeDefined();
     const prompt = reviewReq!.prompt;
     // 必须明确指示结论标记写入 report_result 的 summary 参数，而非仅作为文本输出。
@@ -424,7 +425,7 @@ describe('orchestrator review (testing lane)', () => {
   });
 
   it('review failure returns to in_progress with feedback, bounded by maxReviewRounds (no infinite loop)', async () => {
-    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], { reviewerVerdict: 'FAIL' });
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], { testExpertVerdict: 'FAIL' });
     const db2 = openDatabase(':memory:');
     const r2 = createRepositories(db2);
     seedBasic(r2);
@@ -677,7 +678,7 @@ describe('orchestrator cancel semantics (stop / revoke retry / no brick)', () =>
 
 describe('orchestrator pause/cancel during review (testing lane)', () => {
   function reviewOrch(autoRetry = false) {
-    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], { reviewerDelayMs: 40 });
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], { testExpertDelayMs: 40 });
     return makeOrch(repos, fr, { autoRetry, retryPolicy: { maxAttempts: 3, baseDelayMs: 10, maxDelayMs: 20, backoff: false } });
   }
 
@@ -719,7 +720,7 @@ describe('orchestrator pause/cancel during review (testing lane)', () => {
     const fr = new FakeAgentRunner(
       () => [{ type: 'done', summary: 'dev ok', t: 0 }],
       {
-        reviewerEvents: () => [{
+        testExpertEvents: () => [{
           type: 'ask_user',
           question: 'Which compatibility target should be reviewed?',
           context: 'Reviewer needs a target.',
@@ -822,7 +823,7 @@ class GitCommitRunner implements AgentRunner {
   async verifyRuntime(): Promise<{ version: string; entry: string }> { return { version: 'fake', entry: 'fake' }; }
   async run(req: AgentRunRequest): Promise<AgentRun> {
     this.requests.push(req);
-    if (req.role === 'reviewer') {
+    if (req.expert === 'test') {
       return runFromEvents([
         { type: 'log', level: 'info', text: 'reviewing', t: 0 },
         { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 },

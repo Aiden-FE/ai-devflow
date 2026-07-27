@@ -85,7 +85,9 @@ export interface Task {
   title: string;
   description: string;
   status: TaskStatus;
+  /** @deprecated 按泳道派发，不再使用；保留兼容旧数据。 */
   role: TaskRole;
+  /** @deprecated 多角色 stages 废弃；研发专家在 in_progress 单次执行内自行完成设计->实现->自验。保留兼容。 */
   stages: Stage[];
   /** 当前阶段索引。 */
   currentStage: number;
@@ -103,6 +105,8 @@ export interface Task {
    * 前置任务进入 in_review 或 archived 视为"完成"（开发工作已交付），其后继任务方可启动。
    */
   dependsOn?: string[];
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示与拆分自检，不影响执行者派发。 */
+  typeLabel?: TaskTypeLabel;
 }
 
 /** Agent 执行事件（与 agents 包一致，但定义在 core 以便 Renderer 订阅）。 */
@@ -254,8 +258,7 @@ export interface AiChatMessage {
   content: string;
 }
 
-/**
- * AI 提议的任务草稿（用户确认后落库）。
+/** AI 提议的任务草稿（用户确认后落库）。
  * AI 根据任务间关系自动输出依赖 DAG：每个草稿有稳定 draftId，dependsOn 引用其它草稿的 draftId。
  * 落库时由批量创建把 draftId 映射为真实 taskId（见 validateProposalDag 与 tasks:createBatch）。
  */
@@ -264,10 +267,16 @@ export interface AiTaskProposal {
   draftId: string;
   title: string;
   description: string;
-  role: TaskRole;
+  /** @deprecated 按泳道派发，不再使用；保留兼容旧草稿。 */
+  role?: TaskRole;
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示与拆分自检，不影响执行者派发。 */
+  typeLabel?: TaskTypeLabel;
   /** 依赖的任务标识列表（DAG；无依赖则保持并行）。可引用同批 draftId 或已有任务 taskId。 */
   dependsOn?: string[];
 }
+
+/** 任务类型标签（仅展示与拆分自检，不影响执行者派发）。 */
+export type TaskTypeLabel = 'frontend' | 'backend' | 'fullstack' | 'integration';
 
 /**
  * 验收不通过退回请求（专用 reject 操作，禁止用无原因的通用 updateStatus 代替）。

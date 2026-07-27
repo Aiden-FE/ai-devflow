@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import type { ProviderKind, TaskRole } from '@ai-devflow/core';
+import type { ProviderKind, TaskRole, ExpertKey } from '@ai-devflow/core';
 
 /**
  * 角色 profile（设计 §7.1）。
@@ -53,10 +53,11 @@ export const BUILTIN_EXTENSIONS = [
   'requirement-bridge',
   'task-bridge',
   'ask-bridge',
+  'ux-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
-export type SkillSource = TaskRole | 'shared';
+export type SkillSource = TaskRole | 'shared' | 'product' | 'ux' | 'dev_lead';
 
 /** 内置技能注册表条目：name 为技能目录名，source 仅表示物理文件位置，不限制哪些角色可引用。 */
 export interface BuiltinSkill {
@@ -82,6 +83,11 @@ export const BUILTIN_SKILLS = [
   { name: 'test-design',             source: 'tester' },
   { name: 'failure-analysis',        source: 'tester' },
   { name: 'acceptance-verification', source: 'tester' },
+  // 专家化新增技能（Task 3 资产）
+  { name: 'create-prd',           source: 'product' as const },
+  { name: 'ux-spec-writing',      source: 'ux' as const },
+  { name: 'web-design-engineer',  source: 'ux' as const },
+  { name: 'subtask-generation',   source: 'dev_lead' as const },
 ] as const satisfies readonly BuiltinSkill[];
 
 export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
@@ -144,11 +150,11 @@ export type StepWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 
 export const STEP_AGENTS: Record<string, StepAgentProfile> = {
   requirement_refiner: {
     step: 'requirement_refiner',
-    version: 2,
+    version: 3,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
-    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask'],
-    extensions: ['requirement-bridge', 'ask-bridge'],
+    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask', 'ai_devflow_consult_ux'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'ux-bridge'],
     timeoutMs: 10 * 60_000,
   },
   task_proposer: {
@@ -251,6 +257,26 @@ export interface MaterializeInput {
   models: string[];
 }
 
+/** 专家物化输入（与 MaterializeInput 同，键改 expert）。 */
+export interface ExpertMaterializeInput {
+  expert: ExecutionExpertKey;
+  providerId: string;
+  providerKind: ProviderKind;
+  providerRevision: number;
+  baseURL?: string;
+  providerName: string;
+  models: string[];
+}
+
+/** 专家 -> 物理资产目录名。dev/test 复用现有 coder/tester 资产（其 SYSTEM.md/skills 一致）。 */
+export const EXPERT_ASSETS_DIR: Record<ExecutionExpertKey, string> = {
+  product: 'product',
+  ux: 'ux',
+  dev_lead: 'dev_lead',
+  dev: 'coder',
+  test: 'tester',
+};
+
 /**
  * 把内置只读角色资源物化到内容寻址快照：`<baseDir>/profiles/<digest>/<role>/`，含 settings.json、
  * SYSTEM.md、skills/（角色私有技能 + 跨源引用的共享/他角技能副本）、共享 extensions/ 副本；兼容网关
@@ -263,12 +289,29 @@ export class ProfileMaterializer {
     private baseDir: string,
     private readonly profiles: Record<TaskRole, RoleProfile> = ROLE_PROFILES,
     private readonly skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+    private readonly expertProfiles: Record<ExecutionExpertKey, ExpertProfile> = EXPERT_PROFILES,
   ) {}
 
   digest(input: MaterializeInput): string {
     const profile = this.profiles[input.role];
     const key = JSON.stringify({
       role: input.role,
+      profileVersion: profile.version,
+      providerId: input.providerId,
+      providerKind: input.providerKind,
+      providerName: input.providerName,
+      providerRevision: input.providerRevision,
+      baseURL: input.baseURL ?? null,
+      models: [...new Set(input.models)].sort(),
+    });
+    return createHash('sha256').update(key).digest('hex').slice(0, 16);
+  }
+
+  /** 专家快照摘要键（内容寻址，同输入同目录）。 */
+  digestExpert(input: ExpertMaterializeInput): string {
+    const profile = this.expertProfiles[input.expert];
+    const key = JSON.stringify({
+      expert: input.expert,
       profileVersion: profile.version,
       providerId: input.providerId,
       providerKind: input.providerKind,
@@ -297,6 +340,60 @@ export class ProfileMaterializer {
         if (!entry) throw new Error(`角色 ${input.role} 引用了未注册的技能：${skill}`);
         if (entry.source === input.role) continue;
         const src = join(this.assetsRoot, entry.source, 'skills', skill);
+        if (!existsSync(src)) throw new Error(`技能 ${skill} 的源目录不存在：${src}`);
+        cpSync(src, join(tmp, 'skills', skill), { recursive: true });
+      }
+      const extDir = join(tmp, 'extensions');
+      mkdirSync(extDir, { recursive: true });
+      for (const ext of profile.extensions) {
+        const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
+        if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
+      }
+      if (isCompatibleKind(input.providerKind)) {
+        writeFileSync(
+          join(tmp, 'models.json'),
+          buildCompatibleModelsJson(
+            input.providerName,
+            input.providerKind,
+            input.baseURL,
+            [...new Set(input.models)].sort(),
+          ),
+        );
+      }
+      const contentDigest = snapshotContentDigest(tmp);
+      writeFileSync(join(tmp, '.complete'), JSON.stringify({ digest, contentDigest }));
+      publishSnapshot(tmp, profileDir, digest);
+    } finally {
+      if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
+    }
+    return { profileDir, digest };
+  }
+
+  /**
+   * 把内置只读专家资源物化到内容寻址快照：`<baseDir>/profiles/<digest>/<expert>/`。
+   * 与 materialize 同，但按专家画像取 SYSTEM.md/skills/extensions，资产目录经 EXPERT_ASSETS_DIR 映射。
+   */
+  materializeExpert(input: ExpertMaterializeInput): { profileDir: string; digest: string } {
+    const digest = this.digestExpert(input);
+    const profileDir = join(this.baseDir, 'profiles', digest, input.expert);
+    if (validateSnapshot(profileDir, digest)) return { profileDir, digest };
+    const tmp = `${profileDir}.tmp-${randomBytes(4).toString('hex')}`;
+    mkdirSync(join(this.baseDir, 'profiles', digest), { recursive: true });
+    try {
+      const profile = this.expertProfiles[input.expert];
+      const assetDir = EXPERT_ASSETS_DIR[input.expert];
+      const skillByName = new Map(this.skillPool.map((s) => [s.name, s]));
+      cpSync(join(this.assetsRoot, assetDir), tmp, { recursive: true });
+      for (const skill of profile.skills) {
+        const entry = skillByName.get(skill);
+        if (!entry) throw new Error(`专家 ${input.expert} 引用了未注册的技能：${skill}`);
+        // 技能 source 为 TaskRole（旧资产目录）或专家目录；比较 EXPERT_ASSETS_DIR 以判断是否同目录。
+        const skillAssetDir =
+          (typeof entry.source === 'string' && (entry.source as string) in EXPERT_ASSETS_DIR)
+            ? EXPERT_ASSETS_DIR[entry.source as ExecutionExpertKey]
+            : entry.source;
+        if (skillAssetDir === assetDir) continue;
+        const src = join(this.assetsRoot, skillAssetDir, 'skills', skill);
         if (!existsSync(src)) throw new Error(`技能 ${skill} 的源目录不存在：${src}`);
         cpSync(src, join(tmp, 'skills', skill), { recursive: true });
       }
@@ -407,3 +504,98 @@ export function validateRoleProfiles(
   }
 }
 validateRoleProfiles();
+
+// ---- 专家画像注册表（设计 §4.1）----
+
+/** 执行专家键：6 专家中除 chat 外的 5 个执行专家（chat 沿用现状，无独立画像）。 */
+export type ExecutionExpertKey = Exclude<ExpertKey, 'chat'>;
+
+/** 专家画像（结构与 RoleProfile 同，键改 expert: ExpertKey）。 */
+export interface ExpertProfile {
+  expert: ExpertKey;
+  version: number;
+  systemPromptFile: string;
+  /** 专家 built-in tools（未含内部工具）。 */
+  tools: string[];
+  excludedTools: string[];
+  /** 引用的内置 skills（来自 BUILTIN_SKILLS 注册池）。任意专家可引用池中任意技能。 */
+  skills: string[];
+  /** 该专家启用的扩展（名称取自 BUILTIN_EXTENSIONS 注册池）。 */
+  extensions: string[];
+  timeoutMs: number;
+}
+
+/**
+ * 专家画像注册表（设计 §4.1）。
+ * product/ux/dev_lead 为新增资产；dev/test 复用现有 coder/tester 资产目录的技能与 SYSTEM.md
+ * （dev/test 的资产在 Task 5 ProfileMaterializer 专家化时迁移；此处仅声明引用以驱动执行）。
+ */
+export const EXPERT_PROFILES: Record<ExecutionExpertKey, ExpertProfile> = {
+  product: {
+    expert: 'product', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['brainstorming', 'requirements-analysis', 'design-writing', 'create-prd'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
+    timeoutMs: 15 * 60_000,
+  },
+  ux: {
+    expert: 'ux', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['ux-spec-writing', 'web-design-engineer'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'structured-result'],
+    timeoutMs: 10 * 60_000,
+  },
+  dev_lead: {
+    expert: 'dev_lead', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['brainstorming', 'implementation-planning', 'subtask-generation'],
+    extensions: ['task-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
+    timeoutMs: 15 * 60_000,
+  },
+  dev: {
+    expert: 'dev', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
+    excludedTools: [],
+    skills: ['design-writing', 'implementation-planning', 'test-driven-development', 'systematic-debugging', 'verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    timeoutMs: 45 * 60_000,
+  },
+  test: {
+    expert: 'test', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'],
+    excludedTools: [],
+    skills: ['code-review', 'security-review', 'regression-review', 'test-design', 'failure-analysis', 'acceptance-verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    timeoutMs: 30 * 60_000,
+  },
+};
+
+/** --tools 的最终值：专家 built-in tools ∪ 两个内部工具。 */
+export function expertToolsArg(expert: ExecutionExpertKey): string {
+  return [...EXPERT_PROFILES[expert].tools, ...INTERNAL_TOOLS].join(',');
+}
+
+/**
+ * 校验每个专家声明的扩展都在 BUILTIN_EXTENSIONS 注册池、声明的技能都在 BUILTIN_SKILLS 注册池。
+ * 模块加载时调用，使配置错误在应用启动期 fail-fast。
+ */
+export function validateExpertProfiles(
+  profiles: Record<ExecutionExpertKey, ExpertProfile> = EXPERT_PROFILES,
+  extensionPool: readonly string[] = BUILTIN_EXTENSIONS,
+  skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+): void {
+  const extSet = new Set(extensionPool);
+  const skillNames = new Set(skillPool.map((s) => s.name));
+  for (const expert of Object.keys(profiles) as ExecutionExpertKey[]) {
+    for (const ext of profiles[expert].extensions) {
+      if (!extSet.has(ext)) throw new Error(`专家 ${expert} 引用了未注册的扩展：${ext}`);
+    }
+    for (const skill of profiles[expert].skills) {
+      if (!skillNames.has(skill)) throw new Error(`专家 ${expert} 引用了未注册的技能：${skill}`);
+    }
+  }
+}
+validateExpertProfiles();

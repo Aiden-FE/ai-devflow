@@ -13,7 +13,7 @@
 // ProviderHealthStore 结构化依赖（不 import persistence）；Task 9 由 Electron 注入持久化仓储。
 // modelRouteFor 为集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入。
 import { createHash } from 'node:crypto';
-import type { FailureKind, ModelRoleKey, ProviderConfig, ProviderHealth, ProviderKind, Workload } from '@ai-devflow/core';
+import type { FailureKind, AgentKey, ProviderConfig, ProviderHealth, ProviderKind } from '@ai-devflow/core';
 export interface ModelChoice {
   model: string;
   thinking: 'low' | 'medium' | 'high' | 'xhigh';
@@ -79,39 +79,21 @@ const COMPATIBLE_BASE: Partial<Record<ProviderKind, BaseKind>> = {
 };
 
 /**
- * workload -> 模型角色键（设计 §7.2）。`chat` 覆盖 task_chat/requirement_chat，
- * `proposal` 覆盖 task_proposal/requirement_proposal；四角色一一对应。
+ * 解析某提供商在指定专家下应使用的模型：workloadModels 按专家 AgentKey 覆盖，否则取 defaultModel；
+ * 两者皆无返回 undefined（调用方跳过该提供商对此专家的候选）。
  */
-export function workloadRoleKey(workload: Workload): ModelRoleKey {
-  switch (workload) {
-    case 'planner': return 'planner';
-    case 'coder': return 'coder';
-    case 'reviewer': return 'reviewer';
-    case 'tester': return 'tester';
-    case 'task_chat':
-    case 'requirement_chat': return 'chat';
-    case 'task_proposal':
-    case 'requirement_proposal': return 'proposal';
-  }
+export function resolveModelFor(provider: ProviderConfig, expert: AgentKey): string | undefined {
+  return provider.workloadModels?.[expert] ?? provider.defaultModel;
 }
 
-/**
- * 解析某提供商在指定 workload 下应使用的模型：workloadModels 按角色覆盖，否则取 defaultModel；
- * 两者皆无返回 undefined（调用方跳过该提供商对此 workload 的候选）。
- */
-export function resolveModelFor(provider: ProviderConfig, workload: Workload): string | undefined {
-  const role = workloadRoleKey(workload);
-  return provider.workloadModels?.[role] ?? provider.defaultModel;
-}
-
-/** 用户配置模型不携带 thinking 等级；按角色回落到默认等级（modelRouteFor 缝可显式覆盖）。 */
-const DEFAULT_THINKING_BY_ROLE: Record<ModelRoleKey, ModelChoice['thinking']> = {
-  planner: 'high',
-  coder: 'xhigh',
-  reviewer: 'high',
-  tester: 'medium',
+/** 专家 AgentKey -> 默认 thinking 等级（用户配置模型不携带 thinking；modelRouteFor 缝可显式覆盖）。 */
+const DEFAULT_THINKING_BY_EXPERT: Record<AgentKey, ModelChoice['thinking']> = {
+  product: 'high',
+  ux: 'medium',
+  dev_lead: 'high',
+  dev: 'xhigh',
+  test: 'medium',
   chat: 'medium',
-  proposal: 'high',
 };
 
 function providerNameFor(provider: ProviderConfig): string {
@@ -169,21 +151,21 @@ export interface ProviderRouterDeps {
   now(): number;
   sleep(ms: number): Promise<void>;
   /** 集成测试缝：存在时覆盖用户配置解析（含 thinking 等级），供 real-pi 等测试注入非生产模型。 */
-  modelRouteFor?: (provider: ProviderConfig, workload: Workload) => ModelRoute | undefined;
-  /** 生产级 agent 覆盖：按 workload 返回用户配置的 {providerId, model}；命中则仅用该 provider+model，不可用时回退默认路由。 */
-  agentOverrideFor?: (workload: Workload) => { providerId: string; model: string } | undefined;
+  modelRouteFor?: (provider: ProviderConfig, expert: AgentKey) => ModelRoute | undefined;
+  /** 生产级 agent 覆盖：按专家返回用户配置的 {providerId, model}；命中则仅用该 provider+model，不可用时回退默认路由。 */
+  agentOverrideFor?: (expert: AgentKey) => { providerId: string; model: string } | undefined;
 }
 
 export class ProviderRouter {
   constructor(private deps: ProviderRouterDeps) {}
 
   /** 生成某 workload 的候选路线。覆盖存在且可用时仅返回该 provider+model；不可用回退默认有序路由。 */
-  routesFor(workload: Workload, now = this.deps.now()): ProviderRoute[] {
-    const override = this.deps.agentOverrideFor?.(workload);
+  routesFor(expert: AgentKey, now = this.deps.now()): ProviderRoute[] {
+    const override = this.deps.agentOverrideFor?.(expert);
     if (override) {
       const overrideCandidates = this.collectCandidates(
         this.deps.listProviders().filter((p) => p.enabled && p.id === override.providerId),
-        workload,
+        expert,
         now,
         override,
       );
@@ -193,7 +175,7 @@ export class ProviderRouter {
     }
     const candidates = this.collectCandidates(
       this.deps.listProviders().filter((p) => p.enabled).sort((a, b) => a.priority - b.priority),
-      workload,
+      expert,
       now,
       undefined,
     );
@@ -210,7 +192,7 @@ export class ProviderRouter {
   /** 收集候选：遍历 providers，按 override/seam/默认解析模型与 thinking，叠加健康/冷却状态。 */
   private collectCandidates(
     providers: ProviderConfig[],
-    workload: Workload,
+    expert: AgentKey,
     now: number,
     override: { providerId: string; model: string } | undefined,
   ): { route: ProviderRoute; cooling: boolean; cooldownUntil?: number; probeEligible: boolean }[] {
@@ -226,22 +208,22 @@ export class ProviderRouter {
       if (authHealth?.state === 'open' || authHealth?.state === 'half_open') continue;
       const secret = this.deps.resolveSecret(provider.id);
       if (!secret) continue;
-      const seam = this.deps.modelRouteFor?.(provider, workload);
+      const seam = this.deps.modelRouteFor?.(provider, expert);
       let model: string | undefined;
       let thinking: ModelChoice['thinking'];
       if (override && provider.id === override.providerId) {
         model = override.model;
-        thinking = DEFAULT_THINKING_BY_ROLE[workloadRoleKey(workload)];
+        thinking = DEFAULT_THINKING_BY_EXPERT[expert];
       } else if (seam) {
         model = seam.primary.model;
         thinking = seam.primary.thinking;
       } else {
-        model = resolveModelFor(provider, workload);
-        thinking = DEFAULT_THINKING_BY_ROLE[workloadRoleKey(workload)];
+        model = resolveModelFor(provider, expert);
+        thinking = DEFAULT_THINKING_BY_EXPERT[expert];
       }
       if (model === undefined) continue;
       const providerName = providerNameFor(provider);
-      const routeId = `${provider.id}:${workload}`;
+      const routeId = `${provider.id}:${expert}`;
       const h = this.deps.health.get(provider.id, routeId);
       const isOpen = h?.state === 'open';
       const isHalfOpen = h?.state === 'half_open';
@@ -273,11 +255,11 @@ export class ProviderRouter {
    * 总 operation 调用上限 8 次；耗尽后抛错（由调度器有界退避，§9.5）。
    */
   async execute<T>(
-    workload: Workload,
+    expert: AgentKey,
     operation: (route: ProviderRoute, ordinal: number) => Promise<T>,
     options?: { onlyProviderId?: string },
   ): Promise<T> {
-    let routes = this.routesFor(workload);
+    let routes = this.routesFor(expert);
     if (options?.onlyProviderId) {
       routes = routes.filter((r) => r.providerId === options.onlyProviderId);
     }

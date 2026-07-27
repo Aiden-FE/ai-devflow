@@ -11,6 +11,16 @@ import { normalizeProviderInput } from '@ai-devflow/core';
 const PROVIDERS_KEY = 'providers:v1';
 const AGENT_OVERRIDES_KEY = 'agent-overrides:v1';
 const MIGRATION_MARKER = 'provider-migration:v1';
+
+/** 旧 AgentKey -> 新专家键映射（§6.2）。 */
+const LEGACY_TO_EXPERT: Record<string, AgentKey> = {
+  requirement_refiner: 'product',
+  task_proposer: 'dev_lead',
+  planner: 'dev',
+  coder: 'dev',
+  reviewer: 'test',
+  tester: 'test',
+};
 const LEGACY_KEY = 'ai_provider';
 
 /** 凭证存储端口（生产为 Repositories.credentials 的事务化包装；测试为内存 Map）。 */
@@ -209,6 +219,40 @@ export class ProviderStore {
   removeAgentOverride(agentKey: AgentKey): void {
     const list = this.listAgentOverrides().filter((x) => x.agentKey !== agentKey);
     this.credentials.upsert(AGENT_OVERRIDES_KEY, this.crypto.encrypt(JSON.stringify(list)));
+  }
+
+  /**
+   * 专家化重构（§6.2）：把旧 AgentModelOverride 键一次性迁移到 6 专家键。
+   * 多旧键映射同一新键时取首个有效项，其余记为 conflict 丢弃；已是新键或未知键原样保留。
+   * 幂等：无旧键或无覆盖时返回空结果，不写存储。应用启动调用一次。
+   */
+  migrateAgentOverridesToExperts(): { migrated: string[]; conflicts: string[] } {
+    const list = this.listAgentOverrides();
+    if (list.length === 0) return { migrated: [], conflicts: [] };
+    const seenNew = new Set<string>();
+    const migrated: AgentModelOverride[] = [];
+    const conflicts: string[] = [];
+    for (const o of list) {
+      const newKey = LEGACY_TO_EXPERT[o.agentKey as keyof typeof LEGACY_TO_EXPERT];
+      if (!newKey) {
+        // 已是新专家键或未知键：保留。若与之前保留项同键也记冲突（保留首个）。
+        if (seenNew.has(o.agentKey)) {
+          conflicts.push(`${o.agentKey}（重复，丢弃）`);
+          continue;
+        }
+        seenNew.add(o.agentKey);
+        migrated.push(o);
+        continue;
+      }
+      if (seenNew.has(newKey)) {
+        conflicts.push(`${o.agentKey}->${newKey}（已存在，丢弃）`);
+        continue;
+      }
+      seenNew.add(newKey);
+      migrated.push({ ...o, agentKey: newKey });
+    }
+    this.credentials.upsert(AGENT_OVERRIDES_KEY, this.crypto.encrypt(JSON.stringify(migrated)));
+    return { migrated: migrated.map((m) => m.agentKey), conflicts };
   }
 
   /** Replace an unreadable legacy record with an explicitly re-entered provider in one transaction. */

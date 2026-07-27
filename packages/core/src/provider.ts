@@ -14,36 +14,24 @@ export type ProviderKind =
 /** 鉴权类型。首版仅实现 api_key；oauth 仅保留形状（ProviderAuthenticator 扩展点），无实现/IPC/UI。 */
 export type AuthType = 'api_key' | 'oauth';
 
-/** ProviderRouter 的 workload 维度：四角色 + 对话/结构化提案。 */
+/** ProviderRouter 的 workload 维度（专家化重构）。 */
 export type Workload =
-  | 'planner'
-  | 'coder'
-  | 'reviewer'
-  | 'tester'
-  | 'task_chat'
   | 'requirement_chat'
+  | 'requirement_proposal'
+  | 'ux_consultation'
   | 'task_proposal'
-  | 'requirement_proposal';
+  | 'dev_execution'
+  | 'testing'
+  | 'task_chat';
 
-/**
- * 模型角色键：workload 的粗粒度分组，用于按角色配置模型。
- * `chat` 覆盖 task_chat/requirement_chat；`proposal` 覆盖 task_proposal/requirement_proposal。
- */
-export type ModelRoleKey = 'planner' | 'coder' | 'reviewer' | 'tester' | 'chat' | 'proposal';
-
-/**
- * Agent 键：用户视角的「agent」标识，用于按 agent 覆盖 provider+模型。
- * 四角色同名；requirement_chat->requirement_refiner、task_proposal->task_proposer 为步骤 agent；
- * task_chat/requirement_proposal 归并到 chat。
- */
+/** 专家键（内部稳定英文标识符；UI 显示中文标签）。 */
 export type AgentKey =
-  | 'planner'
-  | 'coder'
-  | 'reviewer'
-  | 'tester'
-  | 'requirement_refiner'
-  | 'task_proposer'
-  | 'chat';
+  | 'product'   // 产品专家
+  | 'ux'        // UX专家
+  | 'dev_lead'  // 研发负责人
+  | 'dev'       // 研发专家
+  | 'test'      // 测试专家
+  | 'chat';     // 通用对话
 
 /** 按 agent 覆盖 provider + 模型（用户配置；无密钥，引用 ProviderConfig.id）。 */
 export interface AgentModelOverride {
@@ -52,17 +40,22 @@ export interface AgentModelOverride {
   model: string;
 }
 
-/** workload -> agent 键（用于覆盖路由解析）。 */
+/** workload -> 专家 AgentKey（用于覆盖路由解析）。 */
 export function workloadAgentKey(workload: Workload): AgentKey {
   switch (workload) {
-    case 'planner': return 'planner';
-    case 'coder': return 'coder';
-    case 'reviewer': return 'reviewer';
-    case 'tester': return 'tester';
-    case 'requirement_chat': return 'requirement_refiner';
-    case 'task_proposal': return 'task_proposer';
+    case 'requirement_chat':
+    case 'requirement_proposal':
+      return 'product';
+    case 'ux_consultation':
+      return 'ux';
+    case 'task_proposal':
+      return 'dev_lead';
+    case 'dev_execution':
+      return 'dev';
+    case 'testing':
+      return 'test';
     case 'task_chat':
-    case 'requirement_proposal': return 'chat';
+      return 'chat';
   }
 }
 
@@ -95,8 +88,8 @@ export interface ProviderConfig {
   baseURL?: string;
   /** 默认模型；未设置且对应 workload 无覆盖时，该服务商对此 workload 不可用。 */
   defaultModel?: string;
-  /** 按 workload 覆盖默认模型。 */
-  workloadModels?: Partial<Record<ModelRoleKey, string>>;
+  /** 按专家 AgentKey 覆盖默认模型。 */
+  workloadModels?: Partial<Record<AgentKey, string>>;
   /** 配置修订号：每次保存递增，用于清除相关路线的旧健康状态。 */
   revision: number;
 }
@@ -163,12 +156,12 @@ function trimModel(value: string | undefined): string | undefined {
 }
 
 /** 归一化 workload 模型覆盖表：丢弃空白值，无有效项时返回 undefined。 */
-function normalizeWorkloadModels(input?: Partial<Record<ModelRoleKey, string>>): Partial<Record<ModelRoleKey, string>> | undefined {
+function normalizeWorkloadModels(input?: Partial<Record<AgentKey, string>>): Partial<Record<AgentKey, string>> | undefined {
   if (!input) return undefined;
-  const out: Partial<Record<ModelRoleKey, string>> = {};
+  const out: Partial<Record<AgentKey, string>> = {};
   for (const [key, value] of Object.entries(input)) {
     const trimmed = trimModel(value);
-    if (trimmed) out[key as ModelRoleKey] = trimmed;
+    if (trimmed) out[key as AgentKey] = trimmed;
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }

@@ -423,3 +423,36 @@ describe('tasks.insertMany (transactional batch) & migration v8', () => {
     expect(repos.tasks.listRecoverable().some((x) => x.id === 't')).toBe(true);
   });
 });
+
+describe('migration v11 (agent role restructure: tasks.type_label)', () => {
+  beforeEach(() => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'a', createdAt: 1, archived: false });
+  });
+
+  it('schema migrates to v11', () => {
+    expect(getCurrentVersion(db)).toBeGreaterThanOrEqual(11);
+    const cols = db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === 'type_label')).toBe(true);
+  });
+
+  it('persists and reads back typeLabel', () => {
+    const t = { ...makeTask('t1', 'r', 'i', 'p'), typeLabel: 'fullstack' as const };
+    repos.tasks.insert(t);
+    expect(repos.tasks.get('t1')!.typeLabel).toBe('fullstack');
+  });
+
+  it('update changes typeLabel', () => {
+    repos.tasks.insert(makeTask('t2', 'r', 'i', 'p'));
+    const t = repos.tasks.get('t2')!;
+    t.typeLabel = 'backend';
+    repos.tasks.update(t);
+    expect(repos.tasks.get('t2')!.typeLabel).toBe('backend');
+  });
+
+  it('omitting typeLabel reads back as undefined', () => {
+    repos.tasks.insert(makeTask('t3', 'r', 'i', 'p'));
+    expect(repos.tasks.get('t3')!.typeLabel).toBeUndefined();
+  });
+});

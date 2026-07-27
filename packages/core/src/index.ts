@@ -9,6 +9,7 @@ export * from './sanitize.js';
 export * from './audit.js';
 export * from './proposals.js';
 export * from './provider.js';
+export * from './expert-routing.js';
 
 /** 生成 ID（crypto.randomUUID，Node 22+ 与浏览器均可用）。 */
 export function randomId(): string {

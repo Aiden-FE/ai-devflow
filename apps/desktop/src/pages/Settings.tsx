@@ -13,12 +13,12 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ModelRoleKey, ProviderMigrationStatus, AgentKey } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ProviderMigrationStatus, AgentKey } from '@ai-devflow/core';
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
-const MODEL_ROLES: ModelRoleKey[] = ['planner', 'coder', 'reviewer', 'tester', 'chat', 'proposal'];
-const AGENT_KEYS: AgentKey[] = ['planner', 'coder', 'reviewer', 'tester', 'requirement_refiner', 'task_proposer', 'chat'];
+const MODEL_ROLES: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
+const AGENT_KEYS: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
 
@@ -406,7 +406,7 @@ function ProviderSection(): React.ReactElement {
   const [baseURL, setBaseURL] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [defaultModel, setDefaultModel] = useState('');
-  const [workloadModels, setWorkloadModels] = useState<Partial<Record<ModelRoleKey, string>>>({});
+  const [workloadModels, setWorkloadModels] = useState<Partial<Record<AgentKey, string>>>({});
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelRefreshed, setModelRefreshed] = useState(false);
@@ -450,7 +450,7 @@ function ProviderSection(): React.ReactElement {
         apiKey: apiKey || undefined,
         baseURL: baseURL || undefined,
         defaultModel: defaultModel.trim() || undefined,
-        workloadModels: workloadEntries.length > 0 ? Object.fromEntries(workloadEntries) as Record<ModelRoleKey, string> : undefined,
+        workloadModels: workloadEntries.length > 0 ? Object.fromEntries(workloadEntries) as Record<AgentKey, string> : undefined,
         revision: editing?.revision ?? 1,
       };
       if (reentry) await api.providers.completeReentry(input);
@@ -596,7 +596,7 @@ function ProviderSection(): React.ReactElement {
               <div className="mt-2 flex flex-col gap-2">
                 {MODEL_ROLES.map((role) => (
                   <div key={role} className="flex flex-col gap-1">
-                    <Label className="text-[11px]">{role} <span className="text-muted-foreground">({t(`settings.agentModels.workload.${role}`)})</span></Label>
+                    <Label className="text-[11px]">{t(`settings.agentModels.agent.${role}`)} <span className="text-muted-foreground">({t(`settings.agentModels.workload.${role}`)})</span></Label>
                     <Input
                       value={workloadModels[role] ?? ''}
                       onChange={(e) => setWorkloadModels({ ...workloadModels, [role]: e.target.value })}

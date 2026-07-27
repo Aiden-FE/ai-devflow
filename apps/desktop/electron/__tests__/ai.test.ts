@@ -311,6 +311,8 @@ describe('requirement brainstorming skill loading', () => {
     expect(existsSync(join(profileDir, 'SYSTEM.md'))).toBe(true);
     expect(existsSync(join(profileDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(true);
     expect(existsSync(join(profileDir, 'extensions', 'requirement-bridge.ts'))).toBe(true);
+    expect(existsSync(join(profileDir, 'extensions', 'ask-bridge.ts'))).toBe(true);
+    expect(existsSync(join(profileDir, 'extensions', 'ux-bridge.ts'))).toBe(true);
     // 非步骤 profile 不含技能/扩展
     const chatDir = materializeChatProfile(mkdtempSync(join(tmpdir(), 'pi-ai-skill-')), 'sys');
     expect(existsSync(join(chatDir, 'skills', 'brainstorming', 'SKILL.md'))).toBe(false);
@@ -323,7 +325,7 @@ describe('requirement brainstorming skill loading', () => {
     const reqProfileDir = materializeStepAgentProfile(sessionDir, step, assetsRoot);
     const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, reqProfileDir, 'requirement_chat', 'hi', '/usr/bin', step);
     expect(reqPlan.args).toContain('--tools');
-    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(`${REQUIREMENT_PROPOSAL_TOOL},ai_devflow_ask`);
+    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(`${REQUIREMENT_PROPOSAL_TOOL},ai_devflow_ask,ai_devflow_consult_ux`);
     expect(reqPlan.args).toContain('--extension');
     expect(reqPlan.args[reqPlan.args.indexOf('--extension') + 1]).toMatch(/requirement-bridge\.ts$/);
     expect(reqPlan.args).toContain('--skill');

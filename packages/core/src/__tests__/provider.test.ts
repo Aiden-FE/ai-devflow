@@ -1,24 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeProviderInput, workloadAgentKey } from '../provider.js';
+import { normalizeProviderInput, workloadAgentKey, type AgentKey, type Workload } from '../provider.js';
 
 describe('workloadAgentKey', () => {
-  it('requirement_chat 映射到 requirement_refiner', () => {
-    expect(workloadAgentKey('requirement_chat')).toBe('requirement_refiner');
+  it('路由到 6 专家键', () => {
+    const cases: Array<[Workload, AgentKey]> = [
+      ['requirement_chat', 'product'],
+      ['requirement_proposal', 'product'],
+      ['ux_consultation', 'ux'],
+      ['task_proposal', 'dev_lead'],
+      ['dev_execution', 'dev'],
+      ['testing', 'test'],
+      ['task_chat', 'chat'],
+    ];
+    for (const [wl, expected] of cases) {
+      expect(workloadAgentKey(wl)).toBe(expected);
+    }
   });
-  it('task_proposal 映射到 task_proposer', () => {
-    expect(workloadAgentKey('task_proposal')).toBe('task_proposer');
-  });
-  it('四角色同名', () => {
-    expect(workloadAgentKey('planner')).toBe('planner');
-    expect(workloadAgentKey('coder')).toBe('coder');
-    expect(workloadAgentKey('reviewer')).toBe('reviewer');
-    expect(workloadAgentKey('tester')).toBe('tester');
-  });
-  it('task_chat 映射到 chat', () => {
-    expect(workloadAgentKey('task_chat')).toBe('chat');
-  });
-  it('requirement_proposal 归并到 chat', () => {
-    expect(workloadAgentKey('requirement_proposal')).toBe('chat');
+
+  it('AgentKey 仅含 6 个专家键', () => {
+    const keys: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
+    expect(keys).toHaveLength(6);
   });
 });
 
@@ -95,17 +96,17 @@ describe('normalizeProviderInput', () => {
       id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
       priority: 0, authType: 'api_key', apiKey: 'secret', revision: 1,
       defaultModel: 'gpt-custom',
-      workloadModels: { coder: 'coder-model', chat: '  ' },
+      workloadModels: { dev: 'dev-model', chat: '  ' },
     });
     expect(result.config.defaultModel).toBe('gpt-custom');
-    expect(result.config.workloadModels).toEqual({ coder: 'coder-model' });
+    expect(result.config.workloadModels).toEqual({ dev: 'dev-model' });
   });
 
-  it('accepts workloadModels covering all roles without defaultModel', () => {
+  it('accepts workloadModels covering all experts without defaultModel', () => {
     const result = normalizeProviderInput({
       id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
       priority: 0, authType: 'api_key', apiKey: 'secret', revision: 1,
-      workloadModels: { planner: 'p', coder: 'c', reviewer: 'r', tester: 't', chat: 'ch', proposal: 'pr' },
+      workloadModels: { product: 'p', ux: 'u', dev_lead: 'dl', dev: 'd', test: 't', chat: 'c' },
     });
     expect(result.config.defaultModel).toBeUndefined();
     expect(result.config.workloadModels).toBeDefined();

@@ -276,14 +276,16 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       title: input.title,
       description: input.description,
       status: 'ready',
-      role: input.role,
-      stages: [{ id: 'impl', name: '实现', role: input.role }],
+      // role/stages 保留为兼容字段（编排器忽略，按泳道派发）。
+      role: 'coder',
+      stages: [{ id: 'impl', name: '实现', role: 'coder' }],
       currentStage: 0,
       statusChangedAt: now(),
       createdAt: now(),
       updatedAt: now(),
       retryCount: 0,
       dependsOn: input.dependsOn,
+      typeLabel: input.typeLabel,
     };
     repos.tasks.insert(t);
     return t;
@@ -321,14 +323,16 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
         title: p.title,
         description: p.description,
         status: 'ready',
-        role: p.role,
-        stages: [{ id: 'impl', name: '实现', role: p.role }],
+        // role/stages 保留为兼容字段（编排器忽略，按泳道派发）。
+        role: 'coder',
+        stages: [{ id: 'impl', name: '实现', role: 'coder' }],
         currentStage: 0,
         statusChangedAt: now(),
         createdAt: now(),
         updatedAt: now(),
         retryCount: 0,
         dependsOn,
+        typeLabel: p.typeLabel,
       });
     }
     // 事务化批量插入：任一失败整体回滚，避免落库半成品依赖图。
@@ -344,6 +348,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     if (input.title !== undefined) t.title = input.title;
     if (input.description !== undefined) t.description = input.description;
     if (input.role !== undefined) t.role = input.role;
+    if (input.typeLabel !== undefined) t.typeLabel = input.typeLabel;
     if (input.dependsOn !== undefined) t.dependsOn = input.dependsOn === null ? [] : input.dependsOn;
     t.updatedAt = now();
     repos.tasks.update(t);
@@ -583,14 +588,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
             const tasks = arr
               .map((x, i) => {
                 if (!x || typeof x !== 'object') return undefined;
-                const o = x as { draftId?: unknown; title?: unknown; description?: unknown; role?: unknown; dependsOn?: unknown };
+                const o = x as { draftId?: unknown; title?: unknown; description?: unknown; typeLabel?: unknown; dependsOn?: unknown };
                 if (typeof o.title !== 'string' || typeof o.description !== 'string') return undefined;
-                const role = o.role === 'planner' || o.role === 'coder' || o.role === 'reviewer' || o.role === 'tester' ? o.role : 'coder';
+                const typeLabel = o.typeLabel === 'frontend' || o.typeLabel === 'backend' || o.typeLabel === 'fullstack' || o.typeLabel === 'integration' ? o.typeLabel : undefined;
                 const draftId = typeof o.draftId === 'string' && o.draftId.trim() ? o.draftId.trim() : `t${i + 1}`;
                 const dependsOn = Array.isArray(o.dependsOn) ? o.dependsOn.filter((d): d is string => typeof d === 'string') : [];
-                return { draftId, title: o.title, description: o.description, role, dependsOn };
+                return { draftId, title: o.title, description: o.description, typeLabel, dependsOn };
               })
-              .filter((x): x is { draftId: string; title: string; description: string; role: 'planner' | 'coder' | 'reviewer' | 'tester'; dependsOn: string[] } => !!x);
+              .filter((x): x is { draftId: string; title: string; description: string; typeLabel: import('@ai-devflow/core').TaskTypeLabel | undefined; dependsOn: string[] } => !!x);
             if (tasks.length > 0) {
               sendAi({ type: 'task_proposal', sessionId: payload.sessionId, tasks });
             }
@@ -600,6 +605,11 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
           // 问答工具请求：推 question 事件给 renderer，保存 send 供 ai:answer 回灌。
           sendAi({ type: 'question', sessionId: payload.sessionId, toolUseId, tabs: tabs as AskTabs });
           pendingAsks.set(payload.sessionId, { toolUseId, send });
+        },
+        onConsultUx: (requirementContext) => {
+          // UX 子咨询：产品专家调用 ai_devflow_consult_ux。主进程启动 UX专家 run，同步返回建议。
+          if (!services.piAi) return Promise.resolve('UX 子咨询不可用：AI 服务未就绪');
+          return services.piAi.consultUx(requirementContext);
         },
       });
       pendingAsks.delete(payload.sessionId);

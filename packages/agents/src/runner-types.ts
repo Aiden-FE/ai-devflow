@@ -1,11 +1,12 @@
 // 单一 AgentRunner 协议（设计 §5）。生产实现是 PiRunner；测试注入 FakeAgentRunner。
 // 调度器只依赖此接口，不再有 Agent 类型选择/注册表/能力合并。
-import type { AgentEvent, Checkpoint, InteractionKind, TaskRole } from '@ai-devflow/core';
+import type { AgentEvent, Checkpoint, InteractionKind, ExpertKey } from '@ai-devflow/core';
 
 export interface AgentRunRequest {
   taskId: string;
   executionId: string;
-  role: TaskRole;
+  /** 执行专家键（取代旧 role：TaskRole）。专家由当前泳道决定（laneToExpert）。 */
+  expert: ExpertKey;
   prompt: string;
   cwd: string;
   resumeFrom?: Checkpoint;

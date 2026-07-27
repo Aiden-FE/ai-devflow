@@ -34,6 +34,13 @@ export {
   validateStepAgents,
   type StepAgentProfile,
   type StepWorkload,
+  EXPERT_PROFILES,
+  expertToolsArg,
+  validateExpertProfiles,
+  EXPERT_ASSETS_DIR,
+  type ExpertProfile,
+  type ExecutionExpertKey,
+  type ExpertMaterializeInput,
 } from './profiles.js';
 export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
 export { buildControlledPath } from './env-safety.js';
@@ -72,5 +79,6 @@ export {
   type RuntimeLocator,
   type ProfileMaterializerLike,
   type ProjectInstructionLoaderLike,
+  validateExpertCompletion,
 } from './pi-runner.js';
 export { type AgentRunner, type AgentRun, type AgentRunRequest as RunnerAgentRunRequest } from './runner-types.js';
