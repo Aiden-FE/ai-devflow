@@ -1,6 +1,7 @@
 // 项目知识服务外观：编排目录初始化、目录加载与结构巡检。
 import type {
   KnowledgeHealthSnapshot,
+  KnowledgeRetrievalManifest,
 } from '@ai-devflow/core';
 import {
   initializeKnowledgeLayout,
@@ -10,6 +11,7 @@ import {
 } from './layout.js';
 import { loadKnowledgeCatalog, type KnowledgeCatalog } from './catalog.js';
 import { auditKnowledgeLayout, type KnowledgeGitProbe } from './audit.js';
+import { planKnowledgeRetrieval, type RetrievalPlanInput } from './retrieval.js';
 
 export class ProjectKnowledgeService {
   /** 初始化 docs/knowledge 骨架（幂等）。 */
@@ -51,6 +53,47 @@ export class ProjectKnowledgeService {
   }): Promise<KnowledgeHealthSnapshot> {
     return auditKnowledgeLayout(input);
   }
+
+  /** 规划渐进检索 manifest；知识库未初始化时返回 not_initialized。 */
+  async planRetrieval(
+    input: Omit<RetrievalPlanInput, 'catalog'> & { repoPath: string },
+  ): Promise<KnowledgeRetrievalManifest> {
+    const catalog = await this.loadCatalog(input.repoPath);
+    if (!catalog.initialized) {
+      return {
+        id: input.id,
+        projectId: input.projectId,
+        taskId: input.taskId,
+        executionId: input.executionId,
+        expert: input.expert,
+        stage: input.stage,
+        level: 1,
+        state: 'not_initialized',
+        candidates: [],
+        reads: [],
+        skipped: [],
+        differences: [],
+        budget: input.budget ?? { maxFiles: 5, maxChars: 5000 },
+        used: { files: 0, chars: 0 },
+        createdAt: input.createdAt,
+      };
+    }
+    return planKnowledgeRetrieval({
+      id: input.id,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      executionId: input.executionId,
+      expert: input.expert,
+      stage: input.stage,
+      query: input.query,
+      typeLabel: input.typeLabel,
+      dependencyTaskIds: input.dependencyTaskIds,
+      changedFiles: input.changedFiles,
+      catalog: Array.from(catalog.documents.values()),
+      budget: input.budget,
+      createdAt: input.createdAt,
+    });
+  }
 }
 
 export {
@@ -62,8 +105,10 @@ export {
 export { parseKnowledgeMarkdown } from './frontmatter.js';
 export { loadKnowledgeCatalog, loadAllDocuments } from './catalog.js';
 export { auditKnowledgeLayout } from './audit.js';
+export { planKnowledgeRetrieval, inferRetrievalLevel } from './retrieval.js';
 
 export type { LayoutChangeSet } from './layout.js';
 export type { KnowledgeCatalog, LoadedCatalog } from './catalog.js';
 export type { KnowledgeGitProbe, AuditInput } from './audit.js';
 export type { ParsedKnowledgeMarkdown } from './frontmatter.js';
+export type { RetrievalPlanInput } from './retrieval.js';
