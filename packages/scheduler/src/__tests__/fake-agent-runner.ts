@@ -36,14 +36,14 @@ export function runFromEvents(specs: TestEventSpec[], opts: { ignoreCancel?: boo
 }
 
 export interface FakeRunnerOptions {
-  /** 审查结论（reviewer 角色）。默认 PASS。 */
-  reviewerVerdict?: 'PASS' | 'FAIL';
-  /** 审查产出前的延迟（驱动「审查中暂停/取消」时序）。 */
-  reviewerDelayMs?: number;
+  /** 测试专家审查结论。默认 PASS。 */
+  testExpertVerdict?: 'PASS' | 'FAIL';
+  /** 测试专家产出前的延迟（驱动「审查中暂停/取消」时序）。 */
+  testExpertDelayMs?: number;
   /** 忽略取消（晚到事件继续到达，用于验证停止后事件不落库）。 */
   ignoreCancel?: boolean;
-  /** 自定义 reviewer 事件（覆盖默认）。 */
-  reviewerEvents?: (req: AgentRunRequest) => TestEventSpec[];
+  /** 自定义测试专家事件（覆盖默认）。 */
+  testExpertEvents?: (req: AgentRunRequest) => TestEventSpec[];
 }
 
 export class FakeAgentRunner implements AgentRunner {
@@ -56,9 +56,9 @@ export class FakeAgentRunner implements AgentRunner {
 
   async run(req: AgentRunRequest): Promise<AgentRun> {
     this.requests.push(req);
-    if (req.role === 'reviewer') {
-      const specs = this.opts.reviewerEvents
-        ? this.opts.reviewerEvents(req)
+    if (req.expert === 'test') {
+      const specs = this.opts.testExpertEvents
+        ? this.opts.testExpertEvents(req)
         : this.defaultReviewSpecs();
       return runFromEvents(specs, { ignoreCancel: this.opts.ignoreCancel });
     }
@@ -66,9 +66,9 @@ export class FakeAgentRunner implements AgentRunner {
   }
 
   private defaultReviewSpecs(): TestEventSpec[] {
-    const verdict = this.opts.reviewerVerdict ?? 'PASS';
+    const verdict = this.opts.testExpertVerdict ?? 'PASS';
     const line = verdict === 'PASS' ? 'REVIEW_VERDICT: PASS' : 'REVIEW_VERDICT: FAIL: 未覆盖验收标准第 2 条';
-    const delay = this.opts.reviewerDelayMs ?? 0;
+    const delay = this.opts.testExpertDelayMs ?? 0;
     return [
       { type: 'log', level: 'info', text: 'reviewing', t: 0, delayMs: delay > 0 ? Math.max(1, delay / 2) : undefined },
       { type: 'done', summary: `ok\n${line}`, t: 0, delayMs: delay > 0 ? delay : undefined },

@@ -22,6 +22,7 @@ import {
   redactText,
   decideRetry,
   DEFAULT_RETRY_POLICY,
+  laneToExpert,
   type RetryPolicy,
 } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
@@ -212,8 +213,10 @@ export class Orchestrator extends EventEmitter {
 
   /** 运行流水线各阶段。 */
   private async runPipeline(task: Task, project: Project, init: StartInit | undefined, entry: ActivePipeline): Promise<void> {
-    const stages = task.stages.length > 0 ? task.stages : [{ id: IMPLICIT_STAGE_ID, name: '执行', role: task.role }];
+    // 专家化重构：按泳道派发单专家执行（in_progress -> 研发专家 dev）。废弃多角色 stages。
+    const expert = laneToExpert(task.status) ?? 'dev';
     const startStage = init?.resumeFrom?.stageIndex ?? task.currentStage ?? 0;
+    void startStage;
 
     // 先创建执行记录：这样 worktree 创建失败等也能落日志并计入尝试次数，
     // 避免 getLatest() 永远 undefined 导致 attempt 不递增、无限重试。
@@ -259,32 +262,21 @@ export class Orchestrator extends EventEmitter {
       }
     }
 
-    for (let i = startStage; i < stages.length; i++) {
-      const stage = stages[i]!;
+    for (let i = startStage; i < 1; i++) {
+      const stage = { id: IMPLICIT_STAGE_ID, name: '开发', role: task.role };
       if (entry.stopReason) {
         this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', this.stopSummary(entry.stopReason));
         return;
       }
 
-      // 阶段依赖检查
-      if (stage.dependsOn && stage.dependsOn.length > 0) {
-        for (const dep of stage.dependsOn) {
-          const depCp = this.repos.checkpoints.listByTask(task.id).find((c) => c.stageId === dep);
-          if (!depCp) {
-            this.log(execution, 'error', `阶段 ${stage.id} 依赖 ${dep} 的检查点不存在`);
-            throw new Error(`阶段依赖未满足：${dep}`);
-          }
-        }
-      }
-
       task.currentStage = i;
       this.repos.tasks.update(task);
 
-      const prompt = this.buildPrompt(task, stage);
+      const prompt = this.buildPrompt(task);
       const run = await this.runner.run({
         taskId: task.id,
         executionId: execution.id,
-        role: stage.role,
+        expert,
         prompt,
         cwd: worktreePath!,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
@@ -317,8 +309,8 @@ export class Orchestrator extends EventEmitter {
       this.repos.executions.update(execution);
     }
 
-    // 全部开发阶段完成 -> 进入「测试中」，启动 reviewer 角色对应的审查 Agent。
-    // 开发任务禁止直接进入待验收：必须经审查通过才合并并进入 in_review。
+    // 全部开发阶段完成 -> 进入「测试中」，启动测试专家（合并审查+测试）。
+    // 开发任务禁止直接进入待验收：必须经测试专家双过才进入 in_review。
     this.transition(task, 'testing');
     await this.reviewAndFinalize(task, project, entry);
   }
@@ -452,6 +444,7 @@ export class Orchestrator extends EventEmitter {
    * 返回 undefined 表示审查被受控停止（待沟通/取消），调用方直接收尾。
    */
   private async runReview(task: Task, project: Project, entry: ActivePipeline): Promise<ReviewVerdict | undefined> {
+    const expert = laneToExpert('testing')!; // 'test'
     const execution: ExecutionRecord = {
       id: randomId(),
       taskId: task.id,
@@ -461,7 +454,7 @@ export class Orchestrator extends EventEmitter {
     };
     this.repos.executions.insert(execution);
     entry.executionId = execution.id;
-    this.log(execution, 'info', `启动审查执行（reviewer，第 ${execution.attempt} 次）`);
+    this.log(execution, 'info', `启动审查执行（测试专家，第 ${execution.attempt} 次）`);
 
     const prompt = this.buildReviewPrompt(task);
     let output = '';
@@ -470,7 +463,7 @@ export class Orchestrator extends EventEmitter {
       const run = await this.runner.run({
         taskId: task.id,
         executionId: execution.id,
-        role: 'reviewer',
+        expert,
         prompt,
         cwd: task.worktreePath ?? project.path,
       });
@@ -1058,8 +1051,8 @@ export class Orchestrator extends EventEmitter {
     this.emit('task-status', { taskId: task.id, status: target });
   }
 
-  private buildPrompt(task: Task, stage: { id: string; name: string }): string {
-    return `【阶段】${stage.name}\n【任务】${task.title}\n【描述】${task.description || '(无)'}\n请在当前仓库工作区完成该阶段工作。`;
+  private buildPrompt(task: Task): string {
+    return `【任务】${task.title}\n【描述】${task.description || '(无)'}\n请在当前仓库工作区完成开发工作：设计 -> 实现 -> 自验（调用实现计划技能编排子步骤）。`;
   }
 
   /** 应用重启后恢复：扫描运行中/待沟通任务。 */
