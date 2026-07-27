@@ -131,5 +131,10 @@ export function createServices(notifier: Notifier): Services {
     decryptSecret,
     updater,
   };
+  // 专家化重构（§6.2）：启动一次性迁移旧 AgentModelOverride 键到 6 专家键。
+  const overrideMigration = piRuntime.providerStore.migrateAgentOverridesToExperts();
+  if (overrideMigration.conflicts.length > 0) {
+    console.warn('[provider-store] Agent override 迁移冲突：', overrideMigration.conflicts);
+  }
   return services;
 }
