@@ -6,8 +6,10 @@ import { join } from 'node:path';
 import { openDatabase, createRepositories, type DatabaseSync } from '@ai-devflow/persistence';
 import { ProjectKnowledgeService } from '@ai-devflow/knowledge';
 import { Orchestrator } from '../orchestrator.js';
-import { FakeAgentRunner } from './fake-agent-runner.js';
+import { FakeAgentRunner, type TestEventSpec } from './fake-agent-runner.js';
 import { KnowledgeCoordinator } from '../knowledge-coordinator.js';
+import type { AgentRunner } from '@ai-devflow/agents';
+import type { AgentEvent } from '@ai-devflow/core';
 import type { RunnerAgentRunRequest as AgentRunRequest } from '@ai-devflow/agents';
 
 function shGit(cwd: string, args: string[]): void {
@@ -34,6 +36,124 @@ function makeTask(over: Partial<import('@ai-devflow/core').Task> = {}): import('
     ...over,
   };
 }
+
+describe('knowledge deposition gate', () => {
+  let db2: DatabaseSync;
+  let repo2: string;
+  let wtDir2: string;
+
+  beforeEach(() => {
+    db2 = openDatabase(':memory:');
+    repo2 = makeRepo();
+    wtDir2 = mkdtempSync(join(tmpdir(), 'orch-dep-wt-'));
+  });
+  afterEach(() => {
+    try { db2.close(); } catch { /* */ }
+    rmSync(repo2, { recursive: true, force: true });
+    rmSync(wtDir2, { recursive: true, force: true });
+  });
+
+  function build(script: (req: AgentRunRequest) => TestEventSpec[], makeCoordinator: (repos: import('@ai-devflow/persistence').Repositories, runner: AgentRunner) => KnowledgeCoordinator | undefined, opts: ConstructorParameters<typeof FakeAgentRunner>[1] = {}) {
+    const repos = createRepositories(db2);
+    repos.projects.insert({ id: 'p', name: 'P', path: repo2, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: '1.0', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'req', iterationId: 'it', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const runner = new FakeAgentRunner(script, opts);
+    const depRunner: AgentRunner = {
+      async verifyRuntime() { return { version: '', entry: '' }; },
+      async run(req) {
+        if (req.expert === 'project_lead') {
+          const { mkdirSync } = await import('node:fs');
+          mkdirSync(join(req.cwd, 'docs/knowledge/feature'), { recursive: true });
+          writeFileSync(join(req.cwd, 'docs/knowledge/feature/deposited.md'), '# Deposited\n');
+          shGit(req.cwd, ['add', '.']);
+          shGit(req.cwd, ['commit', '-q', '-m', 'deposition']);
+        }
+        const payload = req.resultKind === 'knowledge_deposition'
+          ? { kind: 'knowledge_deposition' as const, changedPaths: ['docs/knowledge/feature/deposited.md'], knowledgeIds: [], assessment: { verdict: 'valuable' as const, candidates: [] } }
+          : undefined;
+        const events: AgentEvent[] = [{ type: 'done', summary: 'ok', result: payload, t: 0 }];
+        return { events: (async function* () { for (const e of events) yield e; })(), cancel: async () => {}, done: async () => ({ exitCode: 0, ok: true }) };
+      },
+    };
+    const coordinator = makeCoordinator(repos, depRunner);
+    const orch = new Orchestrator(repos, runner, { worktreesBaseDir: wtDir2, maxConcurrent: 2, autoRetry: false, knowledgeCoordinator: coordinator });
+    return { orch, repos, runner };
+  }
+
+  it('passes a none assessment with evidence without running project_lead', async () => {
+    const { orch, repos } = build(() => [{ type: 'done', summary: 'dev ok', t: 0 }], (r) => new KnowledgeCoordinator({
+      repos: r, runner: { async verifyRuntime() { return { version: '', entry: '' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+    }));
+    const t = makeTask({ iterationId: 'it', requirementId: 'req' });
+    t.worktreePath = undefined;
+    repos.tasks.insert(t);
+    await orch.start(t.id);
+    expect(repos.tasks.get(t.id)!.status).toBe('in_review');
+    // none 沉淀记录成功（无 project_lead 运行）。
+    const dep = repos.knowledgeDepositions.getLatestByTask(t.id);
+    expect(dep?.verdict).toBe('none');
+    expect(dep?.state).toBe('succeeded');
+  });
+
+  it('keeps valuable work in testing until project_lead deposition validates', async () => {
+    const { orch, repos } = build(() => [{ type: 'done', summary: 'dev ok', t: 0 }], (r, depRunner) => new KnowledgeCoordinator({
+      repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+    }), {
+      testExpertEvents: () => [
+        { type: 'log', level: 'info', text: 'reviewing', t: 0 },
+        { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', result: { kind: 'task_review', review: { pass: true, summary: 'REVIEW_VERDICT: PASS' }, knowledgeAssessment: { verdict: 'valuable', candidates: [{ type: 'feature', summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }] } }, t: 0 },
+      ],
+    });
+    const t = makeTask({ iterationId: 'it', requirementId: 'req' });
+    t.worktreePath = undefined;
+    repos.tasks.insert(t);
+    await orch.start(t.id);
+    expect(repos.tasks.get(t.id)!.status).toBe('in_review');
+    const dep = repos.knowledgeDepositions.getLatestByTask(t.id);
+    expect(dep?.verdict).toBe('valuable');
+    expect(dep?.state).toBe('succeeded');
+  });
+
+  it('does not enter in_review when the review payload is missing (assessment undefined)', async () => {
+    const { orch, repos } = build(() => [{ type: 'done', summary: 'dev ok', t: 0 }], (r) => new KnowledgeCoordinator({
+      repos: r, runner: { async verifyRuntime() { return { version: '', entry: '' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+    }), {
+      testExpertEvents: () => [
+        { type: 'log', level: 'info', text: 'reviewing', t: 0 },
+        { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 },
+      ],
+    });
+    const t = makeTask({ iterationId: 'it', requirementId: 'req' });
+    t.worktreePath = undefined;
+    repos.tasks.insert(t);
+    await orch.start(t.id);
+    expect(repos.tasks.get(t.id)!.status).toBe('testing');
+  });
+
+  it('does not enter in_review when task branch merge fails', async () => {
+    // 项目路径指向一个非 git 目录 -> mergeWorktreeBranch 失败。
+    const repos = createRepositories(db2);
+    const nongit = mkdtempSync(join(tmpdir(), 'nongit-'));
+    repos.projects.insert({ id: 'p', name: 'P', path: nongit, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: '1.0', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'req', iterationId: 'it', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    const coordinator = new KnowledgeCoordinator({
+      repos, runner: { async verifyRuntime() { return { version: '', entry: '' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+    });
+    const runner = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }]);
+    const orch = new Orchestrator(repos, runner, { worktreesBaseDir: wtDir2, maxConcurrent: 2, autoRetry: false, knowledgeCoordinator: coordinator });
+    const t = makeTask({ iterationId: 'it', requirementId: 'req' });
+    t.worktreePath = undefined;
+    repos.tasks.insert(t);
+    await orch.start(t.id).catch(() => undefined);
+    expect(repos.tasks.get(t.id)!.status).not.toBe('in_review');
+    rmSync(nongit, { recursive: true, force: true });
+  });
+});
 
 describe('orchestrator knowledge retrieval integration', () => {
   let db: DatabaseSync;

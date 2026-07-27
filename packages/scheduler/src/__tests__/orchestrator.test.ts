@@ -19,15 +19,26 @@ let runner: FakeAgentRunner;
 let worktreeDir: string;
 let events: Array<{ taskId: string; event: AgentEvent }>;
 
+/** 在 dir 初始化一个真实的 git 仓库（main 分支 + 初始提交），供 mergeWorktreeBranch 成功。 */
+function initGitRepo(dir: string): void {
+  shGit(dir, ['init', '-q', '-b', 'main']);
+  shGit(dir, ['config', 'user.email', 't@t']);
+  shGit(dir, ['config', 'user.name', 't']);
+  writeFileSync(join(dir, 'README.md'), '# repo\n');
+  shGit(dir, ['add', '.']);
+  shGit(dir, ['commit', '-q', '-m', 'init']);
+}
+
 function setup(script: (req: AgentRunRequest) => TestEventSpec[], opts: ConstructorParameters<typeof FakeAgentRunner>[1] = {}) {
   db = openDatabase(':memory:');
   repos = createRepositories(db);
   worktreeDir = mkdtempSync(join(tmpdir(), 'aidf-orch-'));
+  initGitRepo(worktreeDir);
   runner = new FakeAgentRunner(script, opts);
   orch = new Orchestrator(repos, runner, { worktreesBaseDir: worktreeDir, maxConcurrent: 2, autoRetry: false });
   events = [];
   orch.on('task-event', (e) => events.push(e));
-  repos.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+  repos.projects.insert({ id: 'p', name: 'P', path: worktreeDir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
   repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
   repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
 }
@@ -37,7 +48,8 @@ function makeOrch(repos2: Repositories, run: AgentRunner, over: Partial<Construc
 }
 
 function seedBasic(r: Repositories, settings: import('@ai-devflow/core').ProjectSettings = {}) {
-  r.projects.insert({ id: 'p', name: 'P', path: '/tmp/unused', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings });
+  const path = typeof worktreeDir === 'string' ? worktreeDir : '/tmp/unused';
+  r.projects.insert({ id: 'p', name: 'P', path, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings });
   r.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
   r.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
 }
@@ -48,7 +60,7 @@ afterEach(() => {
 });
 
 function makeTask(over: Partial<Task> = {}): Task {
-  return {
+  const t: Task = {
     id: randomId(),
     requirementId: 'r',
     iterationId: 'i',
@@ -65,7 +77,14 @@ function makeTask(over: Partial<Task> = {}): Task {
     retryCount: 0,
     worktreePath: join(worktreeDir, 'fake-wt'),
     ...over,
-  };
+  } as Task;
+  // 为 fake-wt 创建真实 worktree + 任务分支（使 mergeWorktreeBranch 成功）。
+  try {
+    shGit(worktreeDir, ['worktree', 'add', '-b', `ai-devflow/${t.id}`, t.worktreePath!, 'main']);
+  } catch {
+    // 已存在或非 git 仓库时忽略。
+  }
+  return t;
 }
 
 describe('orchestrator pipeline', () => {
@@ -265,6 +284,8 @@ describe('orchestrator serial dependencies', () => {
 });
 
 describe('orchestrator approval flow', () => {
+  beforeEach(() => setup(() => [{ type: 'done', summary: 'ok', t: 0 }]));
+
   it('pauses on approval_request, resumes to in_review on allow (deny is not success)', async () => {
     const fr = new FakeAgentRunner((req) => {
       if (req.interactionResponse?.kind === 'approval') {
@@ -824,9 +845,18 @@ class GitCommitRunner implements AgentRunner {
   async run(req: AgentRunRequest): Promise<AgentRun> {
     this.requests.push(req);
     if (req.expert === 'test') {
+      const payload = {
+        kind: 'task_review' as const,
+        review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+        knowledgeAssessment: {
+          verdict: 'none' as const,
+          reason: '无沉淀价值',
+          evidence: ['x.ts'],
+        },
+      };
       return runFromEvents([
         { type: 'log', level: 'info', text: 'reviewing', t: 0 },
-        { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 },
+        { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', result: payload, t: 0 },
       ]);
     }
     // 开发阶段：在 worktree（req.cwd）内写文件并提交，模拟 agent 产出代码。

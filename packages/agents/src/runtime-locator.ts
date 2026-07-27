@@ -35,7 +35,7 @@ export interface BundledPiLocatorOptions {
 const ROLES = ['planner', 'coder', 'reviewer', 'tester'] as const;
 
 /** 内置执行专家目录（设计 §4.1）：requireProfiles 时与角色目录一并校验存在。 */
-const EXPERT_DIRS = ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead'] as const;
+const EXPERT_DIRS = ['product', 'ux', 'dev_lead', 'coder', 'tester', 'project_lead'] as const;
 
 export interface VerifiedPiRuntime {
   entry: string;

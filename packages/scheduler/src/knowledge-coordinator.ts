@@ -115,6 +115,7 @@ function dbFindingsForRun(repos: import('@ai-devflow/persistence').Repositories,
 
 export class KnowledgeCoordinator extends EventEmitter {
   private locks = new KeyedLock();
+  private iterationLocks = new KeyedLock();
   private now: () => number;
   private id: () => string;
 
@@ -615,6 +616,150 @@ export class KnowledgeCoordinator extends EventEmitter {
       startedAt: row.startedAt,
       endedAt: row.endedAt,
     };
+  }
+
+  /** 知识沉淀门禁：none 持久化为成功沉淀（无路径）；valuable 运行 project_lead 沉淀并校验。 */
+  async finalizeTaskKnowledge(input: {
+    task: Task;
+    project: { id: string; path: string; defaultBranch: string };
+    executionId?: string;
+    assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined;
+    worktreePath: string;
+  }): Promise<{ gatePassed: boolean; depositionId?: string; diagnostics: string[] }> {
+    const assessment = input.assessment;
+    const t = this.now();
+    const depositionId = this.id();
+    const baseRecord = {
+      id: depositionId,
+      projectId: input.project.id,
+      taskId: input.task.id,
+      executionId: input.executionId,
+      verdict: 'none' as 'none' | 'valuable',
+      state: 'running' as import('@ai-devflow/core').KnowledgeDepositionRecord['state'],
+      assessmentJson: JSON.stringify(assessment ?? null),
+      relatedKnowledgeIdsJson: '[]',
+      changedPathsJson: '[]',
+      gatePassed: false,
+      diagnosticsJson: '[]',
+      startedAt: t,
+    };
+
+    // 缺失评估载荷：失败。
+    if (!assessment) {
+      const diagnostics = ['审查未提供知识价值评估载荷'];
+      this.opts.repos.knowledgeDepositions.create({
+        ...baseRecord,
+        state: 'failed',
+        diagnosticsJson: JSON.stringify(diagnostics),
+        endedAt: this.now(),
+      });
+      return { gatePassed: false, diagnostics };
+    }
+
+    if (assessment.verdict === 'none') {
+      // none 必须有非空理由与证据。
+      if (!assessment.reason.trim() || assessment.evidence.length === 0) {
+        const diagnostics = ['none 评估缺少非空理由或证据'];
+        this.opts.repos.knowledgeDepositions.create({
+          ...baseRecord,
+          state: 'failed',
+          diagnosticsJson: JSON.stringify(diagnostics),
+          endedAt: this.now(),
+        });
+        return { gatePassed: false, diagnostics };
+      }
+      this.opts.repos.knowledgeDepositions.create({
+        ...baseRecord,
+        verdict: 'none',
+        state: 'succeeded',
+        gatePassed: true,
+        endedAt: this.now(),
+      });
+      return { gatePassed: true, depositionId, diagnostics: [] };
+    }
+
+    // valuable：在迭代锁内运行 project_lead 沉淀。
+    return this.iterationLocks.run(input.task.iterationId ?? input.task.id, async () => {
+      const draftBranch = `ai-devflow/knowledge/${depositionId}`;
+      let worktreePath: string | undefined;
+      try {
+        const handle = await createWorktree({
+          repoPath: input.project.path,
+          baseDir: this.opts.worktreesBaseDir,
+          id: `knowledge-deposition-${depositionId}`,
+          branchName: draftBranch,
+          baseBranch: input.project.defaultBranch,
+        });
+        worktreePath = handle.path;
+        const agentRun = await this.opts.runner.run({
+          scope: { kind: 'task', taskId: input.task.id },
+          executionId: input.executionId ?? depositionId,
+          expert: 'project_lead',
+          resultKind: 'knowledge_deposition',
+          prompt: '请基于审查候选与任务 diff 更新长期知识、索引与任务文档。',
+          cwd: worktreePath,
+        });
+        await consumeAgentRun(agentRun);
+        const changedPaths = await listChangedPaths(input.project.path, input.project.defaultBranch, draftBranch);
+        const outOfScope = changedPaths.filter((p) => !isDocPath(p));
+        const diagnostics: string[] = [];
+        if (outOfScope.length > 0) {
+          diagnostics.push(`越界改动被拒绝：${outOfScope.join(', ')}`);
+          this.opts.repos.knowledgeDepositions.create({
+            ...baseRecord,
+            verdict: 'valuable',
+            state: 'failed',
+            changedPathsJson: JSON.stringify(changedPaths),
+            diagnosticsJson: JSON.stringify(diagnostics),
+            endedAt: this.now(),
+          });
+          await removeWorktree({ repoPath: input.project.path, worktreePath, branchName: draftBranch });
+          return { gatePassed: false, diagnostics };
+        }
+        // 合并沉淀草稿到默认分支。
+        const mergeRes = await mergeWorktreeBranch({
+          repoPath: input.project.path,
+          branchName: draftBranch,
+          defaultBranch: input.project.defaultBranch,
+        });
+        await deleteBranch(input.project.path, draftBranch, { force: true });
+        if (!mergeRes.merged) {
+          diagnostics.push(`沉淀草稿合并失败：${mergeRes.reason}`);
+          this.opts.repos.knowledgeDepositions.create({
+            ...baseRecord,
+            verdict: 'valuable',
+            state: 'failed',
+            changedPathsJson: JSON.stringify(changedPaths),
+            diagnosticsJson: JSON.stringify(diagnostics),
+            endedAt: this.now(),
+          });
+          return { gatePassed: false, diagnostics };
+        }
+        this.opts.repos.knowledgeDepositions.create({
+          ...baseRecord,
+          verdict: 'valuable',
+          state: 'succeeded',
+          relatedKnowledgeIdsJson: '[]',
+          changedPathsJson: JSON.stringify(changedPaths),
+          gatePassed: true,
+          endedAt: this.now(),
+        });
+        return { gatePassed: true, depositionId, diagnostics: [] };
+      } catch (err) {
+        if (worktreePath) {
+          await removeWorktree({ repoPath: input.project.path, worktreePath, branchName: draftBranch }).catch(() => undefined);
+        }
+        const diagnostics = [(err as Error).message];
+        this.opts.repos.knowledgeDepositions.create({
+          ...baseRecord,
+          verdict: 'valuable',
+          state: 'failed',
+          diagnosticsJson: JSON.stringify(diagnostics),
+          endedAt: this.now(),
+        });
+        return { gatePassed: false, diagnostics };
+      }
+    });
   }
 
   private async computeDiff(repoPath: string, base: string, branch: string): Promise<string | undefined> {

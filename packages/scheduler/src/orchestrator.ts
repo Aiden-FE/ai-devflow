@@ -101,6 +101,10 @@ interface RunConsumption {
   output: string;
   error?: string;
   failureKind?: import('@ai-devflow/core').FailureKind;
+  /** Agent done 事件携带的结构化载荷（非 task_execution 结果）。 */
+  result?: import('@ai-devflow/core').KnowledgeAgentPayload;
+  /** Agent done 事件携带的实际知识读取证据。 */
+  knowledgeReads?: import('@ai-devflow/core').KnowledgeReadEvidence[];
 }
 
 /**
@@ -378,24 +382,33 @@ export class Orchestrator extends EventEmitter {
   }
 
   private async reviewAndFinalize(task: Task, project: Project, entry: ActivePipeline): Promise<void> {
-    const verdict = await this.runReview(task, project, entry);
+    const review = await this.runReview(task, project, entry);
     // 受控停止（待沟通/取消）：任务状态由 pause()/cancel() 落定，此处直接收尾。
-    if (!verdict) return;
+    if (!review) return;
+    const { verdict, assessment } = review;
     if (verdict.pass) {
+      // 知识门禁：valuable 必须完成沉淀校验；none 必须有非空理由与证据。
+      const gate = await this.finalizeTaskKnowledge(task, project, assessment);
+      if (!gate.gatePassed) {
+        this.emit('task-error', { taskId: task.id, error: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}` });
+        return;
+      }
       const branchName = `ai-devflow/${task.id}`;
       // 迭代激活时合并任务分支到迭代分支，否则合并到项目默认分支。
       const sprintBranch = await this.resolveSprintTarget(task);
       const latest = this.repos.executions.getLatest(task.id);
+      let merged = false;
+      let mergeReason: string | undefined;
       if (sprintBranch) {
         const mergeRes = await mergeBranchInto({
           repoPath: project.path,
           into: sprintBranch,
           source: branchName,
         });
-        if (mergeRes.merged) {
+        merged = mergeRes.merged;
+        mergeReason = mergeRes.reason;
+        if (merged) {
           this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到迭代分支 ${sprintBranch}` });
-        } else {
-          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并到迭代分支：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
         }
       } else {
         const mergeRes = await mergeWorktreeBranch({
@@ -403,14 +416,19 @@ export class Orchestrator extends EventEmitter {
           branchName,
           defaultBranch: project.defaultBranch,
         });
-        if (mergeRes.merged) {
+        merged = mergeRes.merged;
+        mergeReason = mergeRes.reason;
+        if (merged) {
           this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
-        } else {
-          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
         }
       }
-      // 审查通过才进入待验收（门禁 reviewPassed + knowledgeGatePassed 强制，拒绝拖拽/IPC 绕过）。
-      // 知识门禁的正式实现见 finalizeTaskKnowledge（Task 9）：在此之前默认放行以维持流水线可运行。
+      if (!merged) {
+        // 合并失败：任务保持 testing，任务分支/worktree 保留以供重试。
+        this.recordMessage(task, latest, { role: 'system', kind: 'error', text: `审查通过但合并失败：${mergeReason ?? '未知原因'}（工作保留在分支 ${branchName}）` });
+        this.emit('task-error', { taskId: task.id, error: `任务分支合并失败：${mergeReason ?? '未知原因'}` });
+        return;
+      }
+      // 审查通过 + 知识门禁 + 合并成功才进入待验收。
       this.transition(task, 'in_review', { reviewPassed: true, knowledgeGatePassed: true });
       return;
     }
@@ -452,7 +470,7 @@ export class Orchestrator extends EventEmitter {
    * 启动 reviewer 角色对应的审查 Agent 并解析审查结论。
    * 返回 undefined 表示审查被受控停止（待沟通/取消），调用方直接收尾。
    */
-  private async runReview(task: Task, project: Project, entry: ActivePipeline): Promise<ReviewVerdict | undefined> {
+  private async runReview(task: Task, project: Project, entry: ActivePipeline): Promise<{ verdict: ReviewVerdict; assessment?: import('@ai-devflow/core').KnowledgeAssessment } | undefined> {
     const expert = laneToExpert('testing')! as Exclude<ExpertKey, 'chat'>; // 'test'
     const execution: ExecutionRecord = {
       id: randomId(),
@@ -468,6 +486,7 @@ export class Orchestrator extends EventEmitter {
     const prompt = this.buildReviewPrompt(task);
     let output = '';
     let errored: string | undefined;
+    let assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined;
     try {
       const knowledgeManifest = await this.prepareTaskManifest(task, project, execution.id, expert, 'review', task.worktreePath ?? project.path);
       const run = await this.runner.run({
@@ -492,6 +511,12 @@ export class Orchestrator extends EventEmitter {
         if (consumed.interacted) return undefined;
         output = consumed.output;
         errored = consumed.error;
+        // 强结构化：审查结果必须是 task_review 载荷；缺失则视为失败而非伪造评估。
+        if (consumed.result?.kind === 'task_review') {
+          assessment = consumed.result.knowledgeAssessment;
+        } else if (!consumed.error) {
+          errored = '审查结果缺少 task_review 结构化载荷';
+        }
       } finally {
         entry.run = undefined;
       }
@@ -519,7 +544,7 @@ export class Orchestrator extends EventEmitter {
         `${verdict.feedback ? `\n反馈：${verdict.feedback}` : ''}` +
         `${verdict.checks?.length ? `\n覆盖维度：${verdict.checks.join('、')}` : ''}`,
     });
-    return verdict;
+    return { verdict, assessment };
   }
 
   /** Consume every AgentRun through one interaction-aware lifecycle for development and review. */
@@ -536,6 +561,8 @@ export class Orchestrator extends EventEmitter {
     let output = '';
     let error: string | undefined;
     let failureKind: import('@ai-devflow/core').FailureKind | undefined;
+    let result: import('@ai-devflow/core').KnowledgeAgentPayload | undefined;
+    let knowledgeReads: import('@ai-devflow/core').KnowledgeReadEvidence[] | undefined;
     for await (const ev of run.events) {
       if (entry.stopReason) {
         await run.cancel();
@@ -545,6 +572,8 @@ export class Orchestrator extends EventEmitter {
       if (ev.type === 'done') {
         done = true;
         output += `\n${ev.summary}`;
+        result = ev.result;
+        knowledgeReads = ev.knowledgeReads;
       } else if (ev.type === 'log') {
         output += `\n${ev.text}`;
       } else if (ev.type === 'error') {
@@ -567,7 +596,7 @@ export class Orchestrator extends EventEmitter {
         break;
       }
     }
-    return { done, interacted, output, error, failureKind };
+    return { done, interacted, output, error, failureKind, result, knowledgeReads };
   }
 
   /** 解析审查 Agent 输出中的结论标记；无明确 PASS 时保守按不通过（绝不绕过审查进入待验收）。 */
@@ -1065,6 +1094,29 @@ export class Orchestrator extends EventEmitter {
 
   private buildPrompt(task: Task): string {
     return `【任务】${task.title}\n【描述】${task.description || '(无)'}\n请在当前仓库工作区完成开发工作：设计 -> 实现 -> 自验（调用实现计划技能编排子步骤）。`;
+  }
+
+  /** 知识门禁：valuable 需完成沉淀校验；none 需非空理由与证据。无 coordinator 时默认放行。 */
+  private async finalizeTaskKnowledge(
+    task: Task,
+    project: Project,
+    assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined,
+  ): Promise<{ gatePassed: boolean; diagnostics: string[] }> {
+    const coordinator = this.opts.knowledgeCoordinator;
+    if (!coordinator) return { gatePassed: true, diagnostics: [] };
+    const executionId = this.repos.executions.getLatest(task.id)?.id;
+    try {
+      const result = await coordinator.finalizeTaskKnowledge({
+        task,
+        project: { id: project.id, path: project.path, defaultBranch: project.defaultBranch },
+        executionId,
+        assessment,
+        worktreePath: task.worktreePath ?? project.path,
+      });
+      return { gatePassed: result.gatePassed, diagnostics: result.diagnostics };
+    } catch (err) {
+      return { gatePassed: false, diagnostics: [(err as Error).message] };
+    }
   }
 
   /** 为 dev/test 执行生成检索 manifest；未配置知识服务时返回 undefined（不阻塞任务）。 */

@@ -69,9 +69,20 @@ export class FakeAgentRunner implements AgentRunner {
     const verdict = this.opts.testExpertVerdict ?? 'PASS';
     const line = verdict === 'PASS' ? 'REVIEW_VERDICT: PASS' : 'REVIEW_VERDICT: FAIL: 未覆盖验收标准第 2 条';
     const delay = this.opts.testExpertDelayMs ?? 0;
+    const payload = verdict === 'PASS'
+      ? {
+          kind: 'task_review' as const,
+          review: { pass: true, summary: line },
+          knowledgeAssessment: {
+            verdict: 'none' as const,
+            reason: '本次审查无新增长期知识价值',
+            evidence: ['packages/scheduler/src/orchestrator.ts'],
+          },
+        }
+      : undefined;
     return [
       { type: 'log', level: 'info', text: 'reviewing', t: 0, delayMs: delay > 0 ? Math.max(1, delay / 2) : undefined },
-      { type: 'done', summary: `ok\n${line}`, t: 0, delayMs: delay > 0 ? delay : undefined },
+      { type: 'done', summary: `ok\n${line}`, result: payload, t: 0, delayMs: delay > 0 ? delay : undefined },
     ];
   }
 }

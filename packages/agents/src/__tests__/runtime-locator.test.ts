@@ -236,7 +236,7 @@ describe('BundledPiLocator', () => {
     for (const role of ['planner', 'coder', 'reviewer', 'tester']) {
       mkdirSync(join(root, 'profiles', role), { recursive: true });
     }
-    for (const expert of ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead']) {
+    for (const expert of ['product', 'ux', 'dev_lead', 'coder', 'tester', 'project_lead']) {
       mkdirSync(join(root, 'profiles', expert), { recursive: true });
     }
     writeRuntimeManifest(root, 'package/cli.js', '0.80.10', 'abc123');
