@@ -7,6 +7,7 @@ import type {
   Task,
   TaskStatus,
   TaskRole,
+  TaskTypeLabel,
   LogEntry,
   ExecutionRecord,
   NotificationRule,
@@ -56,7 +57,10 @@ export interface CreateTaskInput {
   requirementId: string;
   title: string;
   description: string;
-  role: TaskRole;
+  /** @deprecated 按泳道派发，不再使用；保留兼容旧客户端。 */
+  role?: TaskRole;
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示。 */
+  typeLabel?: TaskTypeLabel;
   /** 串行依赖：前置任务 ID 列表（同需求兄弟任务）。 */
   dependsOn?: string[];
 }
@@ -66,7 +70,10 @@ export interface UpdateTaskInput {
   id: string;
   title?: string;
   description?: string;
+  /** @deprecated 按泳道派发，不再使用；保留兼容旧客户端。 */
   role?: TaskRole;
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示。 */
+  typeLabel?: TaskTypeLabel;
   dependsOn?: string[] | null;
 }
 
@@ -76,12 +83,15 @@ export interface CreateBatchInput {
   proposals: AiTaskProposal[];
 }
 
-/** AI 任务草稿（多轮沟通后由 task_proposer 经工具产出；description 为实施计划）。 */
+/** AI 任务草稿（多轮沟通后由研发负责人经工具产出；description 为实施计划）。 */
 export type AiTaskProposalDraft = {
   draftId: string;
   title: string;
   description: string;
-  role: TaskRole;
+  /** @deprecated 按泳道派发，不再使用；保留兼容。 */
+  role?: TaskRole;
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示。 */
+  typeLabel?: TaskTypeLabel;
   dependsOn: string[];
 };
 

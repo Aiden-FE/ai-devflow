@@ -22,7 +22,6 @@ import {
   type RuntimeLocator,
 } from '@ai-devflow/agents';
 import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
-import { workloadAgentKey } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
 import { decryptProviderSecret, encryptProviderSecret } from './credentials.js';
 import { ProviderStore } from './provider-store.js';
@@ -136,8 +135,8 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
     health,
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    agentOverrideFor: (workload) => {
-      const o = providerStore.listAgentOverrides().find((x) => x.agentKey === workloadAgentKey(workload));
+    agentOverrideFor: (expert) => {
+      const o = providerStore.listAgentOverrides().find((x) => x.agentKey === expert);
       return o ? { providerId: o.providerId, model: o.model } : undefined;
     },
   });

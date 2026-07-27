@@ -214,10 +214,10 @@ describe('ProviderStore', () => {
       id: 'p1', kind: 'openai', displayName: 'O', enabled: true,
       priority: 0, authType: 'api_key', apiKey: 'k', revision: 1,
       defaultModel: 'gpt-default',
-      workloadModels: { coder: 'coder-model', chat: 'chat-model' },
+      workloadModels: { dev: 'dev-model', chat: 'chat-model' },
     });
     const summaries = harness.store.list();
     expect(summaries[0]!.defaultModel).toBe('gpt-default');
-    expect(summaries[0]!.workloadModels).toEqual({ coder: 'coder-model', chat: 'chat-model' });
+    expect(summaries[0]!.workloadModels).toEqual({ dev: 'dev-model', chat: 'chat-model' });
   });
 });
