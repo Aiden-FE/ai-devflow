@@ -57,7 +57,7 @@ export const BUILTIN_EXTENSIONS = [
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
-export type SkillSource = TaskRole | 'shared' | 'product' | 'ux' | 'dev_lead';
+export type SkillSource = TaskRole | 'shared' | 'product' | 'ux' | 'dev_lead' | 'project_lead';
 
 /** 内置技能注册表条目：name 为技能目录名，source 仅表示物理文件位置，不限制哪些角色可引用。 */
 export interface BuiltinSkill {
@@ -88,6 +88,9 @@ export const BUILTIN_SKILLS = [
   { name: 'ux-spec-writing',      source: 'ux' as const },
   { name: 'web-design-engineer',  source: 'ux' as const },
   { name: 'subtask-generation',   source: 'dev_lead' as const },
+  // 知识技能（Task 6 资产）
+  { name: 'knowledge-retrieve',    source: 'shared' as const },
+  { name: 'knowledge-governance',  source: 'shared' as const },
 ] as const satisfies readonly BuiltinSkill[];
 
 export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
@@ -275,6 +278,7 @@ export const EXPERT_ASSETS_DIR: Record<ExecutionExpertKey, string> = {
   dev_lead: 'dev_lead',
   dev: 'coder',
   test: 'tester',
+  project_lead: 'project_lead',
 };
 
 /**
@@ -532,43 +536,51 @@ export interface ExpertProfile {
  */
 export const EXPERT_PROFILES: Record<ExecutionExpertKey, ExpertProfile> = {
   product: {
-    expert: 'product', version: 1, systemPromptFile: 'SYSTEM.md',
+    expert: 'product', version: 2, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'grep', 'find', 'ls'],
     excludedTools: ['bash', 'edit', 'write'],
-    skills: ['brainstorming', 'requirements-analysis', 'design-writing', 'create-prd'],
+    skills: ['brainstorming', 'requirements-analysis', 'design-writing', 'create-prd', 'knowledge-retrieve'],
     extensions: ['requirement-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
     timeoutMs: 15 * 60_000,
   },
   ux: {
-    expert: 'ux', version: 1, systemPromptFile: 'SYSTEM.md',
+    expert: 'ux', version: 2, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'grep', 'find', 'ls'],
     excludedTools: ['bash', 'edit', 'write'],
-    skills: ['ux-spec-writing', 'web-design-engineer'],
+    skills: ['ux-spec-writing', 'web-design-engineer', 'knowledge-retrieve'],
     extensions: ['requirement-bridge', 'ask-bridge', 'structured-result'],
     timeoutMs: 10 * 60_000,
   },
   dev_lead: {
-    expert: 'dev_lead', version: 1, systemPromptFile: 'SYSTEM.md',
+    expert: 'dev_lead', version: 2, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'grep', 'find', 'ls'],
     excludedTools: ['bash', 'edit', 'write'],
-    skills: ['brainstorming', 'implementation-planning', 'subtask-generation'],
+    skills: ['brainstorming', 'implementation-planning', 'subtask-generation', 'knowledge-retrieve'],
     extensions: ['task-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
     timeoutMs: 15 * 60_000,
   },
   dev: {
-    expert: 'dev', version: 1, systemPromptFile: 'SYSTEM.md',
+    expert: 'dev', version: 2, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
     excludedTools: [],
-    skills: ['design-writing', 'implementation-planning', 'test-driven-development', 'systematic-debugging', 'verification'],
+    skills: ['design-writing', 'implementation-planning', 'test-driven-development', 'systematic-debugging', 'verification', 'knowledge-retrieve'],
     extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
     timeoutMs: 45 * 60_000,
   },
   test: {
-    expert: 'test', version: 1, systemPromptFile: 'SYSTEM.md',
+    expert: 'test', version: 2, systemPromptFile: 'SYSTEM.md',
     tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'],
     excludedTools: [],
-    skills: ['code-review', 'security-review', 'regression-review', 'test-design', 'failure-analysis', 'acceptance-verification'],
+    skills: ['code-review', 'security-review', 'regression-review', 'test-design', 'failure-analysis', 'acceptance-verification', 'knowledge-retrieve'],
     extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    timeoutMs: 30 * 60_000,
+  },
+  project_lead: {
+    expert: 'project_lead', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls', 'write', 'edit'],
+    excludedTools: ['bash'],
+    skills: ['knowledge-governance', 'knowledge-retrieve'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
     timeoutMs: 30 * 60_000,
   },
 };

@@ -93,6 +93,7 @@ const DEFAULT_THINKING_BY_EXPERT: Record<AgentKey, ModelChoice['thinking']> = {
   dev_lead: 'high',
   dev: 'xhigh',
   test: 'medium',
+  project_lead: 'high',
   chat: 'medium',
 };
 

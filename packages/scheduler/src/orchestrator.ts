@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type {
   AgentEvent,
   Checkpoint,
+  ExpertKey,
   ExecutionRecord,
   LogEntry,
   Task,
@@ -214,7 +215,7 @@ export class Orchestrator extends EventEmitter {
   /** 运行流水线各阶段。 */
   private async runPipeline(task: Task, project: Project, init: StartInit | undefined, entry: ActivePipeline): Promise<void> {
     // 专家化重构：按泳道派发单专家执行（in_progress -> 研发专家 dev）。废弃多角色 stages。
-    const expert = laneToExpert(task.status) ?? 'dev';
+    const expert = (laneToExpert(task.status) ?? 'dev') as Exclude<ExpertKey, 'chat'>;
     const startStage = init?.resumeFrom?.stageIndex ?? task.currentStage ?? 0;
     void startStage;
 
@@ -446,7 +447,7 @@ export class Orchestrator extends EventEmitter {
    * 返回 undefined 表示审查被受控停止（待沟通/取消），调用方直接收尾。
    */
   private async runReview(task: Task, project: Project, entry: ActivePipeline): Promise<ReviewVerdict | undefined> {
-    const expert = laneToExpert('testing')!; // 'test'
+    const expert = laneToExpert('testing')! as Exclude<ExpertKey, 'chat'>; // 'test'
     const execution: ExecutionRecord = {
       id: randomId(),
       taskId: task.id,

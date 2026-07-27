@@ -75,7 +75,7 @@ const CERT_PROXY_PASSTHROUGH = [
 ];
 
 export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
-  const profile = EXPERT_PROFILES[input.expert as Exclude<ExpertKey, 'chat'>] ?? EXPERT_PROFILES.dev;
+  const profile = EXPERT_PROFILES[input.expert as Exclude<ExpertKey, 'chat'>];
   const name = `${input.executionId}-${input.attemptId}`;
 
   // §6.3：command=process.execPath，args=[absolutePiEntry, ...piArgs]。

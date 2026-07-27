@@ -43,18 +43,20 @@ test('formatRoleCapabilities --json includes skill sources when skillPool provid
   assert.deepEqual(parsed.coder.skillSources, [{ name: 'tdd', source: 'coder' }]);
 });
 
-test('script run prints all four roles (smoke, exercises esbuild bundle)', () => {
+test('script run prints all four roles and six execution experts (smoke, exercises esbuild bundle)', () => {
   const stdout = execFileSync('node', [script], { encoding: 'utf8' });
   for (const role of ['planner', 'coder', 'reviewer', 'tester']) assert.match(stdout, new RegExp(role));
+  for (const expert of ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead']) assert.match(stdout, new RegExp(expert));
 });
 
-test('script run --json parses and contains four roles', () => {
+test('script run --json parses and contains four roles and six experts', () => {
   const stdout = execFileSync('node', [script, '--json'], { encoding: 'utf8' });
   const parsed = JSON.parse(stdout);
-  assert.deepEqual(Object.keys(parsed).sort(), ['coder', 'planner', 'reviewer', 'tester']);
+  assert.deepEqual(Object.keys(parsed.roles).sort(), ['coder', 'planner', 'reviewer', 'tester']);
+  assert.deepEqual(Object.keys(parsed.experts).sort(), ['dev', 'dev_lead', 'product', 'project_lead', 'test', 'ux']);
   // 真实 BUILTIN_SKILLS 被注入：每个技能来源为角色名或 'shared'，无 '?' 占位
-  for (const role of Object.keys(parsed)) {
-    for (const s of parsed[role].skillSources) {
+  for (const role of Object.keys(parsed.roles)) {
+    for (const s of parsed.roles[role].skillSources) {
       assert.ok(s.source !== '?', `${role}/${s.name} 未能解析来源`);
     }
   }

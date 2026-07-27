@@ -7,11 +7,12 @@ import { buildSync } from 'esbuild';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 interface PolicyHandlers {
+  canWrite(path: string): boolean;
   onToolCall(event: Record<string, unknown>): { block: true; reason: string } | undefined;
   onToolResult(event: Record<string, unknown>): { content: Array<{ type: string; text: string }>; isError: true } | undefined;
 }
 
-let createExecutionPolicy: (context: { role: string; worktree: string }) => PolicyHandlers;
+let createExecutionPolicy: (context: { role: string; expert?: string; worktree: string }) => PolicyHandlers;
 
 beforeAll(async () => {
   const outputDir = mkdtempSync(join(tmpdir(), 'execution-policy-module-'));
@@ -221,5 +222,53 @@ describe('execution policy', () => {
       block: true,
       reason: expect.stringContaining('policy:reviewer-integrity-violation'),
     });
+  });
+});
+
+describe('project_lead write policy', () => {
+  function policyForPL() {
+    const root = worktree();
+    for (const dir of ['docs/knowledge/feature', 'docs/iterations/v1/tasks/t1']) {
+      execFileSync('mkdir', ['-p', join(root, dir)]);
+    }
+    return { root, policy: createExecutionPolicy({ role: '', expert: 'project_lead', worktree: root }) };
+  }
+
+  it('allows writes inside docs/knowledge and docs/iterations', () => {
+    const { policy } = policyForPL();
+    expect(policy.canWrite('docs/knowledge/feature/tasks.md')).toBe(true);
+    expect(policy.canWrite('docs/iterations/v1/tasks/t1/MEMORY.md')).toBe(true);
+  });
+
+  it('rejects writes outside the documentation roots', () => {
+    const { policy } = policyForPL();
+    expect(policy.canWrite('packages/core/src/types.ts')).toBe(false);
+    expect(policy.canWrite('docs/knowledge')).toBe(true); // 根目录本身允许（索引）
+  });
+
+  it('rejects absolute paths and traversal', () => {
+    const { policy } = policyForPL();
+    expect(policy.canWrite('/etc/passwd')).toBe(false);
+    expect(policy.canWrite('../escape.md')).toBe(false);
+    expect(policy.canWrite('docs/knowledge/../../../etc/passwd')).toBe(false);
+  });
+
+  it('blocks write tool calls outside the scope', () => {
+    const { policy } = policyForPL();
+    expect(policy.onToolCall({
+      type: 'tool_call', toolCallId: 'w1', toolName: 'write',
+      input: { path: 'packages/core/src/types.ts', content: 'x' },
+    })).toMatchObject({ block: true, reason: expect.stringContaining('project-lead-scope') });
+    expect(policy.onToolCall({
+      type: 'tool_call', toolCallId: 'w2', toolName: 'edit',
+      input: { path: 'docs/knowledge/feature/a.md', content: 'x' },
+    })).toBeUndefined();
+  });
+
+  it('denies bash for project_lead', () => {
+    const { policy } = policyForPL();
+    expect(policy.onToolCall({
+      type: 'tool_call', toolCallId: 'b1', toolName: 'bash', input: { command: 'git status' },
+    })).toMatchObject({ block: true });
   });
 });

@@ -34,6 +34,9 @@ export interface BundledPiLocatorOptions {
 
 const ROLES = ['planner', 'coder', 'reviewer', 'tester'] as const;
 
+/** 内置执行专家目录（设计 §4.1）：requireProfiles 时与角色目录一并校验存在。 */
+const EXPERT_DIRS = ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead'] as const;
+
 export interface VerifiedPiRuntime {
   entry: string;
   version: string;
@@ -78,6 +81,9 @@ export class BundledPiLocator {
       if (!manifest.profilesDigest) throw new Error('运行时校验失败：缺少角色配置摘要');
       for (const role of ROLES) {
         if (!existsSync(join(this.root, 'profiles', role))) throw new Error(`运行时校验失败：缺少角色 ${role}`);
+      }
+      for (const expert of EXPERT_DIRS) {
+        if (!existsSync(join(this.root, 'profiles', expert))) throw new Error(`运行时校验失败：缺少专家 ${expert}`);
       }
     }
     const result = await this.execFile(process.execPath, [entry, '--version'], { env: buildProbeEnv(process.env) });

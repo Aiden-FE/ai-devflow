@@ -236,6 +236,9 @@ describe('BundledPiLocator', () => {
     for (const role of ['planner', 'coder', 'reviewer', 'tester']) {
       mkdirSync(join(root, 'profiles', role), { recursive: true });
     }
+    for (const expert of ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead']) {
+      mkdirSync(join(root, 'profiles', expert), { recursive: true });
+    }
     writeRuntimeManifest(root, 'package/cli.js', '0.80.10', 'abc123');
     const ok = await new BundledPiLocator(root, { execFile: fakeVersionExec, requireProfiles: true }).verify();
     expect(ok.version).toBe('0.80.10');

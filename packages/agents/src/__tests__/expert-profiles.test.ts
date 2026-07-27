@@ -2,9 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { EXPERT_PROFILES, validateExpertProfiles } from '../profiles.js';
 
 describe('EXPERT_PROFILES', () => {
-  it('含 5 个执行专家（不含 chat）', () => {
+  it('含 6 个执行专家（不含 chat）', () => {
     const keys = Object.keys(EXPERT_PROFILES);
-    expect(keys.sort()).toEqual(['dev', 'dev_lead', 'product', 'test', 'ux']);
+    expect(keys.sort()).toEqual(['dev', 'dev_lead', 'product', 'project_lead', 'test', 'ux']);
+  });
+
+  it('project_lead 物化两个知识技能且默认 thinking high', () => {
+    const p = EXPERT_PROFILES.project_lead;
+    expect(p.skills).toEqual(['knowledge-governance', 'knowledge-retrieve']);
+    expect(p.tools).toContain('write');
+    expect(p.tools).toContain('edit');
+    expect(p.excludedTools).toContain('bash');
   });
 
   it('测试专家含 write/edit 工具用于用例验证', () => {
@@ -28,5 +36,11 @@ describe('EXPERT_PROFILES', () => {
 
   it('validateExpertProfiles 不抛', () => {
     expect(() => validateExpertProfiles()).not.toThrow();
+  });
+
+  it('五个执行专家均注册 knowledge-retrieve 技能', () => {
+    for (const expert of ['product', 'ux', 'dev_lead', 'dev', 'test'] as const) {
+      expect(EXPERT_PROFILES[expert].skills).toContain('knowledge-retrieve');
+    }
   });
 });

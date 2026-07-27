@@ -7,9 +7,11 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path';
 
 type PolicyRole = 'planner' | 'coder' | 'reviewer' | 'tester' | string;
+type PolicyExpert = 'product' | 'ux' | 'dev_lead' | 'dev' | 'test' | 'project_lead' | string;
 
 export interface ExecutionPolicyContext {
   role: PolicyRole;
+  expert?: PolicyExpert;
   worktree: string;
 }
 
@@ -93,6 +95,19 @@ function isSensitivePath(target: string): boolean {
     .toLowerCase()
     .split(/[\\/]/)
     .some((part) => part.startsWith('.env') || SENSITIVE.has(part));
+}
+
+/** 项目负责人允许写入的文档根（相对 worktree）。 */
+const PROJECT_LEAD_DOC_ROOTS = ['docs/knowledge', 'docs/iterations'];
+
+/** 项目负责人写入路径白名单：仅允许 docs/knowledge/** 与 docs/iterations/**。 */
+function isWithinProjectLeadScope(worktree: string, target: string): boolean {
+  const root = realpathSync(worktree);
+  if (target === root || target.startsWith(root + sep)) {
+    const rel = target.slice(root.length).replace(/^[\\/]+/, '').split(sep).join('/');
+    return PROJECT_LEAD_DOC_ROOTS.some((base) => rel === base || rel.startsWith(`${base}/`));
+  }
+  return false;
 }
 
 function shellTokens(command: string): string[] | undefined {
@@ -274,8 +289,25 @@ export function snapshotTrackedFiles(worktree: string): string {
 export function createExecutionPolicy(context: ExecutionPolicyContext) {
   const reviewerHashes = new Map<string, string>();
   let reviewerIntegrityViolation = false;
+  const expert = context.expert;
+  const projectLead = expert === 'project_lead';
+
+  /** 项目负责人写入白名单检查（供测试与扩展共用）。 */
+  function canWrite(rawPath: string): boolean {
+    if (!projectLead) return false;
+    if (isAbsolute(rawPath) || rawPath.includes('..') || rawPath.includes('\0')) return false;
+    let target: string;
+    try {
+      target = canonicalPath(context.worktree, rawPath);
+    } catch {
+      return false;
+    }
+    if (!isWithin(context.worktree, target)) return false;
+    return isWithinProjectLeadScope(context.worktree, target);
+  }
 
   return {
+    canWrite,
     onToolCall(event: ToolCallLike): BlockResult | undefined {
       const name = event.toolName;
       const input = event.input ?? {};
@@ -283,6 +315,10 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
 
       if (reviewer && reviewerIntegrityViolation) {
         return block('reviewer-integrity-violation', 'reviewer 已改变受跟踪文件，本次运行不得继续或提交结果');
+      }
+
+      if (projectLead && name === 'bash') {
+        return block('project-lead-no-bash', '项目负责人禁止执行 bash 命令（Git 与状态转换由宿主完成）');
       }
 
       if (reviewer && (name === 'write' || name === 'edit')) {
@@ -297,6 +333,16 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
           target = canonicalPath(context.worktree, raw);
         } catch {
           return block('invalid-path', '写入路径无法安全解析');
+        }
+        if (projectLead) {
+          // 项目负责人：拒绝绝对路径、.. 遍历、NUL，且只允许 docs/knowledge|docs/iterations 内写入。
+          if (isAbsolute(raw) || raw.includes('..') || raw.includes('\0')) {
+            return block('project-lead-escape', '项目负责人写入路径含非法组件');
+          }
+          if (!isWithinProjectLeadScope(context.worktree, target)) {
+            return block('project-lead-scope', '项目负责人只能写入 docs/knowledge 或 docs/iterations');
+          }
+          return undefined;
         }
         if (!isWithin(context.worktree, target)) {
           return block('outside-worktree', '禁止写出任务工作区或符号链接逃逸');
@@ -373,8 +419,18 @@ export function createExecutionPolicy(context: ExecutionPolicyContext) {
 export default function executionPolicyExtension(pi: ExtensionAPI) {
   const policy = createExecutionPolicy({
     role: process.env.AI_DEVFLOW_ROLE ?? '',
+    expert: process.env.AI_DEVFLOW_EXPERT,
     worktree: process.env.AI_DEVFLOW_WORKTREE ?? '',
   });
   pi.on('tool_call', async (event) => policy.onToolCall(event));
   pi.on('tool_result', async (event) => policy.onToolResult(event));
+}
+
+/** 测试辅助：按专家构造执行策略，暴露 canWrite 用于项目负责人白名单断言。 */
+export function policyFor(expert: PolicyExpert, worktree?: string): {
+  canWrite(path: string): boolean;
+  onToolCall(event: ToolCallLike): BlockResult | undefined;
+  onToolResult(event: ToolResultLike): ToolResultOverride | undefined;
+} {
+  return createExecutionPolicy({ role: '', expert, worktree: worktree ?? process.env.AI_DEVFLOW_WORKTREE ?? '' });
 }

@@ -21,14 +21,16 @@ export function formatRoleCapabilities(profiles, internalTools, builtinExtension
   const skillByName = new Map((opts.skillPool ?? []).map((s) => [s.name, s]));
   const roles = Object.values(profiles);
   const view = Object.fromEntries(roles.map((p) => {
+    const key = p.expert ?? p.role;
     const tools = [...p.tools, ...internalTools];
     const skillSources = p.skills.map((name) => skillByName.get(name) ?? { name, source: '?' });
-    return [p.role, { version: p.version, tools, excludedTools: p.excludedTools, skills: p.skills, skillSources, extensions: p.extensions, timeoutMs: p.timeoutMs, systemPromptFile: p.systemPromptFile }];
+    return [key, { version: p.version, tools, excludedTools: p.excludedTools, skills: p.skills, skillSources, extensions: p.extensions, timeoutMs: p.timeoutMs, systemPromptFile: p.systemPromptFile }];
   }));
   if (opts.json) return JSON.stringify(view, null, 2);
   const lines = [`# 内置角色生效能力（internal tools: ${internalTools.join(', ')}）`, ''];
   for (const p of roles) {
-    lines.push(`## ${p.role} (v${p.version})`);
+    const key = p.expert ?? p.role;
+    lines.push(`## ${key} (v${p.version})`);
     lines.push(`- tools: ${[...p.tools, ...internalTools].join(', ')}`);
     if (p.excludedTools.length) lines.push(`- excludedTools: ${p.excludedTools.join(', ')}`);
     lines.push(`- skills: ${p.skills.join(', ')}`);
@@ -46,7 +48,7 @@ export function formatRoleCapabilities(profiles, internalTools, builtinExtension
 
 async function loadProfiles() {
   const entry = join(mkdtempSync(join(tmpdir(), 'inspect-roles-')), 'entry.mjs');
-  writeFileSync(entry, `export { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } from '${PROFILES_SRC.replace(/\\/g, '/')}';\n`);
+  writeFileSync(entry, `export { ROLE_PROFILES, EXPERT_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } from '${PROFILES_SRC.replace(/\\/g, '/')}';\n`);
   const result = await build({
     entryPoints: [entry],
     bundle: true,
@@ -62,9 +64,17 @@ async function loadProfiles() {
 }
 
 async function main() {
-  const { ROLE_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } = await loadProfiles();
+  const { ROLE_PROFILES, EXPERT_PROFILES, INTERNAL_TOOLS, BUILTIN_EXTENSIONS, BUILTIN_SKILLS } = await loadProfiles();
   const json = process.argv.includes('--json');
-  process.stdout.write(formatRoleCapabilities(ROLE_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { json, skillPool: [...BUILTIN_SKILLS] }) + '\n');
+  if (json) {
+    const roleOut = formatRoleCapabilities(ROLE_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { json, skillPool: [...BUILTIN_SKILLS] });
+    const expertOut = formatRoleCapabilities(EXPERT_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { json, skillPool: [...BUILTIN_SKILLS] });
+    const combined = { roles: JSON.parse(roleOut), experts: JSON.parse(expertOut) };
+    process.stdout.write(JSON.stringify(combined, null, 2) + '\n');
+    return;
+  }
+  process.stdout.write(formatRoleCapabilities(ROLE_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { skillPool: [...BUILTIN_SKILLS] }) + '\n');
+  process.stdout.write(formatRoleCapabilities(EXPERT_PROFILES, [...INTERNAL_TOOLS], [...BUILTIN_EXTENSIONS], { skillPool: [...BUILTIN_SKILLS] }) + '\n');
 }
 
 const invokedDirectly = import.meta.url === `file://${process.argv[1]}`;
