@@ -41,6 +41,10 @@ export interface OrchestratorOptions {
   maxReviewRounds?: number;
   /** 是否已配置可用 AI 服务（提供商）。缺省视为 true（无提供商时 runner.run 会可恢复失败）。 */
   hasProvider?: () => boolean;
+  /** 项目知识服务：提供后，dev/test 执行前生成检索 manifest 并注入 Agent。 */
+  knowledge?: import('@ai-devflow/knowledge').ProjectKnowledgeService;
+  /** 任务文档根版本段（默认从迭代 version 解析；无迭代时用 '1.0'）。 */
+  knowledgeCoordinator?: import('./knowledge-coordinator.js').KnowledgeCoordinator;
 }
 
 export interface TaskEvent {
@@ -274,6 +278,7 @@ export class Orchestrator extends EventEmitter {
       this.repos.tasks.update(task);
 
       const prompt = this.buildPrompt(task);
+      const knowledgeManifest = await this.prepareTaskManifest(task, project, execution.id, expert, 'development', worktreePath!);
       const run = await this.runner.run({
         scope: { kind: 'task', taskId: task.id },
         executionId: execution.id,
@@ -281,6 +286,7 @@ export class Orchestrator extends EventEmitter {
         resultKind: 'task_execution',
         prompt,
         cwd: worktreePath!,
+        knowledgeManifest,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
         userInput: i === startStage ? init?.userInput : undefined,
         interactionResponse: i === startStage ? init?.interactionResponse : undefined,
@@ -463,6 +469,7 @@ export class Orchestrator extends EventEmitter {
     let output = '';
     let errored: string | undefined;
     try {
+      const knowledgeManifest = await this.prepareTaskManifest(task, project, execution.id, expert, 'review', task.worktreePath ?? project.path);
       const run = await this.runner.run({
         scope: { kind: 'task', taskId: task.id },
         executionId: execution.id,
@@ -470,6 +477,7 @@ export class Orchestrator extends EventEmitter {
         resultKind: 'task_review',
         prompt,
         cwd: task.worktreePath ?? project.path,
+        knowledgeManifest,
       });
       entry.run = run;
       try {
@@ -1057,6 +1065,31 @@ export class Orchestrator extends EventEmitter {
 
   private buildPrompt(task: Task): string {
     return `【任务】${task.title}\n【描述】${task.description || '(无)'}\n请在当前仓库工作区完成开发工作：设计 -> 实现 -> 自验（调用实现计划技能编排子步骤）。`;
+  }
+
+  /** 为 dev/test 执行生成检索 manifest；未配置知识服务时返回 undefined（不阻塞任务）。 */
+  private async prepareTaskManifest(
+    task: Task,
+    project: Project,
+    executionId: string,
+    expert: Exclude<ExpertKey, 'chat'>,
+    stage: 'development' | 'review',
+    cwd: string,
+  ): Promise<import('@ai-devflow/core').KnowledgeRetrievalManifest | undefined> {
+    const coordinator = this.opts.knowledgeCoordinator;
+    if (!coordinator) return undefined;
+    try {
+      return await coordinator.prepareTaskExecution({
+        task,
+        project: { id: project.id, path: project.path, defaultBranch: project.defaultBranch },
+        executionId,
+        expert: expert as 'dev' | 'test',
+        stage,
+        cwd,
+      });
+    } catch {
+      return undefined;
+    }
   }
 
   /** 应用重启后恢复：扫描运行中/待沟通任务。 */

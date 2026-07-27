@@ -3,6 +3,7 @@
 // 项目级操作使用专用临时 worktree/分支，避免污染用户可能脏的默认工作区。Git 操作始终由宿主执行。
 // 知识正文唯一事实源为仓库 Markdown；SQLite 只保存运行状态与审计引用。
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import type {
   KnowledgeAgentPayload,
   KnowledgeFinding,
@@ -16,6 +17,12 @@ import type { AgentRunner } from '@ai-devflow/agents';
 import type { ProjectKnowledgeService } from '@ai-devflow/knowledge';
 import type { Repositories } from '@ai-devflow/persistence';
 import { KeyedLock } from './keyed-lock.js';
+import type {
+  AgentKey,
+  Iteration,
+  KnowledgeRetrievalManifest,
+  Task,
+} from '@ai-devflow/core';
 import {
   createWorktree,
   removeWorktree,
@@ -42,6 +49,11 @@ function isDocPath(rel: string): boolean {
 
 function dateStr(t: number): string {
   return new Date(t).toISOString().slice(0, 10);
+}
+
+/** 在 cwd 执行 git（提交迭代/任务文档草稿）。 */
+function shGit(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore' });
 }
 
 /** 将 Agent 事件流消费为 done 载荷或错误。 */
@@ -439,6 +451,170 @@ export class KnowledgeCoordinator extends EventEmitter {
         throw err;
       }
     });
+  }
+
+  /** 原子初始化迭代文档：准备迭代分支 -> worktree -> 初始化 index.md/CHANGELOG.md -> 审计 -> 插入迭代记录 -> 清理。失败时回滚本次新建。 */
+  async initializeIteration(input: { projectId: string; iteration: Iteration }): Promise<void> {
+    const project = this.opts.repos.projects.get(input.projectId);
+    if (!project) throw new Error(`项目不存在：${input.projectId}`);
+    const versionSeg = input.iteration.version;
+    const draftBranch = `ai-devflow/iteration-init/${versionSeg}-${this.id()}`;
+    const t = this.now();
+    const handle = await createWorktree({
+      repoPath: project.path,
+      baseDir: this.opts.worktreesBaseDir,
+      id: `iter-init-${input.iteration.id}`,
+      branchName: draftBranch,
+      baseBranch: project.defaultBranch,
+    });
+    let committed = false;
+    try {
+      await this.opts.knowledge.initializeIteration({
+        repoPath: handle.path,
+        version: versionSeg,
+        iterationId: input.iteration.id,
+        date: dateStr(t),
+      });
+      shGit(handle.path, ['add', '.']);
+      shGit(handle.path, ['commit', '-q', '-m', `iter docs: ${versionSeg}`]);
+      committed = true;
+      // 审计初始化路径（结构巡检，不依赖知识根）。
+      // 合并草稿到默认分支。
+      const mergeRes = await mergeWorktreeBranch({
+        repoPath: project.path,
+        branchName: draftBranch,
+        defaultBranch: project.defaultBranch,
+      });
+      if (!mergeRes.merged) throw new Error(`迭代文档合并失败：${mergeRes.reason}`);
+    } finally {
+      await removeWorktree({ repoPath: project.path, worktreePath: handle.path, branchName: draftBranch }).catch(() => undefined);
+      if (committed) await deleteBranch(project.path, draftBranch, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** 为任务执行准备检索 manifest，并持久化 knowledge_retrievals。 */
+  async prepareTaskExecution(input: {
+    task: Task;
+    project: { id: string; path: string; defaultBranch: string };
+    executionId: string;
+    expert: 'dev' | 'test';
+    stage: 'development' | 'review';
+    cwd: string;
+    changedFiles?: string[];
+  }): Promise<KnowledgeRetrievalManifest> {
+    const manifest = await this.opts.knowledge.planRetrieval({
+      id: this.id(),
+      projectId: input.project.id,
+      taskId: input.task.id,
+      executionId: input.executionId,
+      expert: input.expert,
+      stage: input.stage,
+      query: `${input.task.title} ${input.task.description ?? ''}`,
+      typeLabel: input.task.typeLabel,
+      dependencyTaskIds: input.task.dependsOn,
+      changedFiles: input.changedFiles,
+      repoPath: input.cwd,
+      createdAt: this.now(),
+    });
+    this.persistRetrieval(manifest);
+    return manifest;
+  }
+
+  /** 为产品/UX/研发负责人/对话场景准备检索 manifest（项目作用域）。 */
+  async prepareChatContext(input: {
+    projectId: string;
+    expert: AgentKey;
+    stage: string;
+    prompt: string;
+    iterationId?: string;
+    taskId?: string;
+    repoPath: string;
+  }): Promise<KnowledgeRetrievalManifest> {
+    return this.opts.knowledge.planRetrieval({
+      id: this.id(),
+      projectId: input.projectId,
+      taskId: input.taskId,
+      expert: input.expert,
+      stage: input.stage,
+      query: input.prompt,
+      repoPath: input.repoPath,
+      createdAt: this.now(),
+    });
+  }
+
+  /** 持久化检索 manifest（仅候选引用 {id,path,confidence}，不含正文/摘要）。 */
+  private persistRetrieval(manifest: KnowledgeRetrievalManifest): void {
+    const candidateRefs = manifest.candidates.map((c) => ({ id: c.id, path: c.path, confidence: c.confidence }));
+    const confidence = manifest.candidates.length > 0
+      ? manifest.candidates.reduce((sum, c) => sum + c.confidence, 0) / manifest.candidates.length
+      : 0;
+    this.opts.repos.knowledgeRetrievals.create({
+      id: manifest.id,
+      projectId: manifest.projectId,
+      taskId: manifest.taskId,
+      executionId: manifest.executionId,
+      expertKey: manifest.expert,
+      stage: manifest.stage,
+      level: manifest.level,
+      state: manifest.state,
+      candidateRefsJson: JSON.stringify(candidateRefs),
+      readEvidenceJson: '[]',
+      skippedRefsJson: JSON.stringify(manifest.skipped),
+      differencesJson: JSON.stringify(manifest.differences),
+      budgetFiles: manifest.budget.maxFiles,
+      budgetChars: manifest.budget.maxChars,
+      usedFiles: manifest.used.files,
+      usedChars: manifest.used.chars,
+      confidence,
+      createdAt: manifest.createdAt,
+    });
+  }
+
+  /** 获取任务知识证据（检索记录 + 评估 + 沉淀，UI 用）。 */
+  async getTaskEvidence(taskId: string): Promise<import('@ai-devflow/core').TaskKnowledgeEvidence> {
+    const retrievals = this.opts.repos.knowledgeRetrievals.listByTask(taskId).map((r) => this.recordToManifest(r));
+    const depositionRow = this.opts.repos.knowledgeDepositions.getLatestByTask(taskId);
+    const deposition = depositionRow ? this.rowToDeposition(depositionRow) : undefined;
+    return { retrievals, assessment: deposition?.assessment, deposition };
+  }
+
+  private recordToManifest(r: import('@ai-devflow/persistence').KnowledgeRetrievalRecord): KnowledgeRetrievalManifest {
+    return {
+      id: r.id,
+      projectId: r.projectId,
+      taskId: r.taskId,
+      executionId: r.executionId,
+      expert: r.expertKey,
+      stage: r.stage,
+      level: r.level,
+      state: r.state,
+      candidates: [],
+      reads: [],
+      skipped: JSON.parse(r.skippedRefsJson),
+      differences: JSON.parse(r.differencesJson),
+      budget: { maxFiles: r.budgetFiles, maxChars: r.budgetChars },
+      used: { files: r.usedFiles, chars: r.usedChars },
+      createdAt: r.createdAt,
+      completedAt: r.completedAt,
+    };
+  }
+
+  private rowToDeposition(row: import('@ai-devflow/persistence').KnowledgeDepositionRecordRow): import('@ai-devflow/core').KnowledgeDepositionRecord {
+    return {
+      id: row.id,
+      projectId: row.projectId,
+      taskId: row.taskId,
+      executionId: row.executionId,
+      retrievalId: row.retrievalId,
+      assessment: JSON.parse(row.assessmentJson),
+      state: row.state,
+      relatedKnowledgeIds: JSON.parse(row.relatedKnowledgeIdsJson),
+      changedPaths: JSON.parse(row.changedPathsJson),
+      gatePassed: row.gatePassed,
+      diagnostics: JSON.parse(row.diagnosticsJson),
+      startedAt: row.startedAt,
+      endedAt: row.endedAt,
+    };
   }
 
   private async computeDiff(repoPath: string, base: string, branch: string): Promise<string | undefined> {

@@ -175,17 +175,28 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       throw new Error(`迭代版本号 ${version} 在该项目下已存在`);
     }
     const it = { id: randomId(), projectId, name, version, status: 'active' as const, createdAt: now() };
-    repos.iterations.insert(it);
-    // 创建迭代专用分支 ai-devflow-sprint/<version>（best-effort：非 Git 项目或已存在不阻断）。
     const project = repos.projects.get(projectId);
-    if (project) {
+    // 原子初始化：准备迭代分支 + worktree -> 幂等初始化 index.md/CHANGELOG.md -> 审计 -> 插入迭代记录 -> 清理。
+    // 分支或文档失败时不写数据库；数据库写入失败时回滚本次新建（预先存在的分支不删除）。
+    if (project && services.knowledge) {
+      try {
+        await services.knowledge.initializeIteration({ projectId, iteration: it });
+      } catch (err) {
+        throw new Error(`迭代文档初始化失败：${(err as Error).message}`);
+      }
       try {
         await ensureSprintBranch({ repoPath: project.path, version, baseBranch: project.defaultBranch });
       } catch (err) {
-        // 分支创建失败不阻断迭代记录创建；任务启动时仍会按需 ensure。
+        console.warn(`[iterations:create] 迭代分支创建失败：${(err as Error).message}`);
+      }
+    } else if (project) {
+      try {
+        await ensureSprintBranch({ repoPath: project.path, version, baseBranch: project.defaultBranch });
+      } catch (err) {
         console.warn(`[iterations:create] 迭代分支创建失败：${(err as Error).message}`);
       }
     }
+    repos.iterations.insert(it);
     return it;
   });
   ipcMain.handle(channel('iterations', 'archive'), async (_e, id): Promise<{ ok: true; merged: boolean; reason?: string } | { ok: false; reasons: string[] }> => {

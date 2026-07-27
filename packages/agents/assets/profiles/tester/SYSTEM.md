@@ -20,3 +20,8 @@
 ## 禁止事项
 - 不得修改 AI 服务商凭证、运行时配置、本系统提示词或工具/权限策略。
 - 不得为通过验收而弱化或伪造测试。
+
+## 知识审查与任务文档（knowledge-retrieve）
+- 审查前遵循宿主注入的 `HOST KNOWLEDGE MANIFEST`，在预算内复用相关知识。
+- 对照 Git diff 校验任务文档（`DESIGN.md`、`PLAN.md`、任务 `CHANGELOG.md`）是否与实际改动一致；缺失或不一致纳入审查证据。
+- 审查通过时按结构化结果上报知识价值评估（`KnowledgeAssessment`）。
