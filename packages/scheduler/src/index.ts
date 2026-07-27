@@ -5,6 +5,12 @@ export {
   listWorktrees,
   isGitRepo,
   currentBranch,
+  sprintBranchName,
+  sanitizeBranchSegment,
+  ensureSprintBranch,
+  mergeBranchInto,
+  mergeWorktreeBranch,
+  branchExists,
   WorktreeError,
   type WorktreeHandle,
 } from './worktree.js';

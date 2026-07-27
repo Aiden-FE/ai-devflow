@@ -259,4 +259,11 @@ export const MIGRATIONS: Migration[] = [
   // agentRoles/roleConfigs 与全局 Agent 配置凭证，新增 provider_health / execution_attempts。
   // 破坏性 DROP COLUMN 由 runMigrations 在事务中执行（openDatabase 先做一致性备份）。
   PI_ONLY_MIGRATION_V9,
+  {
+    version: 10,
+    description: 'iteration archived_at (归档迭代时记录时间戳)',
+    sql: `
+      ALTER TABLE iterations ADD COLUMN archived_at INTEGER;
+    `,
+  },
 ];

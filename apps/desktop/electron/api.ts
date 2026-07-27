@@ -154,7 +154,7 @@ export interface DesktopApi {
   iterations: {
     list(projectId: string): Promise<Iteration[]>;
     create(projectId: string, name: string, version: string): Promise<Iteration>;
-    archive(id: string): Promise<void>;
+    archive(id: string): Promise<{ ok: true; merged: boolean; reason?: string } | { ok: false; reasons: string[] }>;
   };
   // ---- 需求 ----
   requirements: {

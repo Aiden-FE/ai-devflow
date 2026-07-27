@@ -19,7 +19,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Info, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
 import type { AskTabs, AskAnswer } from '../../electron/api.js';
 
@@ -36,6 +36,14 @@ export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSe
   const [iterationId, setIterationId] = useState<string | undefined>(undefined);
   const iterations = iterationsQ.data ?? [];
   const activeIter = iterationId ?? iterations[0]?.id;
+  const activeIteration = iterations.find((it) => it.id === activeIter);
+  // 归档门禁：迭代下所有任务必须已归档（空迭代视为满足）。
+  const archiveTasksQ = useAsync(() => (activeIter ? api.tasks.listByIteration(activeIter) : Promise.resolve([])), [activeIter]);
+  const archiveTasks = archiveTasksQ.data ?? [];
+  const allArchived = archiveTasks.length > 0 && archiveTasks.every((t) => t.status === 'archived');
+  const canArchive = !!activeIteration && activeIteration.status === 'active' && (archiveTasks.length === 0 || allArchived);
+  const [archiveConfirmOpen, setArchiveConfirmOpen] = useState(false);
+  const [archiveMsg, setArchiveMsg] = useState<string | undefined>();
 
   if (!activeProject) {
     return <EmptyState title={t('nav.projects')} hint={t('ws.emptyIteration.hint')} />;
@@ -82,8 +90,54 @@ export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSe
             ))}
           </SelectContent>
         </Select>
-        {activeIter && <Button variant="ghost" size="sm" onClick={async () => { await api.iterations.archive(activeIter); iterationsQ.reload(); }}><Archive className="h-4 w-4" /> {t('ws.archiveIteration')}</Button>}
+        {activeIter && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!canArchive}
+            title={!canArchive ? (activeIteration?.status === 'archived' ? t('ws.archiveIteration.alreadyArchived') : t('ws.archiveIteration.tasksNotArchived', { n: archiveTasks.filter((t) => t.status !== 'archived').length })) : t('ws.archiveIteration')}
+            onClick={() => { setArchiveMsg(undefined); setArchiveConfirmOpen(true); }}
+          >
+            <Archive className="h-4 w-4" /> {t('ws.archiveIteration')}
+          </Button>
+        )}
       </div>
+      {archiveMsg && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
+          <Info className="h-4 w-4" /> {archiveMsg}
+        </div>
+      )}
+      <Dialog open={archiveConfirmOpen} onOpenChange={setArchiveConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('ws.archiveIteration.confirm.title')}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p>{t('ws.archiveIteration.confirm.body', { name: activeIteration?.name ?? '', version: activeIteration?.version ?? '' })}</p>
+            <p className="text-xs text-muted-foreground">{t('ws.archiveIteration.confirm.mergeHint')}</p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setArchiveConfirmOpen(false)}>{t('common.cancel')}</Button>
+            <Button variant="destructive" onClick={async () => {
+              setArchiveConfirmOpen(false);
+              setError(undefined);
+              setArchiveMsg(undefined);
+              try {
+                const res = await api.iterations.archive(activeIter!);
+                if (!res.ok) {
+                  setError(res.reasons.join('；'));
+                } else {
+                  setArchiveMsg(res.merged ? t('ws.archiveIteration.merged', { version: activeIteration?.version ?? '' }) : t('ws.archiveIteration.mergeSkipped', { reason: res.reason ?? '' }));
+                  iterationsQ.reload();
+                  archiveTasksQ.reload();
+                }
+              } catch (e) {
+                setError((e as Error).message);
+              }
+            }}>{t('ws.archiveIteration.confirm.confirm')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {activeIter ? <WorkspaceBody iterationId={activeIter} projectPath={activeProject.path} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
     </div>
   );
@@ -562,7 +616,7 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto">
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
       <ChatPanel
         messages={messages}
         onSend={send}
@@ -763,7 +817,7 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
           <span className="text-muted-foreground">{t('detail.linkage.req')}：</span>{requirement.title}
         </div>
       )}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         <ChatPanel
           messages={messages}
           onSend={send}

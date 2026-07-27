@@ -1,13 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { openDatabase, createRepositories, type Repositories, type DatabaseSync } from '@ai-devflow/persistence';
-import type { AgentRunner, RunnerAgentRunRequest as AgentRunRequest } from '@ai-devflow/agents';
+import type { AgentRunner, AgentRun, RunnerAgentRunRequest as AgentRunRequest } from '@ai-devflow/agents';
 import { Orchestrator } from '../orchestrator.js';
 import type { Task, AgentEvent } from '@ai-devflow/core';
 import { randomId, now } from '@ai-devflow/core';
 import { FakeAgentRunner, isReviewExecution, type TestEventSpec } from './fake-agent-runner.js';
+import { runFromEvents } from './fake-agent-runner.js';
+import { ensureSprintBranch } from '../worktree.js';
 
 let db: DatabaseSync;
 let repos: Repositories;
@@ -340,6 +343,34 @@ describe('orchestrator bounded retry (no infinite loop)', () => {
     expect(`${interaction?.title} ${interaction?.detail}`).toContain('AI 服务');
   }, 8000);
 
+  it('transient_provider failure reverts task to ready (retry entry) instead of awaiting_input', async () => {
+    // AI 服务暂不可用：路由器耗尽后抛 transient_provider。用户无需对话回答，应退回待开发以“启动”按钮重试。
+    const fr = new FakeAgentRunner(() => [{ type: 'error', message: '所有已配置 AI 服务暂时不可用，请稍后重试', recoverable: true, failureKind: 'transient_provider', t: 0 }]);
+    const orch2 = makeOrch(repos, fr, { autoRetry: true, retryPolicy: { maxAttempts: 2, baseDelayMs: 5, maxDelayMs: 20, backoff: true } });
+    const t = makeTask();
+    repos.tasks.insert(t);
+    const failedEvents: string[] = [];
+    orch2.on('task-failed', (e) => failedEvents.push(e.error));
+    await orch2.start(t.id);
+    for (let i = 0; i < 60; i++) {
+      const tk = repos.tasks.get(t.id);
+      if (tk!.status === 'ready' && repos.executions.listByTask(t.id).length >= 2) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const final = repos.tasks.get(t.id)!;
+    // 退回待开发（可重新启动 = 重试入口），而非被卡在待沟通
+    expect(final.status).toBe('ready');
+    // 不创建待处理交互（用户无法通过对话修复 provider 故障）
+    expect(repos.pendingInteractions.getPendingForTask(t.id)).toBeUndefined();
+    // 两条失败执行记录（maxAttempts=2）
+    expect(repos.executions.listByTask(t.id).filter((e) => e.status === 'failed').length).toBe(2);
+    // 发出 task-failed 事件
+    expect(failedEvents.length).toBeGreaterThan(0);
+    // 对话窗口写入一条可见的错误说明（含退回待开发提示）
+    const msgs = repos.taskMessages.listByTask(t.id).map((m) => `${m.kind}:${m.text ?? ''}`);
+    expect(msgs.some((s) => s.includes('待开发') && s.includes('AI 服务暂时不可用'))).toBe(true);
+  }, 8000);
+
   it('worktree creation failure is bounded and logs the reason (no infinite loop)', async () => {
     setup(() => [{ type: 'done', summary: 'ok', t: 0 }]);
     const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'ok', t: 0 }]);
@@ -373,6 +404,23 @@ describe('orchestrator review (testing lane)', () => {
     expect(msgs.some((m) => m.includes('审查结论') && m.includes('通过'))).toBe(true);
     const execs = repos.executions.listByTask(t.id);
     expect(execs.some((e) => (e.summary ?? '').includes('review:pass'))).toBe(true);
+  });
+
+  it('review prompt instructs REVIEW_VERDICT must go into ai_devflow_report_result summary (regression for missing-verdict)', async () => {
+    setup(() => [{ type: 'done', summary: 'dev ok', t: 0 }]);
+    const t = makeTask();
+    repos.tasks.insert(t);
+    await orch.start(t.id);
+    const reviewReq = runner.requests.find((r) => r.role === 'reviewer');
+    expect(reviewReq).toBeDefined();
+    const prompt = reviewReq!.prompt;
+    // 必须明确指示结论标记写入 report_result 的 summary 参数，而非仅作为文本输出。
+    expect(prompt).toContain('ai_devflow_report_result');
+    expect(prompt).toContain('summary');
+    expect(prompt).toMatch(/REVIEW_VERDICT:\s*PASS/);
+    expect(prompt).toMatch(/REVIEW_VERDICT:\s*FAIL/);
+    // 旧提示仅说"最后输出一行结论"会被 agent 当文本输出，导致校验失败；新提示必须区分 summary 参数与聊天文本。
+    expect(prompt.toLowerCase()).toContain('summary 参数');
   });
 
   it('review failure returns to in_progress with feedback, bounded by maxReviewRounds (no infinite loop)', async () => {
@@ -753,5 +801,91 @@ describe('orchestrator confirmation interaction (no regression)', () => {
     await orch.resolveInteraction(t.id, 'ci', 'confirm');
     expect(repos.pendingInteractions.get('ci')!.status).toBe('confirmed');
     expect(repos.tasks.get(t.id)!.status).toBe('in_review');
+  });
+});
+
+/**
+ * 迭代专用分支集成测试（需求 4）：
+ * - 启动任务时 worktree 基于迭代分支 ai-devflow-sprint/v1
+ * - 审查通过后任务分支合并进迭代分支（而非主分支）
+ * 使用真实 git 仓库 + 自定义 runner（在 worktree 内写文件并提交）。
+ */
+function shGit(cwd: string, args: string[]) {
+  execFileSync('git', args, { cwd, stdio: 'ignore' });
+}
+
+/** 自定义 runner：开发阶段在 worktree 内写文件并提交；审查阶段直接 PASS。 */
+class GitCommitRunner implements AgentRunner {
+  requests: AgentRunRequest[] = [];
+  marker: string;
+  constructor(marker: string) { this.marker = marker; }
+  async verifyRuntime(): Promise<{ version: string; entry: string }> { return { version: 'fake', entry: 'fake' }; }
+  async run(req: AgentRunRequest): Promise<AgentRun> {
+    this.requests.push(req);
+    if (req.role === 'reviewer') {
+      return runFromEvents([
+        { type: 'log', level: 'info', text: 'reviewing', t: 0 },
+        { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 },
+      ]);
+    }
+    // 开发阶段：在 worktree（req.cwd）内写文件并提交，模拟 agent 产出代码。
+    writeFileSync(join(req.cwd, this.marker), 'done');
+    shGit(req.cwd, ['add', '.']);
+    shGit(req.cwd, ['commit', '-q', '-m', `feat: ${this.marker}`]);
+    return runFromEvents([{ type: 'done', summary: 'dev ok', t: 0 }]);
+  }
+}
+
+describe('orchestrator iteration sprint branch (需求 4)', () => {
+  let gitRepo: string;
+  let wtBase: string;
+
+  beforeEach(() => {
+    gitRepo = mkdtempSync(join(tmpdir(), 'aidf-sprint-repo-'));
+    wtBase = mkdtempSync(join(tmpdir(), 'aidf-sprint-wt-'));
+    shGit(gitRepo, ['init', '-q', '-b', 'main']);
+    shGit(gitRepo, ['config', 'user.email', 't@t']);
+    shGit(gitRepo, ['config', 'user.name', 't']);
+    writeFileSync(join(gitRepo, 'README.md'), 'init');
+    shGit(gitRepo, ['add', '.']);
+    shGit(gitRepo, ['commit', '-q', '-m', 'init']);
+  });
+
+  afterEach(() => {
+    rmSync(gitRepo, { recursive: true, force: true });
+    rmSync(wtBase, { recursive: true, force: true });
+  });
+
+  it('task worktree bases off sprint branch; review pass merges into sprint (not main)', async () => {
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    r2.projects.insert({ id: 'p', name: 'P', path: gitRepo, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    r2.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    r2.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    // 预创建迭代分支（模拟迭代创建时的分支初始化）
+    await ensureSprintBranch({ repoPath: gitRepo, version: 'v1', baseBranch: 'main' });
+
+    const runner2 = new GitCommitRunner('task-output.txt');
+    const orch2 = new Orchestrator(r2, runner2, { worktreesBaseDir: wtBase, maxConcurrent: 1, autoRetry: false });
+    const t: Task = {
+      id: randomId(), requirementId: 'r', iterationId: 'i', projectId: 'p',
+      title: 'T', description: 'd', status: 'ready', role: 'coder',
+      stages: [{ id: 's1', name: '实现', role: 'coder' }], currentStage: 0,
+      statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0,
+    };
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+
+    expect(r2.tasks.get(t.id)!.status).toBe('in_review');
+    // 迭代分支包含任务产出（合并成功）
+    shGit(gitRepo, ['checkout', '-q', 'ai-devflow-sprint/v1']);
+    expect(existsSync(join(gitRepo, 'task-output.txt'))).toBe(true);
+    // 主分支不包含任务产出（未合并到 main）
+    shGit(gitRepo, ['checkout', '-q', 'main']);
+    expect(existsSync(join(gitRepo, 'task-output.txt'))).toBe(false);
+    // 任务对话记录提到合并到迭代分支
+    const msgs = r2.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('迭代分支'))).toBe(true);
+    db2.close();
   });
 });

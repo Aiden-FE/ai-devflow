@@ -112,7 +112,8 @@ export class PiRunner implements AgentRunner {
         finalExit = { exitCode: 0, ok: true };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        queue.push({ type: 'error', message, recoverable: true, t: Date.now() });
+        const failureKind = err instanceof ProviderExecutionError ? err.kind : undefined;
+        queue.push({ type: 'error', message, recoverable: true, failureKind, t: Date.now() });
         finalExit = { exitCode: 1, ok: false };
       } finally {
         queue.close();

@@ -298,6 +298,30 @@ describe('typed IPC wiring', () => {
     expect(repos.requirements.get('r')!.archived).toBe(true);
   });
 
+  it('iterations.archive gates on all tasks archived, then archives', async () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/non-git', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'r', iterationId: 'it', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'it', projectId: 'p', title: 'T', description: '', status: 'in_progress', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
+    // 有未归档任务 -> 返回 {ok:false}
+    const blocked = await call('iterations', 'archive', 'it') as { ok: false; reasons: string[] };
+    expect(blocked.ok).toBe(false);
+    expect(blocked.reasons.join('；')).toMatch(/未归档/);
+    expect(repos.iterations.get('it')!.status).toBe('active');
+    // 全部归档后 -> 允许（非 git 项目跳过分支合并）
+    repos.tasks.updateStatus('t', 'archived', now());
+    const res = await call('iterations', 'archive', 'it') as { ok: true; merged: boolean; reason?: string };
+    expect(res.ok).toBe(true);
+    expect(repos.iterations.get('it')!.status).toBe('archived');
+    expect(repos.iterations.get('it')!.archivedAt).toBeGreaterThan(0);
+  });
+
+  it('iterations.create rejects duplicate version within a project', async () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/non-git', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    await expect(call('iterations', 'create', 'p', 'I2', 'v1')).rejects.toThrow(/已存在/);
+  });
+
   it('tasks.update edits only ready tasks', async () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });

@@ -1,4 +1,6 @@
-// @ai-devflow/core —— 领域类型契约（纯 TS，零 Node 依赖，Renderer 与 Main 共享）
+// @ai-devflow/core -- 领域类型契约（纯 TS，零 Node 依赖，Renderer 与 Main 共享）
+
+import type { FailureKind } from './provider.js';
 
 /**
  * 任务状态（内部值）。
@@ -58,6 +60,8 @@ export interface Iteration {
   version: string;
   status: 'active' | 'archived';
   createdAt: number;
+  /** 归档时间戳（归档迭代并合并分支后写入）。 */
+  archivedAt?: number;
 }
 
 export interface Requirement {
@@ -109,7 +113,7 @@ export type AgentEvent =
   | { type: 'ask_user'; question: string; context: string; t: number }
   | { type: 'status'; stage: string; detail?: string; t: number }
   | { type: 'done'; summary: string; t: number }
-  | { type: 'error'; message: string; recoverable: boolean; t: number }
+  | { type: 'error'; message: string; recoverable: boolean; failureKind?: FailureKind; t: number }
   | {
       type: 'approval_request';
       /** 需授权的工具名（如 Bash、Write）。 */

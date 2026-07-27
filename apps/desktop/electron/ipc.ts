@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput, AskAnswer, AskTabs } from './api.js';
 import { hasModelConfig } from './provider-store.js';
+import { ensureSprintBranch, mergeWorktreeBranch, sprintBranchName, branchExists } from '@ai-devflow/scheduler';
 import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey } from '@ai-devflow/core';
 import {
   randomId,
@@ -167,12 +168,55 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- 迭代 ----
   ipcMain.handle(channel('iterations', 'list'), (_e, projectId) => repos.iterations.listByProject(projectId));
-  ipcMain.handle(channel('iterations', 'create'), (_e, projectId, name, version) => {
+  ipcMain.handle(channel('iterations', 'create'), async (_e, projectId, name, version) => {
+    // 版本号在项目内唯一（避免迭代分支名冲突）。
+    const existing = repos.iterations.listByProject(projectId);
+    if (existing.some((it) => it.version === version)) {
+      throw new Error(`迭代版本号 ${version} 在该项目下已存在`);
+    }
     const it = { id: randomId(), projectId, name, version, status: 'active' as const, createdAt: now() };
     repos.iterations.insert(it);
+    // 创建迭代专用分支 ai-devflow-sprint/<version>（best-effort：非 Git 项目或已存在不阻断）。
+    const project = repos.projects.get(projectId);
+    if (project) {
+      try {
+        await ensureSprintBranch({ repoPath: project.path, version, baseBranch: project.defaultBranch });
+      } catch (err) {
+        // 分支创建失败不阻断迭代记录创建；任务启动时仍会按需 ensure。
+        console.warn(`[iterations:create] 迭代分支创建失败：${(err as Error).message}`);
+      }
+    }
     return it;
   });
-  ipcMain.handle(channel('iterations', 'archive'), (_e, id) => repos.iterations.archive(id));
+  ipcMain.handle(channel('iterations', 'archive'), async (_e, id): Promise<{ ok: true; merged: boolean; reason?: string } | { ok: false; reasons: string[] }> => {
+    const it = repos.iterations.get(id);
+    if (!it) throw new Error('迭代不存在');
+    const project = repos.projects.get(it.projectId);
+    if (!project) throw new Error('项目不存在');
+    // 门禁：迭代下所有任务必须已归档。
+    const tasks = repos.tasks.listByIteration(id);
+    const unarchived = tasks.filter((t) => t.status !== 'archived');
+    if (unarchived.length > 0) {
+      return { ok: false, reasons: [`还有 ${unarchived.length} 个任务未归档：${unarchived.map((t) => t.title).join('、')}`] };
+    }
+    // 合并迭代分支 -> 主分支（best-effort：非 Git 项目跳过）。
+    let mergeResult: { merged: boolean; reason?: string } = { merged: false, reason: '未执行合并（非 Git 项目或无迭代分支）' };
+    try {
+      if (await branchExists(project.path, sprintBranchName(it.version))) {
+        mergeResult = await mergeWorktreeBranch({
+          repoPath: project.path,
+          branchName: sprintBranchName(it.version),
+          defaultBranch: project.defaultBranch,
+        });
+      } else {
+        mergeResult = { merged: true, reason: '迭代分支不存在，跳过合并' };
+      }
+    } catch (err) {
+      mergeResult = { merged: false, reason: (err as Error).message };
+    }
+    repos.iterations.archive(id, now());
+    return { ok: true, merged: mergeResult.merged, reason: mergeResult.reason };
+  });
 
   // ---- 需求 ----
   ipcMain.handle(channel('requirements', 'list'), (_e, iterationId) => repos.requirements.listByIteration(iterationId));

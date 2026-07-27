@@ -56,6 +56,7 @@ function mapIteration(r: Record<string, unknown>): Iteration {
     version: r.version as string,
     status: r.status as 'active' | 'archived',
     createdAt: r.created_at as number,
+    archivedAt: (r.archived_at as number | null) ?? undefined,
   };
 }
 
@@ -304,7 +305,7 @@ export interface IterationsRepo {
   insert(i: Iteration): void;
   get(id: string): Iteration | undefined;
   listByProject(projectId: string): Iteration[];
-  archive(id: string): void;
+  archive(id: string, at: number): void;
 }
 function iterationsRepo(db: DatabaseSync): IterationsRepo {
   return {
@@ -320,8 +321,8 @@ function iterationsRepo(db: DatabaseSync): IterationsRepo {
     listByProject(projectId) {
       return (db.prepare('SELECT * FROM iterations WHERE project_id=? ORDER BY created_at DESC').all(projectId) as Record<string, unknown>[]).map(mapIteration);
     },
-    archive(id) {
-      db.prepare("UPDATE iterations SET status='archived' WHERE id=?").run(id);
+    archive(id, at) {
+      db.prepare("UPDATE iterations SET status='archived', archived_at=? WHERE id=?").run(at, id);
     },
   };
 }

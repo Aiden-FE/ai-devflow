@@ -26,7 +26,7 @@ import {
 } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
 import type { AgentRunner, AgentRun } from '@ai-devflow/agents';
-import { createWorktree, removeWorktree, mergeWorktreeBranch, WorktreeError } from './worktree.js';
+import { createWorktree, removeWorktree, mergeWorktreeBranch, mergeBranchInto, ensureSprintBranch, sprintBranchName, branchExists, WorktreeError } from './worktree.js';
 import { Semaphore } from './semaphore.js';
 
 export interface OrchestratorOptions {
@@ -94,6 +94,18 @@ interface RunConsumption {
   interacted: boolean;
   output: string;
   error?: string;
+  failureKind?: import('@ai-devflow/core').FailureKind;
+}
+
+/**
+ * 包装 Agent 运行失败的错误，携带 failureKind（来自 error 事件）供 handleFailure 分流。
+ * 与 ProviderExecutionError 不同：这里是事件流上离线的错误描述，而非原始异常实例。
+ */
+class TaskRunError extends Error {
+  constructor(message: string, readonly failureKind?: import('@ai-devflow/core').FailureKind) {
+    super(message);
+    this.name = 'TaskRunError';
+  }
 }
 
 /** 审查 Agent 必须覆盖的基本规则维度（随审查结论一并持久化）。 */
@@ -226,12 +238,14 @@ export class Orchestrator extends EventEmitter {
     let worktreePath = task.worktreePath;
     if (!worktreePath) {
       try {
-        this.log(execution, 'info', `创建 Git worktree（基础分支 ${project.defaultBranch}）…`);
+        // 迭代激活时基于迭代专用分支开发，否则回退项目默认分支。
+        const base = await this.resolveSprintBase(task, project);
+        this.log(execution, 'info', `创建 Git worktree（基础分支 ${base}）…`);
         const handle = await createWorktree({
           repoPath: project.path,
           baseDir: this.opts.worktreesBaseDir,
           id: task.id,
-          baseBranch: project.defaultBranch,
+          baseBranch: base,
         });
         worktreePath = handle.path;
         this.repos.tasks.setWorktree(task.id, worktreePath);
@@ -282,7 +296,7 @@ export class Orchestrator extends EventEmitter {
       try {
         const consumed = await this.consumeRun(task, execution, run, entry, stage, i);
         if (consumed.interacted) return;
-        if (consumed.error) throw new Error(consumed.error);
+        if (consumed.error) throw new TaskRunError(consumed.error, consumed.failureKind);
         if (!consumed.done) {
           // 阶段未正常完成（受控停止或异常）
           if (entry.stopReason) {
@@ -318,22 +332,82 @@ export class Orchestrator extends EventEmitter {
    * - 通过 -> 合并特性分支到默认分支 -> in_review（待验收），归档仍需人工验收（tasks.accept）。
    * - 不通过 -> 退回 in_progress 并携反馈从头返工（有界，超过 maxReviewRounds 停下等人工介入）。
    */
+  /**
+   * 解析任务 worktree 的基础分支：迭代激活时为迭代专用分支（确保存在），否则为项目默认分支。
+   * 迭代分支缺失或非 Git 项目时降级到默认分支，保证任务仍可启动。
+   */
+  private async resolveSprintBase(task: Task, project: Project): Promise<string> {
+    const sprint = await this.resolveSprintTarget(task);
+    if (sprint) return sprint;
+    return project.defaultBranch;
+  }
+
+  /**
+   * 解析迭代专用分支名（迭代激活且分支可用时返回，否则 undefined）。
+   * 分支不存在则按需 ensure（从默认分支创建），ensure 失败返回 undefined 降级。
+   */
+  private async resolveSprintTarget(task: Task): Promise<string | undefined> {
+    const iteration = this.repos.iterations.get(task.iterationId);
+    if (!iteration || iteration.status !== 'active') return undefined;
+    const branch = sprintBranchName(iteration.version);
+    try {
+      if (!(await branchExists(this.projectPath(task), branch))) {
+        await ensureSprintBranch({
+          repoPath: this.projectPath(task),
+          version: iteration.version,
+          baseBranch: this.projectDefaultBranch(task),
+        });
+      }
+      return branch;
+    } catch {
+      // 非Git项目或分支创建失败：降级到 undefined，调用方回退默认分支。
+      return undefined;
+    }
+  }
+
+  /** 任务所属项目的仓库路径。 */
+  private projectPath(task: Task): string {
+    const project = this.repos.projects.get(task.projectId);
+    return project?.path ?? '';
+  }
+
+  /** 任务所属项目的默认分支（缺失时回退 main）。 */
+  private projectDefaultBranch(task: Task): string {
+    const project = this.repos.projects.get(task.projectId);
+    return project?.defaultBranch ?? 'main';
+  }
+
   private async reviewAndFinalize(task: Task, project: Project, entry: ActivePipeline): Promise<void> {
     const verdict = await this.runReview(task, project, entry);
     // 受控停止（待沟通/取消）：任务状态由 pause()/cancel() 落定，此处直接收尾。
     if (!verdict) return;
     if (verdict.pass) {
       const branchName = `ai-devflow/${task.id}`;
-      const mergeRes = await mergeWorktreeBranch({
-        repoPath: project.path,
-        branchName,
-        defaultBranch: project.defaultBranch,
-      });
+      // 迭代激活时合并任务分支到迭代分支，否则合并到项目默认分支。
+      const sprintBranch = await this.resolveSprintTarget(task);
       const latest = this.repos.executions.getLatest(task.id);
-      if (mergeRes.merged) {
-        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
+      if (sprintBranch) {
+        const mergeRes = await mergeBranchInto({
+          repoPath: project.path,
+          into: sprintBranch,
+          source: branchName,
+        });
+        if (mergeRes.merged) {
+          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到迭代分支 ${sprintBranch}` });
+        } else {
+          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并到迭代分支：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
+        }
       } else {
-        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
+        const mergeRes = await mergeWorktreeBranch({
+          repoPath: project.path,
+          branchName,
+          defaultBranch: project.defaultBranch,
+        });
+        if (mergeRes.merged) {
+          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
+        } else {
+          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
+        }
       }
       // 审查通过才进入待验收（门禁 reviewPassed 强制，拒绝拖拽/IPC 绕过）。
       this.transition(task, 'in_review', { reviewPassed: true });
@@ -349,6 +423,10 @@ export class Orchestrator extends EventEmitter {
     if (task.retryCount >= maxRounds) {
       // 有界：避免审查-返工无限循环。停在开发中并给出可见错误，等待人工介入。
       this.transition(task, 'in_progress');
+      this.recordMessage(task, this.repos.executions.getLatest(task.id), {
+        role: 'system', kind: 'error',
+        text: `审查 ${maxRounds} 轮仍不通过，已停止自动返工。任务保留在“开发中”，可点击“重新启动”携反馈再试一轮。最后反馈：${feedback}`,
+      });
       this.emit('task-error', {
         taskId: task.id,
         error: `审查 ${maxRounds} 轮仍不通过，已停止自动返工，请人工介入。最后反馈：${feedback}`,
@@ -452,6 +530,7 @@ export class Orchestrator extends EventEmitter {
     let interacted = false;
     let output = '';
     let error: string | undefined;
+    let failureKind: import('@ai-devflow/core').FailureKind | undefined;
     for await (const ev of run.events) {
       if (entry.stopReason) {
         await run.cancel();
@@ -465,6 +544,7 @@ export class Orchestrator extends EventEmitter {
         output += `\n${ev.text}`;
       } else if (ev.type === 'error') {
         error = ev.message;
+        failureKind = ev.failureKind;
       } else if (ev.type === 'ask_user' || ev.type === 'approval_request') {
         interacted = true;
         this.recordCheckpoint(task, stage, stageIndex, ev);
@@ -482,7 +562,7 @@ export class Orchestrator extends EventEmitter {
         break;
       }
     }
-    return { done, interacted, output, error };
+    return { done, interacted, output, error, failureKind };
   }
 
   /** 解析审查 Agent 输出中的结论标记；无明确 PASS 时保守按不通过（绝不绕过审查进入待验收）。 */
@@ -513,7 +593,11 @@ export class Orchestrator extends EventEmitter {
       `【任务目标】${task.title}`,
       `【任务描述】${task.description || '(无)'}`,
       '【审查规则】请逐项检查：1) 需求/验收标准是否覆盖；2) 测试/构建/lint 是否通过；3) 是否引入明显回归；4) 是否存在安全问题；5) 是否存在与任务无关的改动。',
-      '【输出要求】最后必须单独输出一行结论，格式为：REVIEW_VERDICT: PASS 或 REVIEW_VERDICT: FAIL: <不通过原因与修复建议>。',
+      '【结论输出要求（关键）】审查完成后，你必须调用工具 ai_devflow_report_result 上报结果，其 summary 参数必须包含审查结论标记：',
+      '  - 通过：summary 中包含 `REVIEW_VERDICT: PASS`（例如 `审查通过 REVIEW_VERDICT: PASS`）',
+      '  - 不通过：summary 中包含 `REVIEW_VERDICT: FAIL: <不通过原因与修复建议>`',
+      '注意：结论标记必须出现在 ai_devflow_report_result 的 summary 参数中，而不是仅在对话文本里输出；仅作为聊天文本输出而 summary 不含标记会被判定为审查无效（缺少 REVIEW_VERDICT）。',
+      'reviewer 不得修改任何文件（changedFiles 必须为空）；verification 必须填写你实际执行的审查证据（如 `git diff` 查看的改动摘要、跑过的检查命令与结果）。',
     ].join('\n');
   }
 
@@ -899,28 +983,53 @@ export class Orchestrator extends EventEmitter {
       if (latest) this.log(latest, 'warn', `将在 ${decision.delayMs}ms 后重试（第 ${attempt + 1} 次）`);
       this.emit('task-retry', { taskId: task.id, delayMs: decision.delayMs, reason: decision.reason });
       this.scheduleRetry(task.id, decision.delayMs, generation);
-    } else {
-      if (this.autoRetry) {
-        const safeDetail = redactText(err.message).slice(0, 500);
-        const pausedFrom = task.status;
-        this.transition(task, 'awaiting_input');
-        task.pausedFrom = pausedFrom;
-        this.repos.tasks.update(task);
-        const title = 'AI 服务多次失败，请检查提供商配置后重试';
-        const msg = this.recordMessage(task, latest, { role: 'system', kind: 'clarification_request', text: title });
-        this.createInteraction(task, 'clarification', title, {
-          messageId: msg.id,
-          detail: `自动重试预算已耗尽。脱敏诊断：${safeDetail}`,
-        });
-        if (latest) this.log(latest, 'error', `已达最大重试次数，任务等待人工处理：${safeDetail}`);
-      } else {
-        // 未启用自动重试时退回 ready 供手动重试。
-        if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
-          this.transition(task, 'ready');
-        }
-      }
-      this.emit('task-failed', { taskId: task.id, error: err.message });
+      return;
     }
+    // 重试预算耗尽后的终态处理：按失败类型分流。
+    const isTransientProviderFailure =
+      err instanceof TaskRunError && err.failureKind === 'transient_provider';
+    if (isTransientProviderFailure) {
+      // AI 服务暂不可用：这是环境/配置问题，用户无需也无法通过对话回答来修复。
+      // 退回待开发（ready），以“启动”按钮作为显式重试入口；不进待沟通泳道，避免任务被卡死在需回答状态。
+      // 同时写入一条可见的错误说明，指引用户检查提供商配置后再启动。
+      const safeDetail = redactText(err.message).slice(0, 500);
+      this.recordMessage(task, latest, {
+        role: 'system', kind: 'error',
+        text: `AI 服务暂时不可用，任务已退回待开发。请检查 AI 服务商配置后重新启动：${safeDetail}`,
+      });
+      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
+        this.transition(task, 'ready');
+      } else {
+        // 门禁不满足（如无可用提供商）：仍尽力退回 ready，保留任务可见可启动。
+        this.repos.tasks.updateStatus(task.id, 'ready', now());
+        task.status = 'ready';
+        task.statusChangedAt = now();
+        this.emit('task-status', { taskId: task.id, status: 'ready' });
+      }
+      if (latest) this.log(latest, 'error', `AI 服务失败已耗尽重试，退回待开发：${safeDetail}`);
+      this.emit('task-failed', { taskId: task.id, error: err.message });
+      return;
+    }
+    if (this.autoRetry) {
+      const safeDetail = redactText(err.message).slice(0, 500);
+      const pausedFrom = task.status;
+      this.transition(task, 'awaiting_input');
+      task.pausedFrom = pausedFrom;
+      this.repos.tasks.update(task);
+      const title = 'AI 服务多次失败，请检查提供商配置后重试';
+      const msg = this.recordMessage(task, latest, { role: 'system', kind: 'clarification_request', text: title });
+      this.createInteraction(task, 'clarification', title, {
+        messageId: msg.id,
+        detail: `自动重试预算已耗尽。脱敏诊断：${safeDetail}`,
+      });
+      if (latest) this.log(latest, 'error', `已达最大重试次数，任务等待人工处理：${safeDetail}`);
+    } else {
+      // 未启用自动重试时退回 ready 供手动重试。
+      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
+        this.transition(task, 'ready');
+      }
+    }
+    this.emit('task-failed', { taskId: task.id, error: err.message });
   }
 
   private markExecution(exec: ExecutionRecord, status: ExecutionRecord['status'], summary: string): void {

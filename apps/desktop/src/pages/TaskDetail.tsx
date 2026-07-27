@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, StatusBadge, fmtTime, useStream, EmptyState } from '../lib.js';
 import { useT } from '../i18n/index.js';
-import { useStickToBottom } from '../hooks/useStickToBottom.js';
-import { NewMessagesButton } from '../components/NewMessagesButton.js';
+import { ChatThread, type ChatItem } from '../components/ChatThread.js';
 import { Button } from '../components/ui/button.js';
 import { Input } from '../components/ui/input.js';
 import { Label } from '../components/ui/label.js';
@@ -29,6 +28,8 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
   const [interactions, setInteractions] = useState<PendingInteraction[]>([]);
   const [requirement, setRequirement] = useState<Requirement | undefined>();
   const [siblings, setSiblings] = useState<Task[]>([]);
+  // 同级子任务默认收起（与 Workspace ReqItem 一致），避免挤压主内容。
+  const [siblingsCollapsed, setSiblingsCollapsed] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -71,9 +72,6 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
       load(); onChanged();
     }
   });
-
-  // 对话窗口粘底滚动：用户上滚越过阈值则暂停并提示新消息。
-  const stick = useStickToBottom([messages, interactions]);
 
   const act = async (fn: () => Promise<void>) => {
     setBusy(true); setError(undefined);
@@ -135,15 +133,25 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
           <h4 className="mt-0 text-xs font-semibold text-muted-foreground">{t('detail.linkage.req')}</h4>
           <div className="break-words text-sm">{requirement.title}{requirement.archived && <Badge variant="success" className="ml-2 text-[10px]">{t('ws.archived')}</Badge>}</div>
           <Separator className="my-2" />
-          <h4 className="text-xs font-semibold text-muted-foreground">{t('detail.linkage.siblings')} ({siblings.length})</h4>
-          <div className="mt-1 flex flex-col gap-1">
-            {siblings.length === 0 ? <span className="text-xs text-muted-foreground">{t('common.empty')}</span> : siblings.map((s) => (
-              <div key={s.id} className="flex min-w-0 items-center gap-2 text-xs">
-                <StatusBadge status={s.status} />
-                <span className="truncate">{s.title}</span>
-              </div>
-            ))}
-          </div>
+          <Separator className="my-2" />
+          <button
+            className="flex w-full items-center gap-1.5 text-xs font-semibold text-muted-foreground"
+            onClick={() => setSiblingsCollapsed((c) => !c)}
+            aria-expanded={!siblingsCollapsed}
+          >
+            {siblingsCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+            {t('detail.linkage.siblings')} ({siblings.length})
+          </button>
+          {!siblingsCollapsed && (
+            <div className="mt-1 flex flex-col gap-1">
+              {siblings.length === 0 ? <span className="text-xs text-muted-foreground">{t('common.empty')}</span> : siblings.map((s) => (
+                <div key={s.id} className="flex min-w-0 items-center gap-2 text-xs">
+                  <StatusBadge status={s.status} />
+                  <span className="truncate">{s.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -168,27 +176,26 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
         </div>
       )}
 
-      {/* 对话窗口：消息气泡 + 工具调用折叠 + 自动滚动；底部固定输入区（仅 awaiting_input 出现） */}
+      {/* 对话窗口：统一聊天界面（消息气泡 + 工具卡片 + 自动滚动）；底部 Composer 仅 awaiting_input 出现 */}
       <div className="flex min-w-0 flex-col rounded-lg border border-border bg-card p-3">
         <h4 className="mt-0 text-sm font-semibold">{t('detail.conversation')}</h4>
-        <div ref={stick.containerRef} className="relative mt-1 max-h-[52vh] min-h-[160px] flex-1 overflow-y-auto rounded p-2 text-xs scrollbar-thin" style={{ backgroundColor: 'var(--console-bg)', color: 'var(--console-fg)' }}>
-          <NewMessagesButton count={stick.paused ? stick.unreadCount : 0} onResume={stick.resume} />
-          {messages.length === 0
-            ? <span className="text-muted-foreground">{t('detail.conversation.empty')}</span>
-            : messages.map((m) => <MessageBubble key={m.id} m={m} />)}
-        </div>
-        {/* 固定底部输入区：仅在 awaiting_input（手动暂停/等待澄清/授权/确认）时出现 */}
-        {task.status === 'awaiting_input' && (
-          <Composer
-            interaction={pendingInteraction}
-            legacyPending={pending}
-            busy={busy}
-            onResolve={(response) => act(async () => {
-              if (pendingInteraction) await api.tasks.resolveInteraction(task.id, pendingInteraction.id, response);
-            })}
-            onResume={(ans) => act(async () => { await api.tasks.resume(task.id, ans); })}
-          />
-        )}
+        <ChatThread
+          className="mt-1"
+          items={messages.map(taskMessageToItem)}
+          placeholder={t('detail.conversation.empty')}
+          thinkingLabel={t('detail.conversation.empty')}
+          footer={task.status === 'awaiting_input' ? (
+            <Composer
+              interaction={pendingInteraction}
+              legacyPending={pending}
+              busy={busy}
+              onResolve={(response) => act(async () => {
+                if (pendingInteraction) await api.tasks.resolveInteraction(task.id, pendingInteraction.id, response);
+              })}
+              onResume={(ans) => act(async () => { await api.tasks.resume(task.id, ans); })}
+            />
+          ) : undefined}
+        />
       </div>
 
       {/* 执行记录：可折叠区域 */}
@@ -256,70 +263,19 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
   );
 }
 
-/** 单条消息气泡：按角色/种类渲染；工具调用可折叠，长内容局部滚动。 */
-function MessageBubble({ m }: { m: TaskMessage }): React.ReactElement {
-  const t = useT();
-  const time = new Date(m.t).toLocaleTimeString();
-  const roleLabel = t(`detail.msg.${m.role}`);
-  if (m.kind === 'error') {
-    return (
-      <div className="my-1.5 flex justify-center">
-        <span className="max-w-[90%] min-w-0 break-all rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-destructive">⚠ {m.text} <span className="opacity-60">{time}</span></span>
-      </div>
-    );
+/** TaskMessage -> 统一 ChatItem 映射：工具调用/结果归并为 tool 卡片（含可展开入参与输出）。 */
+function taskMessageToItem(m: TaskMessage): ChatItem {
+  const base = { id: m.id };
+  if (m.kind === 'error') return { ...base, type: 'error', text: m.text ?? '' };
+  if (m.kind === 'status') return { ...base, type: 'status', text: m.text ?? '' };
+  if (m.kind === 'tool_call') {
+    return { ...base, type: 'tool', toolName: m.toolName, title: m.text, input: m.toolInput };
   }
-  if (m.kind === 'status' || m.role === 'system') {
-    return (
-      <div className="my-1.5 flex justify-center">
-        <span className="max-w-[90%] min-w-0 break-all rounded-md bg-secondary/60 px-2 py-1 text-muted-foreground">{m.text} <span className="opacity-60">{time}</span></span>
-      </div>
-    );
-  }
-  if (m.kind === 'tool_call') return <ToolCallBubble m={m} time={time} roleLabel={roleLabel} />;
   if (m.kind === 'tool_result' || m.role === 'tool') {
-    return (
-      <div className="my-1 min-w-0">
-        <div className="flex items-center gap-1.5 text-muted-foreground"><span className="font-mono text-[10px]">{roleLabel}</span><span className="opacity-60">{time}</span></div>
-        <div className={`mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border px-2 py-1 font-mono ${m.isError ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border bg-secondary/40'}`}>{m.toolResult ?? m.text}</div>
-      </div>
-    );
+    return { ...base, type: 'tool', toolName: m.toolName, output: m.toolResult ?? m.text ?? '', isError: m.isError };
   }
-  // user/assistant 文本与请求类消息
-  const isUser = m.role === 'user';
-  const accent = m.kind === 'clarification_request' ? 'border-[var(--color-lane-awaiting)]'
-    : m.kind === 'approval_request' ? 'border-warn'
-    : m.kind === 'confirmation_request' ? 'border-primary'
-    : 'border-border';
-  return (
-    <div className={`my-1.5 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[85%] min-w-0 rounded-md border px-2 py-1 ${accent} ${isUser ? 'bg-primary text-primary-foreground' : 'bg-secondary'}`}>
-        <div className="flex items-center gap-1.5 text-[10px] opacity-70"><span>{roleLabel}</span><span>{time}</span>
-          {m.kind === 'clarification_request' && <MessageCircleQuestion className="h-3 w-3" />}
-          {m.kind === 'approval_request' && <ShieldQuestion className="h-3 w-3" />}
-          {m.kind === 'confirmation_request' && <AlertTriangle className="h-3 w-3" />}
-        </div>
-        <div className="max-h-60 overflow-auto whitespace-pre-wrap break-words">{m.text}{m.toolName ? <span className="font-mono opacity-70"> · {m.toolName}</span> : null}</div>
-      </div>
-    </div>
-  );
-}
-
-/** 工具调用气泡：默认折叠，展开查看入参。 */
-function ToolCallBubble({ m, time, roleLabel }: { m: TaskMessage; time: string; roleLabel: string }): React.ReactElement {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="my-1 min-w-0">
-      <button className="flex w-full items-center gap-1.5 text-left text-muted-foreground" onClick={() => setOpen((v) => !v)}>
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        <span className="font-mono text-[10px]">{roleLabel} · {m.toolName ?? 'tool'}</span>
-        <span className="truncate opacity-70">{m.text}</span>
-        <span className="ml-auto opacity-60">{time}</span>
-      </button>
-      {open && m.toolInput && (
-        <div className="mt-0.5 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-secondary/40 px-2 py-1 font-mono">{m.toolInput}</div>
-      )}
-    </div>
-  );
+  // text / clarification_request / approval_request / confirmation_request 统一按消息气泡渲染。
+  return { ...base, type: 'message', role: m.role, text: m.text ?? '' };
 }
 
 /** 固定在对话底部的输入/操作区：澄清→文本回复并恢复；授权/确认→明确按钮。 */

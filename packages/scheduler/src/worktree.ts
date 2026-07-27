@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm, access } from 'node:fs/promises';
+import { mkdir, rm, access, lstat, symlink } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const exec = promisify(execFile);
@@ -136,7 +137,48 @@ export async function createWorktree(opts: {
     // 不存在，正常
   }
   await git(opts.repoPath, ['worktree', 'add', '-b', branch, wtPath, base]);
+  // 共享主仓库的 node_modules：worktree 是独立工作目录，默认不含 node_modules，
+  // 而 Agent 执行 npm/pnpm 脚本（test/typecheck/lint）需要依赖。安全策略禁止在 worktree 内安装，
+  // 主仓库手动安装的 node_modules 也不会进入 worktree。这里把主仓库的 node_modules 链接进 worktree，
+  // 让 Agent 直接复用主仓库已安装的依赖；非 Node 项目（无 node_modules）则跳过。
+  await linkNodeModules(opts.repoPath, wtPath);
   return { path: wtPath, branch };
+}
+
+/**
+ * 把主仓库的 node_modules 链接到 worktree，使 Agent 复用主仓库已安装的依赖。
+ * - 主仓库无 node_modules 时跳过（非 Node 项目或尚未安装）。
+ * - worktree 内已存在 node_modules（可能是目录或链接）时不覆盖。
+ * - 链接主仓库的绝对路径：pnpm 的内部软链是相对 node_modules 的，整体复用即可解析。
+ * - 失败不抛错：依赖缺失只影响 Agent 跑脚本，不应阻断 worktree 创建（用户可后续手动安装）。
+ */
+async function linkNodeModules(repoPath: string, wtPath: string): Promise<void> {
+  const src = join(repoPath, 'node_modules');
+  if (!existsSync(src)) return;
+  const dest = join(wtPath, 'node_modules');
+  try {
+    // worktree 刚由 git 创建，node_modules 一般不存在；保险起见检查并跳过。
+    await access(dest).then(
+      () => { /* 已存在，不覆盖 */ },
+      () => symlink(src, dest, process.platform === 'win32' ? 'junction' : 'dir'),
+    );
+  } catch {
+    // 符号链接失败（权限/平台限制）：忽略，Agent 仍可执行非依赖类工作。
+  }
+}
+
+/**
+ * 移除 worktree 中的 node_modules 链接（若为符号链接），避免 removeWorktree 误删主仓库依赖。
+ * 普通目录 node_modules 不处理（非本函数创建）。
+ */
+async function unlinkNodeModules(wtPath: string): Promise<void> {
+  const dest = join(wtPath, 'node_modules');
+  try {
+    const st = await lstat(dest);
+    if (st.isSymbolicLink()) await rm(dest, { force: true });
+  } catch {
+    // 不存在或无法判定：忽略。
+  }
 }
 
 /**
@@ -174,6 +216,8 @@ export async function removeWorktree(opts: {
   branchName?: string;
   keepBranch?: boolean;
 }): Promise<void> {
+  // 先移除 node_modules 符号链接：git worktree remove 可能因符号链接指向主仓库而拒绝或误删。
+  await unlinkNodeModules(opts.worktreePath);
   try {
     await git(opts.repoPath, ['worktree', 'remove', '--force', opts.worktreePath]);
   } catch {
@@ -183,6 +227,106 @@ export async function removeWorktree(opts: {
   await git(opts.repoPath, ['worktree', 'prune']).catch(() => {});
   if (opts.branchName && !opts.keepBranch) {
     await git(opts.repoPath, ['branch', '-D', opts.branchName]).catch(() => {});
+  }
+}
+
+/** 清洗版本号为合法 git 分支名片段：保留字母数字 . _ -，其余替换为 -，去首尾分隔符。 */
+export function sanitizeBranchSegment(version: string): string {
+  const cleaned = version.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
+  return cleaned || 'unnamed';
+}
+
+/** 迭代专用分支名：ai-devflow-sprint/<version>。 */
+export function sprintBranchName(version: string): string {
+  return `ai-devflow-sprint/${sanitizeBranchSegment(version)}`;
+}
+
+/** 检查本地分支是否存在。 */
+export async function branchExists(repoPath: string, name: string): Promise<boolean> {
+  try {
+    await git(repoPath, ['rev-parse', '--verify', `refs/heads/${name}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 确保迭代分支存在：已存在则复用（不动其指向），不存在则从 baseBranch 创建。
+ * 用于迭代创建与任务启动两处，幂等。
+ */
+export async function ensureSprintBranch(opts: {
+  repoPath: string;
+  version: string;
+  baseBranch: string;
+}): Promise<{ branch: string; created: boolean }> {
+  const branch = sprintBranchName(opts.version);
+  if (await branchExists(opts.repoPath, branch)) {
+    return { branch, created: false };
+  }
+  const base = await resolveBase(opts.repoPath, opts.baseBranch);
+  await git(opts.repoPath, ['branch', branch, base]);
+  return { branch, created: true };
+}
+
+/**
+ * 把 source 分支合并到 into 分支（在项目主仓库执行，主工作区无需切到 into）。
+ * - 快进（into 是 source 的祖先）：`git branch -f <into> <source>` 原子更新引用，无需 checkout。
+ * - 非快进：临时 worktree 检出 into，`merge --no-ff` source，再移除临时 worktree。
+ * - 冲突：中止合并、清理临时 worktree，返回未合并原因。
+ * 用于任务分支 -> 迭代分支的合并（主工作区停在 defaultBranch，不能直接 checkout 迭代分支）。
+ */
+export async function mergeBranchInto(opts: {
+  repoPath: string;
+  into: string;
+  source: string;
+}): Promise<{ merged: boolean; reason?: string }> {
+  if (!(await branchExists(opts.repoPath, opts.into))) {
+    return { merged: false, reason: `目标分支不存在：${opts.into}` };
+  }
+  if (!(await branchExists(opts.repoPath, opts.source))) {
+    return { merged: false, reason: `源分支不存在：${opts.source}` };
+  }
+  // 快进判定：into 是 source 的祖先 -> 直接 branch -f 移动 into 指向 source。
+  let isAncestor = false;
+  try {
+    await exec('git', ['merge-base', '--is-ancestor', opts.into, opts.source], { cwd: opts.repoPath });
+    isAncestor = true;
+  } catch {
+    isAncestor = false;
+  }
+  if (isAncestor) {
+    try {
+      await git(opts.repoPath, ['branch', '-f', opts.into, opts.source]);
+      return { merged: true };
+    } catch (err) {
+      const e = err as WorktreeError;
+      return { merged: false, reason: e.hint ? `${e.message}（${e.hint}）` : e.message };
+    }
+  }
+  // 非快进：临时 worktree 检出 into 再合并 source。
+  const tmpPath = join(opts.repoPath, '..', `.ai-devflow-merge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  try {
+    await git(opts.repoPath, ['worktree', 'add', '--detach', tmpPath, opts.into]);
+    try {
+      await git(tmpPath, ['merge', '--no-ff', '-m', `merge: ${opts.source} into ${opts.into}`, opts.source]);
+      // 合并成功后 into 的工作区 HEAD 即合并结果，用 branch -f 把 into 指向该提交。
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: tmpPath });
+      const mergedCommit = stdout.trim();
+      await git(opts.repoPath, ['branch', '-f', opts.into, mergedCommit]);
+      return { merged: true };
+    } catch (err) {
+      await git(tmpPath, ['merge', '--abort']).catch(() => {});
+      const e = err as WorktreeError;
+      return { merged: false, reason: e.hint ? `${e.message}（${e.hint}）` : e.message };
+    }
+  } catch (err) {
+    const e = err as WorktreeError;
+    return { merged: false, reason: `无法检出 ${opts.into} 进行合并：${e.hint ? e.message + '（' + e.hint + '）' : e.message}` };
+  } finally {
+    await git(opts.repoPath, ['worktree', 'remove', '--force', tmpPath]).catch(() => {});
+    await rm(tmpPath, { recursive: true, force: true }).catch(() => {});
+    await git(opts.repoPath, ['worktree', 'prune']).catch(() => {});
   }
 }
 
