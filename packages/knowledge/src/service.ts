@@ -12,6 +12,7 @@ import {
 import { loadKnowledgeCatalog, type KnowledgeCatalog } from './catalog.js';
 import { auditKnowledgeLayout, type KnowledgeGitProbe } from './audit.js';
 import { planKnowledgeRetrieval, type RetrievalPlanInput } from './retrieval.js';
+import { verifyIterationChangelog, type VerifyChangelogInput } from './changelog.js';
 
 export class ProjectKnowledgeService {
   /** 初始化 docs/knowledge 骨架（幂等）。 */
@@ -92,6 +93,18 @@ export class ProjectKnowledgeService {
       catalog: Array.from(catalog.documents.values()),
       budget: input.budget,
       createdAt: input.createdAt,
+    });
+  }
+
+  /** 校验迭代 CHANGELOG 覆盖与 Git 跟踪。 */
+  async verifyIterationChangelog(input: Omit<VerifyChangelogInput, 'tracked'> & { git: KnowledgeGitProbe }): Promise<import('@ai-devflow/core').IterationChangelogVerification> {
+    return verifyIterationChangelog({
+      repoPath: input.repoPath,
+      version: input.version,
+      iterationId: input.iterationId,
+      expectedTaskIds: input.expectedTaskIds,
+      tracked: input.git,
+      verifiedAt: input.verifiedAt,
     });
   }
 }

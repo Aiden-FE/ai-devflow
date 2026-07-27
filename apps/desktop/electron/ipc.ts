@@ -200,6 +200,13 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     return it;
   });
   ipcMain.handle(channel('iterations', 'archive'), async (_e, id): Promise<{ ok: true; merged: boolean; reason?: string } | { ok: false; reasons: string[] }> => {
+    // 严格归档：委托给知识协调器（CHANGELOG 聚合校验 + sprint 合并 + 归档）。失败时保持迭代 active。
+    if (services.knowledge) {
+      const result = await services.knowledge.archiveIteration(id);
+      if (result.ok) return { ok: true, merged: true, reason: '迭代已归档' };
+      return { ok: false, reasons: result.reasons };
+    }
+    // 无知识协调器时回退到原有逻辑（保持向后兼容）。
     const it = repos.iterations.get(id);
     if (!it) throw new Error('迭代不存在');
     const project = repos.projects.get(it.projectId);

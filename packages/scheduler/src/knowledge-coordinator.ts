@@ -762,6 +762,120 @@ export class KnowledgeCoordinator extends EventEmitter {
     });
   }
 
+  /** 获取迭代 CHANGELOG 校验结果（从最近迭代运行 + findings 重建）。 */
+  async getIterationVerification(iterationId: string): Promise<import('@ai-devflow/core').IterationChangelogVerification> {
+    const latest = this.opts.repos.knowledgeRuns.getLatestByIteration(iterationId, 'iteration_changelog');
+    if (!latest) {
+      return {
+        iterationId,
+        state: 'pending',
+        coveredTaskIds: [],
+        missingTaskIds: [],
+        changedPaths: [],
+        findings: [],
+      };
+    }
+    const result = JSON.parse(latest.resultJson) as { coveredTaskIds?: string[]; missingTaskIds?: string[]; changedPaths?: string[]; verifiedAt?: number; state?: import('@ai-devflow/core').IterationChangelogVerification['state'] };
+    const findings = this.opts.repos.knowledgeFindings.listByRun(latest.id).map((f) => ({
+      id: f.id, severity: f.severity, code: f.code, path: f.path, knowledgeId: f.knowledgeId,
+      message: f.message, evidence: JSON.parse(f.evidenceJson) as string[],
+    }));
+    return {
+      iterationId,
+      state: result.state ?? 'pending',
+      coveredTaskIds: result.coveredTaskIds ?? [],
+      missingTaskIds: result.missingTaskIds ?? [],
+      changedPaths: result.changedPaths ?? [],
+      findings,
+      verifiedAt: result.verifiedAt,
+    };
+  }
+
+  /** 严格迭代归档：聚合 CHANGELOG -> 校验 -> 合并 sprint 分支 -> 仅在全部成功后归档数据库行。 */
+  async archiveIteration(iterationId: string): Promise<{ ok: true } | { ok: false; reasons: string[]; verification?: import('@ai-devflow/core').IterationChangelogVerification }> {
+    return this.iterationLocks.run(`archive:${iterationId}`, async () => {
+      const iteration = this.opts.repos.iterations.get(iterationId);
+      if (!iteration) throw new Error(`迭代不存在：${iterationId}`);
+      const project = this.opts.repos.projects.get(iteration.projectId);
+      if (!project) throw new Error(`项目不存在：${iteration.projectId}`);
+      const tasks = this.opts.repos.tasks.listByIteration(iterationId);
+      const reasons: string[] = [];
+
+      // 1. 所有任务必须已归档
+      const unarchived = tasks.filter((t) => t.status !== 'archived');
+      if (unarchived.length > 0) {
+        reasons.push(`还有 ${unarchived.length} 个任务未归档`);
+      }
+
+      const runId = this.id();
+      const t = this.now();
+      this.opts.repos.knowledgeRuns.create({
+        id: runId, projectId: project.id, iterationId, kind: 'iteration_changelog',
+        state: 'running', confirmationState: 'not_required',
+        changedPathsJson: '[]', diagnosticsJson: '[]', resultJson: '{}', startedAt: t,
+      });
+
+      let verification: import('@ai-devflow/core').IterationChangelogVerification | undefined;
+      try {
+        // 2. 确定性 CHANGELOG 校验（Git 跟踪探针：tracked=git ls-files）
+        const gitProbe: import('@ai-devflow/knowledge').KnowledgeGitProbe = {
+          isTracked: async (_repo, rel) => {
+            try {
+              const { execFileSync } = await import('node:child_process');
+              execFileSync('git', ['-C', project.path, 'ls-files', '--error-unmatch', rel], { stdio: 'ignore' });
+              return true;
+            } catch { return false; }
+          },
+          isIgnored: async () => false,
+        };
+        verification = await this.opts.knowledge.verifyIterationChangelog({
+          repoPath: project.path, version: iteration.version, iterationId,
+          expectedTaskIds: tasks.map((task) => task.id), git: gitProbe, verifiedAt: t,
+        });
+        const findingRecords = verification.findings.map((f, i) => ({
+          id: `${runId}-f${i}`, runId, severity: f.severity, code: f.code, path: f.path,
+          knowledgeId: f.knowledgeId, message: f.message, evidenceJson: JSON.stringify(f.evidence), createdAt: t,
+        }));
+        this.opts.repos.knowledgeFindings.insertMany(findingRecords);
+        if (verification.state !== 'valid') {
+          reasons.push('迭代 CHANGELOG 校验未通过');
+        }
+      } catch (err) {
+        reasons.push(`CHANGELOG 校验异常：${(err as Error).message}`);
+      }
+
+      if (reasons.length > 0) {
+        this.opts.repos.knowledgeRuns.finish(runId, 'failed', this.now(), {
+          resultJson: JSON.stringify({ state: 'invalid', ...(verification ? { coveredTaskIds: verification.coveredTaskIds, missingTaskIds: verification.missingTaskIds, changedPaths: verification.changedPaths, verifiedAt: verification.verifiedAt } : {}) }),
+          diagnosticsJson: JSON.stringify(reasons),
+        });
+        return { ok: false, reasons, verification };
+      }
+
+      // 3. 合并 sprint 分支到默认分支
+      const sprintBranch = (await import('./worktree.js')).sprintBranchName(iteration.version);
+      const { mergeWorktreeBranch } = await import('./worktree.js');
+      const mergeRes = await mergeWorktreeBranch({
+        repoPath: project.path, branchName: sprintBranch, defaultBranch: project.defaultBranch,
+      });
+      if (!mergeRes.merged) {
+        reasons.push(`迭代分支合并失败：${mergeRes.reason}`);
+        this.opts.repos.knowledgeRuns.finish(runId, 'failed', this.now(), {
+          resultJson: JSON.stringify({ state: 'valid', coveredTaskIds: verification!.coveredTaskIds, missingTaskIds: [], changedPaths: verification!.changedPaths, verifiedAt: verification!.verifiedAt }),
+          diagnosticsJson: JSON.stringify(reasons),
+        });
+        return { ok: false, reasons, verification };
+      }
+
+      // 4. 仅在合并成功后归档数据库行
+      this.opts.repos.knowledgeRuns.finish(runId, 'succeeded', this.now(), {
+        resultJson: JSON.stringify({ state: 'valid', coveredTaskIds: verification!.coveredTaskIds, missingTaskIds: [], changedPaths: verification!.changedPaths, verifiedAt: verification!.verifiedAt }),
+      });
+      this.opts.repos.iterations.archive(iterationId, this.now());
+      return { ok: true };
+    });
+  }
+
   private async computeDiff(repoPath: string, base: string, branch: string): Promise<string | undefined> {
     try {
       const { execFile } = await import('node:child_process');

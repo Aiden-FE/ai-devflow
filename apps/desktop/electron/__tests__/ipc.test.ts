@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -67,7 +67,7 @@ function buildServices() {
     async run() {
       return {
         events: (async function* () {
-          yield { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 } as import('@ai-devflow/core').AgentEvent;
+          yield { type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', result: { kind: 'task_review', review: { pass: true, summary: 'REVIEW_VERDICT: PASS' }, knowledgeAssessment: { verdict: 'none', reason: '无沉淀价值', evidence: ['x.ts'] } }, t: 0 } as import('@ai-devflow/core').AgentEvent;
         })(),
         cancel: async () => {},
         done: async () => ({ exitCode: 0, ok: true }),
@@ -185,15 +185,24 @@ describe('typed IPC wiring', () => {
   });
 
   it('end-to-end: create -> start -> in_review via IPC', async () => {
-    const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
+    // 在 workdir 初始化真实 git 仓库，使任务分支合并成功。
+    execFileSync('git', ['init', '-q', '-b', 'main', workdir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.name', 't'], { stdio: 'ignore' });
+    writeFileSync(join(workdir, 'README.md'), 'x');
+    execFileSync('git', ['-C', workdir, 'add', '.'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+    const p = { id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} };
+    repos.projects.insert(p);
     const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
     const t = await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder' }) as { id: string; status: string };
 
-    // 预置 worktree 路径以跳过真实 git（编排器逻辑仍验证）
+    // 预置真实 worktree + 任务分支（使 mergeWorktreeBranch 成功）。
     const task = repos.tasks.get(t.id)!;
     task.worktreePath = join(workdir, 'wt');
     repos.tasks.update(task);
+    execFileSync('git', ['-C', workdir, 'worktree', 'add', '-b', `ai-devflow/${task.id}`, task.worktreePath, 'main'], { stdio: 'ignore' });
 
     expect(t.status).toBe('ready');
     await call('tasks', 'start', t.id);
