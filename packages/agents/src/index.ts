@@ -34,6 +34,11 @@ export {
   validateStepAgents,
   type StepAgentProfile,
   type StepWorkload,
+  EXPERT_PROFILES,
+  expertToolsArg,
+  validateExpertProfiles,
+  type ExpertProfile,
+  type ExecutionExpertKey,
 } from './profiles.js';
 export { buildPiRunPlan, type PiRunPlan, type PiRunPlanInput } from './run-plan.js';
 export { buildControlledPath } from './env-safety.js';

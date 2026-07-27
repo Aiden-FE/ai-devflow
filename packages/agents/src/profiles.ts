@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import type { ProviderKind, TaskRole } from '@ai-devflow/core';
+import type { ProviderKind, TaskRole, ExpertKey } from '@ai-devflow/core';
 
 /**
  * 角色 profile（设计 §7.1）。
@@ -56,7 +56,7 @@ export const BUILTIN_EXTENSIONS = [
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
-export type SkillSource = TaskRole | 'shared';
+export type SkillSource = TaskRole | 'shared' | 'product' | 'ux' | 'dev_lead';
 
 /** 内置技能注册表条目：name 为技能目录名，source 仅表示物理文件位置，不限制哪些角色可引用。 */
 export interface BuiltinSkill {
@@ -82,6 +82,11 @@ export const BUILTIN_SKILLS = [
   { name: 'test-design',             source: 'tester' },
   { name: 'failure-analysis',        source: 'tester' },
   { name: 'acceptance-verification', source: 'tester' },
+  // 专家化新增技能（Task 3 资产）
+  { name: 'create-prd',           source: 'product' as const },
+  { name: 'ux-spec-writing',      source: 'ux' as const },
+  { name: 'web-design-engineer',  source: 'ux' as const },
+  { name: 'subtask-generation',   source: 'dev_lead' as const },
 ] as const satisfies readonly BuiltinSkill[];
 
 export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
@@ -407,3 +412,98 @@ export function validateRoleProfiles(
   }
 }
 validateRoleProfiles();
+
+// ---- 专家画像注册表（设计 §4.1）----
+
+/** 执行专家键：6 专家中除 chat 外的 5 个执行专家（chat 沿用现状，无独立画像）。 */
+export type ExecutionExpertKey = Exclude<ExpertKey, 'chat'>;
+
+/** 专家画像（结构与 RoleProfile 同，键改 expert: ExpertKey）。 */
+export interface ExpertProfile {
+  expert: ExpertKey;
+  version: number;
+  systemPromptFile: string;
+  /** 专家 built-in tools（未含内部工具）。 */
+  tools: string[];
+  excludedTools: string[];
+  /** 引用的内置 skills（来自 BUILTIN_SKILLS 注册池）。任意专家可引用池中任意技能。 */
+  skills: string[];
+  /** 该专家启用的扩展（名称取自 BUILTIN_EXTENSIONS 注册池）。 */
+  extensions: string[];
+  timeoutMs: number;
+}
+
+/**
+ * 专家画像注册表（设计 §4.1）。
+ * product/ux/dev_lead 为新增资产；dev/test 复用现有 coder/tester 资产目录的技能与 SYSTEM.md
+ * （dev/test 的资产在 Task 5 ProfileMaterializer 专家化时迁移；此处仅声明引用以驱动执行）。
+ */
+export const EXPERT_PROFILES: Record<ExecutionExpertKey, ExpertProfile> = {
+  product: {
+    expert: 'product', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['brainstorming', 'requirements-analysis', 'design-writing', 'create-prd'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
+    timeoutMs: 15 * 60_000,
+  },
+  ux: {
+    expert: 'ux', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['ux-spec-writing', 'web-design-engineer'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'structured-result'],
+    timeoutMs: 10 * 60_000,
+  },
+  dev_lead: {
+    expert: 'dev_lead', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'grep', 'find', 'ls'],
+    excludedTools: ['bash', 'edit', 'write'],
+    skills: ['brainstorming', 'implementation-planning', 'subtask-generation'],
+    extensions: ['task-bridge', 'ask-bridge', 'event-bridge', 'structured-result'],
+    timeoutMs: 15 * 60_000,
+  },
+  dev: {
+    expert: 'dev', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'],
+    excludedTools: [],
+    skills: ['design-writing', 'implementation-planning', 'test-driven-development', 'systematic-debugging', 'verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    timeoutMs: 45 * 60_000,
+  },
+  test: {
+    expert: 'test', version: 1, systemPromptFile: 'SYSTEM.md',
+    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'],
+    excludedTools: [],
+    skills: ['code-review', 'security-review', 'regression-review', 'test-design', 'failure-analysis', 'acceptance-verification'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    timeoutMs: 30 * 60_000,
+  },
+};
+
+/** --tools 的最终值：专家 built-in tools ∪ 两个内部工具。 */
+export function expertToolsArg(expert: ExecutionExpertKey): string {
+  return [...EXPERT_PROFILES[expert].tools, ...INTERNAL_TOOLS].join(',');
+}
+
+/**
+ * 校验每个专家声明的扩展都在 BUILTIN_EXTENSIONS 注册池、声明的技能都在 BUILTIN_SKILLS 注册池。
+ * 模块加载时调用，使配置错误在应用启动期 fail-fast。
+ */
+export function validateExpertProfiles(
+  profiles: Record<ExecutionExpertKey, ExpertProfile> = EXPERT_PROFILES,
+  extensionPool: readonly string[] = BUILTIN_EXTENSIONS,
+  skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+): void {
+  const extSet = new Set(extensionPool);
+  const skillNames = new Set(skillPool.map((s) => s.name));
+  for (const expert of Object.keys(profiles) as ExecutionExpertKey[]) {
+    for (const ext of profiles[expert].extensions) {
+      if (!extSet.has(ext)) throw new Error(`专家 ${expert} 引用了未注册的扩展：${ext}`);
+    }
+    for (const skill of profiles[expert].skills) {
+      if (!skillNames.has(skill)) throw new Error(`专家 ${expert} 引用了未注册的技能：${skill}`);
+    }
+  }
+}
+validateExpertProfiles();
