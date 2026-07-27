@@ -32,6 +32,9 @@ importers:
       '@ai-devflow/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ai-devflow/knowledge':
+        specifier: workspace:*
+        version: link:../../packages/knowledge
       '@ai-devflow/notifications':
         specifier: workspace:*
         version: link:../../packages/notifications
@@ -238,6 +241,9 @@ importers:
       '@ai-devflow/core':
         specifier: workspace:*
         version: link:../core
+      '@ai-devflow/knowledge':
+        specifier: workspace:*
+        version: link:../knowledge
       '@ai-devflow/persistence':
         specifier: workspace:*
         version: link:../persistence

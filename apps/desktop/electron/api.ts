@@ -31,6 +31,10 @@ import type {
   ProviderMigrationStatus,
   AgentModelOverride,
   AgentKey,
+  KnowledgeHealthSnapshot,
+  KnowledgeRunView,
+  TaskKnowledgeEvidence,
+  IterationChangelogVerification,
 } from '@ai-devflow/core';
 
 export interface CreateProjectInput {
@@ -165,6 +169,18 @@ export interface DesktopApi {
     list(projectId: string): Promise<Iteration[]>;
     create(projectId: string, name: string, version: string): Promise<Iteration>;
     archive(id: string): Promise<{ ok: true; merged: boolean; reason?: string } | { ok: false; reasons: string[] }>;
+  };
+  // ---- 知识库 ----
+  knowledge: {
+    getProjectSnapshot(projectId: string): Promise<KnowledgeHealthSnapshot>;
+    startInitialization(projectId: string): Promise<KnowledgeRunView>;
+    startAudit(projectId: string, mode: 'light' | 'full'): Promise<KnowledgeRunView>;
+    startRepair(projectId: string, findingIds: string[]): Promise<KnowledgeRunView>;
+    getRun(runId: string): Promise<KnowledgeRunView>;
+    confirmRun(runId: string): Promise<KnowledgeHealthSnapshot>;
+    cancelRun(runId: string): Promise<void>;
+    getTaskEvidence(taskId: string): Promise<TaskKnowledgeEvidence>;
+    getIterationVerification(iterationId: string): Promise<IterationChangelogVerification>;
   };
   // ---- 需求 ----
   requirements: {

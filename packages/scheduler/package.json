@@ -20,7 +20,8 @@
   "dependencies": {
     "@ai-devflow/core": "workspace:*",
     "@ai-devflow/agents": "workspace:*",
-    "@ai-devflow/persistence": "workspace:*"
+    "@ai-devflow/persistence": "workspace:*",
+    "@ai-devflow/knowledge": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -218,6 +218,37 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     return { ok: true, merged: mergeResult.merged, reason: mergeResult.reason };
   });
 
+  // ---- 知识库（项目级） ----
+  const knowledge = services.knowledge;
+  ipcMain.handle(channel('knowledge', 'getProjectSnapshot'), (_e, projectId) =>
+    knowledge ? knowledge.lightCheck(projectId) : undefined,
+  );
+  ipcMain.handle(channel('knowledge', 'startInitialization'), (_e, projectId) =>
+    knowledge!.startInitialization(projectId),
+  );
+  ipcMain.handle(channel('knowledge', 'startAudit'), (_e, projectId, mode) =>
+    knowledge!.startAudit(projectId, mode),
+  );
+  ipcMain.handle(channel('knowledge', 'startRepair'), (_e, projectId, findingIds) =>
+    knowledge!.startRepair(projectId, findingIds),
+  );
+  ipcMain.handle(channel('knowledge', 'getRun'), (_e, runId) => knowledge!.getRun(runId));
+  ipcMain.handle(channel('knowledge', 'confirmRun'), (_e, runId) => knowledge!.confirmRun(runId));
+  ipcMain.handle(channel('knowledge', 'cancelRun'), (_e, runId) => knowledge!.cancelRun(runId));
+  ipcMain.handle(channel('knowledge', 'getTaskEvidence'), (_e, _taskId) =>
+    Promise.resolve({ retrievals: [] }),
+  );
+  ipcMain.handle(channel('knowledge', 'getIterationVerification'), (_e, _iterationId) =>
+    Promise.resolve({
+      iterationId: _iterationId,
+      state: 'pending' as const,
+      coveredTaskIds: [],
+      missingTaskIds: [],
+      changedPaths: [],
+      findings: [],
+    }),
+  );
+
   // ---- 需求 ----
   ipcMain.handle(channel('requirements', 'list'), (_e, iterationId) => repos.requirements.listByIteration(iterationId));
   ipcMain.handle(channel('requirements', 'get'), (_e, id) => repos.requirements.get(id));

@@ -11,7 +11,14 @@ export {
   mergeBranchInto,
   mergeWorktreeBranch,
   branchExists,
+  deleteBranch,
+  listChangedPaths,
   WorktreeError,
   type WorktreeHandle,
 } from './worktree.js';
 export { Semaphore } from './semaphore.js';
+export { KeyedLock } from './keyed-lock.js';
+export {
+  KnowledgeCoordinator,
+  type KnowledgeCoordinatorOptions,
+} from './knowledge-coordinator.js';

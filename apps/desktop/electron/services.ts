@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
 import type { ProviderSummary } from '@ai-devflow/core';
 import { PiProcessSupervisor, buildControlledPath, type AgentRunner } from '@ai-devflow/agents';
-import { Orchestrator } from '@ai-devflow/scheduler';
+import { Orchestrator, KnowledgeCoordinator, type KnowledgeCoordinatorOptions } from '@ai-devflow/scheduler';
+import { ProjectKnowledgeService } from '@ai-devflow/knowledge';
 import { TimeoutEngine, WebhookSender, type Notifier } from '@ai-devflow/notifications';
 import { decryptSecret, encryptSecret } from './credentials.js';
 import { createUpdater, type Updater } from './updater.js';
@@ -19,6 +20,7 @@ export interface Services {
   providerStore?: ProviderStore;
   piRuntime?: PiRuntimeServices;
   piAi?: PiAiService;
+  knowledge?: KnowledgeCoordinator;
   orchestrator: Orchestrator;
   timeoutEngine: TimeoutEngine;
   webhooks: WebhookSender;
@@ -112,6 +114,12 @@ export function createServices(notifier: Notifier): Services {
       services?.initializationStatus?.runtime,
     ),
   });
+  const knowledge = new KnowledgeCoordinator({
+    repos,
+    runner: piRuntime.runner,
+    knowledge: new ProjectKnowledgeService(),
+    worktreesBaseDir,
+  } as KnowledgeCoordinatorOptions);
   const webhooks = new WebhookSender(repos, { maxAttempts: 3, timeoutMs: 10_000, baseDelayMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, notifier, webhooks, { intervalMs: 30_000 });
   const updater = createUpdater();
@@ -122,6 +130,7 @@ export function createServices(notifier: Notifier): Services {
     providerStore: piRuntime.providerStore,
     piRuntime,
     piAi,
+    knowledge,
     orchestrator,
     timeoutEngine,
     webhooks,

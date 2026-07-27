@@ -32,6 +32,17 @@ const api: DesktopApi = {
     create: (projectId, name, version) => invoke('iterations', 'create')(projectId, name, version),
     archive: (id) => invoke('iterations', 'archive')(id),
   },
+  knowledge: {
+    getProjectSnapshot: (projectId) => invoke('knowledge', 'getProjectSnapshot')(projectId),
+    startInitialization: (projectId) => invoke('knowledge', 'startInitialization')(projectId),
+    startAudit: (projectId, mode) => invoke('knowledge', 'startAudit')(projectId, mode),
+    startRepair: (projectId, findingIds) => invoke('knowledge', 'startRepair')(projectId, findingIds),
+    getRun: (runId) => invoke('knowledge', 'getRun')(runId),
+    confirmRun: (runId) => invoke('knowledge', 'confirmRun')(runId),
+    cancelRun: (runId) => invoke('knowledge', 'cancelRun')(runId),
+    getTaskEvidence: (taskId) => invoke('knowledge', 'getTaskEvidence')(taskId),
+    getIterationVerification: (iterationId) => invoke('knowledge', 'getIterationVerification')(iterationId),
+  },
   requirements: {
     list: (iterationId) => invoke('requirements', 'list')(iterationId),
     get: (id) => invoke('requirements', 'get')(id),

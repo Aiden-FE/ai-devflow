@@ -343,3 +343,24 @@ export async function listWorktrees(repoPath: string): Promise<Array<{ path: str
   }
   return out;
 }
+
+/** 删除分支（不存在视为成功；force=true 用 -D）。供知识初始化/修复取消时清理草稿分支。 */
+export async function deleteBranch(repoPath: string, branchName: string, opts: { force?: boolean } = {}): Promise<void> {
+  if (!(await branchExists(repoPath, branchName))) return;
+  await git(repoPath, ['branch', opts.force ? '-D' : '-d', branchName]).catch(() => {
+    // -d 可能因未合并失败；草稿分支取消时强制删除。
+  });
+  if (await branchExists(repoPath, branchName)) {
+    await git(repoPath, ['branch', '-D', branchName]).catch(() => undefined);
+  }
+}
+
+/** 列出 baseRef..branchRef 之间的变更路径（相对路径，去重排序）。供知识草稿校验越界改动。 */
+export async function listChangedPaths(repoPath: string, baseRef: string, branchRef: string): Promise<string[]> {
+  try {
+    const { stdout } = await git(repoPath, ['diff', '--name-only', `${baseRef}...${branchRef}`]);
+    return stdout.split('\n').map((l) => l.trim()).filter((l) => l.length > 0).sort();
+  } catch {
+    return [];
+  }
+}

@@ -107,6 +107,7 @@
   "dependencies": {
     "@ai-devflow/agents": "workspace:*",
     "@ai-devflow/core": "workspace:*",
+    "@ai-devflow/knowledge": "workspace:*",
     "@ai-devflow/notifications": "workspace:*",
     "@ai-devflow/persistence": "workspace:*",
     "@ai-devflow/scheduler": "workspace:*",
