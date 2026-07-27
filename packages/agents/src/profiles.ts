@@ -256,6 +256,26 @@ export interface MaterializeInput {
   models: string[];
 }
 
+/** 专家物化输入（与 MaterializeInput 同，键改 expert）。 */
+export interface ExpertMaterializeInput {
+  expert: ExecutionExpertKey;
+  providerId: string;
+  providerKind: ProviderKind;
+  providerRevision: number;
+  baseURL?: string;
+  providerName: string;
+  models: string[];
+}
+
+/** 专家 -> 物理资产目录名。dev/test 复用现有 coder/tester 资产（其 SYSTEM.md/skills 一致）。 */
+export const EXPERT_ASSETS_DIR: Record<ExecutionExpertKey, string> = {
+  product: 'product',
+  ux: 'ux',
+  dev_lead: 'dev_lead',
+  dev: 'coder',
+  test: 'tester',
+};
+
 /**
  * 把内置只读角色资源物化到内容寻址快照：`<baseDir>/profiles/<digest>/<role>/`，含 settings.json、
  * SYSTEM.md、skills/（角色私有技能 + 跨源引用的共享/他角技能副本）、共享 extensions/ 副本；兼容网关
@@ -268,12 +288,29 @@ export class ProfileMaterializer {
     private baseDir: string,
     private readonly profiles: Record<TaskRole, RoleProfile> = ROLE_PROFILES,
     private readonly skillPool: readonly BuiltinSkill[] = BUILTIN_SKILLS,
+    private readonly expertProfiles: Record<ExecutionExpertKey, ExpertProfile> = EXPERT_PROFILES,
   ) {}
 
   digest(input: MaterializeInput): string {
     const profile = this.profiles[input.role];
     const key = JSON.stringify({
       role: input.role,
+      profileVersion: profile.version,
+      providerId: input.providerId,
+      providerKind: input.providerKind,
+      providerName: input.providerName,
+      providerRevision: input.providerRevision,
+      baseURL: input.baseURL ?? null,
+      models: [...new Set(input.models)].sort(),
+    });
+    return createHash('sha256').update(key).digest('hex').slice(0, 16);
+  }
+
+  /** 专家快照摘要键（内容寻址，同输入同目录）。 */
+  digestExpert(input: ExpertMaterializeInput): string {
+    const profile = this.expertProfiles[input.expert];
+    const key = JSON.stringify({
+      expert: input.expert,
       profileVersion: profile.version,
       providerId: input.providerId,
       providerKind: input.providerKind,
@@ -302,6 +339,60 @@ export class ProfileMaterializer {
         if (!entry) throw new Error(`角色 ${input.role} 引用了未注册的技能：${skill}`);
         if (entry.source === input.role) continue;
         const src = join(this.assetsRoot, entry.source, 'skills', skill);
+        if (!existsSync(src)) throw new Error(`技能 ${skill} 的源目录不存在：${src}`);
+        cpSync(src, join(tmp, 'skills', skill), { recursive: true });
+      }
+      const extDir = join(tmp, 'extensions');
+      mkdirSync(extDir, { recursive: true });
+      for (const ext of profile.extensions) {
+        const src = join(this.assetsRoot, 'shared', 'extensions', `${ext}.ts`);
+        if (existsSync(src)) cpSync(src, join(extDir, `${ext}.ts`));
+      }
+      if (isCompatibleKind(input.providerKind)) {
+        writeFileSync(
+          join(tmp, 'models.json'),
+          buildCompatibleModelsJson(
+            input.providerName,
+            input.providerKind,
+            input.baseURL,
+            [...new Set(input.models)].sort(),
+          ),
+        );
+      }
+      const contentDigest = snapshotContentDigest(tmp);
+      writeFileSync(join(tmp, '.complete'), JSON.stringify({ digest, contentDigest }));
+      publishSnapshot(tmp, profileDir, digest);
+    } finally {
+      if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
+    }
+    return { profileDir, digest };
+  }
+
+  /**
+   * 把内置只读专家资源物化到内容寻址快照：`<baseDir>/profiles/<digest>/<expert>/`。
+   * 与 materialize 同，但按专家画像取 SYSTEM.md/skills/extensions，资产目录经 EXPERT_ASSETS_DIR 映射。
+   */
+  materializeExpert(input: ExpertMaterializeInput): { profileDir: string; digest: string } {
+    const digest = this.digestExpert(input);
+    const profileDir = join(this.baseDir, 'profiles', digest, input.expert);
+    if (validateSnapshot(profileDir, digest)) return { profileDir, digest };
+    const tmp = `${profileDir}.tmp-${randomBytes(4).toString('hex')}`;
+    mkdirSync(join(this.baseDir, 'profiles', digest), { recursive: true });
+    try {
+      const profile = this.expertProfiles[input.expert];
+      const assetDir = EXPERT_ASSETS_DIR[input.expert];
+      const skillByName = new Map(this.skillPool.map((s) => [s.name, s]));
+      cpSync(join(this.assetsRoot, assetDir), tmp, { recursive: true });
+      for (const skill of profile.skills) {
+        const entry = skillByName.get(skill);
+        if (!entry) throw new Error(`专家 ${input.expert} 引用了未注册的技能：${skill}`);
+        // 技能 source 为 TaskRole（旧资产目录）或专家目录；比较 EXPERT_ASSETS_DIR 以判断是否同目录。
+        const skillAssetDir =
+          (typeof entry.source === 'string' && (entry.source as string) in EXPERT_ASSETS_DIR)
+            ? EXPERT_ASSETS_DIR[entry.source as ExecutionExpertKey]
+            : entry.source;
+        if (skillAssetDir === assetDir) continue;
+        const src = join(this.assetsRoot, skillAssetDir, 'skills', skill);
         if (!existsSync(src)) throw new Error(`技能 ${skill} 的源目录不存在：${src}`);
         cpSync(src, join(tmp, 'skills', skill), { recursive: true });
       }

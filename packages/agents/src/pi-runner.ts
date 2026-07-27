@@ -7,11 +7,11 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentEvent, Checkpoint, TaskRole } from '@ai-devflow/core';
+import type { AgentEvent, Checkpoint, ExpertKey } from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
 import { createPiEventTranslator, type StructuredResult } from './json-events.js';
-import type { MaterializeInput } from './profiles.js';
-import { ROLE_PROFILES } from './profiles.js';
+import type { ExpertMaterializeInput } from './profiles.js';
+import { EXPERT_PROFILES } from './profiles.js';
 import type { PiProcessSupervisor, SpawnedPi } from './process-supervisor.js';
 import { ProviderExecutionError, classifyProviderFailure, type ProviderRoute, type ProviderRouter } from './provider-router.js';
 import { buildPiRunPlan } from './run-plan.js';
@@ -23,7 +23,7 @@ export interface RuntimeLocator {
   verify(): Promise<{ version: string; entry: string }>;
 }
 export interface ProfileMaterializerLike {
-  materialize(input: MaterializeInput): { profileDir: string; digest: string };
+  materializeExpert(input: ExpertMaterializeInput): { profileDir: string; digest: string };
 }
 export interface ProjectInstructionLoaderLike {
   load(repoRoot: string, packageDir: string): LoadedInstructions;
@@ -94,7 +94,7 @@ export class PiRunner implements AgentRunner {
         const projectInstructions = this.deps.instructionLoader.load(request.cwd, request.cwd).content;
         // 每次运行前自检内置运行时（manifest/摘要/入口/版本）；失败即可恢复地报错。
         const runtime = await this.deps.locator.verify();
-        await this.deps.router.execute(request.role, async (route, ordinal) => {
+        await this.deps.router.execute(request.expert, async (route, ordinal) => {
           const outcome = await this.runAttempt(
             request,
             route,
@@ -151,8 +151,8 @@ export class PiRunner implements AgentRunner {
     mkdirSync(isolatedHome, { recursive: true });
     mkdirSync(tempDir, { recursive: true });
 
-    const { profileDir: immutableProfileDir } = this.deps.materializer.materialize({
-      role: request.role,
+    const { profileDir: immutableProfileDir } = this.deps.materializer.materializeExpert({
+      expert: request.expert as Exclude<ExpertKey, 'chat'>,
       providerId: route.providerId,
       providerKind: route.providerKind,
       providerRevision: route.providerRevision,
@@ -186,7 +186,7 @@ export class PiRunner implements AgentRunner {
       tempDir,
       executionId: request.executionId,
       attemptId,
-      role: request.role,
+      expert: request.expert,
       initialMessage,
       route,
       projectToolPath: this.deps.projectToolPath,
@@ -194,7 +194,7 @@ export class PiRunner implements AgentRunner {
       checkpointPath,
     });
 
-    const timeoutMs = ROLE_PROFILES[request.role].timeoutMs;
+    const timeoutMs = EXPERT_PROFILES[request.expert as Exclude<ExpertKey, 'chat'>].timeoutMs;
     const spawned = this.deps.supervisor.spawn(plan, { cwd: request.cwd, timeoutMs, secrets: [route.secret] });
     state.spawned = spawned;
 
@@ -246,7 +246,7 @@ export class PiRunner implements AgentRunner {
 
     if (!finishError && !pe && !hadInteraction && translator.hasStructuredResult() && exitInfo.exitCode === 0) {
       const structured = translator.structuredResult()!;
-      const invalid = validateRoleCompletion(request.role, structured);
+      const invalid = validateExpertCompletion(request.expert, structured);
       if (invalid) {
         this.deps.attempts?.finish(attemptId, 'failed', Date.now());
         return {
@@ -295,17 +295,14 @@ export class PiRunner implements AgentRunner {
   }
 }
 
-/** Narrow enforceable completion evidence required by the built-in role contracts. */
-export function validateRoleCompletion(role: TaskRole, result: StructuredResult): string | undefined {
+/** Narrow enforceable completion evidence required by the built-in expert contracts. */
+export function validateExpertCompletion(expert: ExpertKey, result: StructuredResult): string | undefined {
   if (!result.verification.some((entry) => entry.trim().length > 0)) {
-    return '任务结果缺少角色要求的验证证据';
+    return '任务结果缺少专家要求的验证证据';
   }
-  if (role === 'reviewer') {
+  if (expert === 'test') {
     if (!/REVIEW_VERDICT:\s*(PASS|FAIL)\b/.test(result.summary)) {
-      return '审查结果缺少 REVIEW_VERDICT: PASS|FAIL';
-    }
-    if (result.changedFiles.length > 0) {
-      return 'reviewer 结果不得报告变更文件';
+      return '测试专家结果缺少 REVIEW_VERDICT: PASS|FAIL';
     }
   }
   return undefined;

@@ -23,7 +23,6 @@ import type {
   ProviderConfig,
   ProviderHealth,
   ProviderKind,
-  TaskRole,
 } from '@ai-devflow/core';
 import { redactText } from '@ai-devflow/core';
 import {
@@ -59,7 +58,7 @@ const { DatabaseSync } = require('node:sqlite') as {
 
 interface SpawnCapture {
   executionId: string;
-  role: string;
+  expert: string;
   configDir: string;
   sessionDir: string;
 }
@@ -174,7 +173,7 @@ class CapturingSupervisor extends PiProcessSupervisor {
     const stderrPath = join(this.captureRoot, `${safeName}.stderr.jsonl`);
     this.captures.push({
       executionId,
-      role: plan.env.AI_DEVFLOW_ROLE ?? 'unknown',
+      expert: plan.env.AI_DEVFLOW_EXPERT ?? 'unknown',
       configDir: plan.env.PI_CODING_AGENT_DIR ?? '',
       sessionDir: plan.env.PI_CODING_AGENT_SESSION_DIR ?? '',
     });
@@ -300,7 +299,7 @@ function makeRunner(name: string, providers: ProviderConfig[]): PiRunner {
 
 async function execute(
   runner: PiRunner,
-  request: { taskId: string; executionId: string; role: TaskRole; prompt: string; cwd: string },
+  request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux'; prompt: string; cwd: string },
 ): Promise<RunResult> {
   const run = await runner.run(request);
   const events: AgentEvent[] = [];
@@ -348,7 +347,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const runner = makeRunner('all-roles', [provider('real-all-roles', 0)]);
 
     const planner = await execute(runner, {
-      taskId: 'role-planner', executionId: 'role-planner', role: 'planner', cwd,
+      taskId: 'role-planner', executionId: 'role-planner', expert: 'dev_lead', cwd,
       prompt: 'Use the write tool to create docs/planner-output.md with exactly this one line: Authorized planner documentation. Do not modify any other file. Then call ai_devflow_report_result exactly once with a concise plan, a non-empty verification array, changedFiles=["docs/planner-output.md"], and unresolved=[].',
     });
     expectSuccessful(planner, 'planner');
@@ -358,14 +357,14 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
       .toBe('?? docs/planner-output.md');
 
     expectSuccessful(await execute(runner, {
-      taskId: 'role-coder', executionId: 'role-coder', role: 'coder', cwd,
+      taskId: 'role-coder', executionId: 'role-coder', expert: 'dev', cwd,
       prompt: 'Append `export const answer = 42;` to src/app.ts, verify the diff, then call ai_devflow_report_result exactly once with non-empty verification and changedFiles=["src/app.ts"].',
     }), 'coder');
     expect(readFileSync(join(cwd, 'src', 'app.ts'), 'utf8')).toContain('answer = 42');
 
     const beforeReview = fileHash(join(cwd, 'src', 'app.ts'));
     const reviewer = await execute(runner, {
-      taskId: 'role-reviewer', executionId: 'role-reviewer', role: 'reviewer', cwd,
+      taskId: 'role-reviewer', executionId: 'role-reviewer', expert: 'test', cwd,
       prompt: 'First attempt the bash command `printf forbidden > reviewer-guard.txt`; policy must deny it. Then inspect the existing diff read-only and call ai_devflow_report_result exactly once. The summary must contain REVIEW_VERDICT: PASS, verification must be non-empty, and changedFiles must be [].',
     });
     expectSuccessful(reviewer, 'reviewer');
@@ -375,19 +374,19 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     expect(reviewer.events.some((event) => event.type === 'done' && event.summary.includes('REVIEW_VERDICT: PASS'))).toBe(true);
 
     expectSuccessful(await execute(runner, {
-      taskId: 'role-tester', executionId: 'role-tester', role: 'tester', cwd,
+      taskId: 'role-tester', executionId: 'role-tester', expert: 'test', cwd,
       prompt: 'Read src/app.ts, run `git diff --check`, and call ai_devflow_report_result exactly once with a non-empty verification array and no additional file changes.',
     }), 'tester');
 
-    expect(new Set(captures.filter((capture) => capture.executionId.startsWith('role-')).map((capture) => capture.role)))
-      .toEqual(new Set(['planner', 'coder', 'reviewer', 'tester']));
+    expect(new Set(captures.filter((capture) => capture.executionId.startsWith('role-')).map((capture) => capture.expert)))
+      .toEqual(new Set(['dev_lead', 'dev', 'test']));
   }, 900_000);
 
   it('surfaces interaction without provider failover', async () => {
     const cwd = makeGitFixture('interaction');
     const runner = makeRunner('interaction', [provider('real-interaction', 0)]);
     const result = await execute(runner, {
-      taskId: 'interaction', executionId: 'interaction', role: 'planner', cwd,
+      taskId: 'interaction', executionId: 'interaction', expert: 'dev_lead', cwd,
       prompt: 'Do not solve the task and do not report a result. Call ai_devflow_interaction exactly once with kind="clarification", title="Need target", and detail="Choose the target module".',
     });
     expect(result.ok).toBe(true);
@@ -401,7 +400,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const real = provider('real-failover', 1);
     const runner = makeRunner('failover', [dead, real]);
     const result = await execute(runner, {
-      taskId: 'failover', executionId: 'failover', role: 'coder', cwd,
+      taskId: 'failover', executionId: 'failover', expert: 'dev', cwd,
       prompt: 'Read README.md, make no changes, and call ai_devflow_report_result exactly once with non-empty verification, changedFiles=[], and unresolved=[].',
     });
     expectSuccessful(result, 'router failover');
@@ -416,11 +415,11 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const runner = makeRunner('concurrent', [provider('real-concurrent', 0)]);
     const [one, two] = await Promise.all([
       execute(runner, {
-        taskId: 'concurrent-one', executionId: 'concurrent-one', role: 'tester', cwd,
+        taskId: 'concurrent-one', executionId: 'concurrent-one', expert: 'test', cwd,
         prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent one", non-empty verification, changedFiles=[], unresolved=[].',
       }),
       execute(runner, {
-        taskId: 'concurrent-two', executionId: 'concurrent-two', role: 'tester', cwd,
+        taskId: 'concurrent-two', executionId: 'concurrent-two', expert: 'test', cwd,
         prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent two", non-empty verification, changedFiles=[], unresolved=[].',
       }),
     ]);

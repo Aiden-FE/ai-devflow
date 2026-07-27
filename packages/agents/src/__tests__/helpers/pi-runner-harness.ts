@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
 import { PiRunner } from '../../pi-runner.js';
 import { ProjectInstructionLoader } from '../../project-instructions.js';
-import type { MaterializeInput } from '../../profiles.js';
+import type { ExpertMaterializeInput } from '../../profiles.js';
 import type { SpawnFn } from '../../process-supervisor.js';
 import { PiProcessSupervisor } from '../../process-supervisor.js';
 import { ProviderRouter, type ProviderHealthStore } from '../../provider-router.js';
@@ -56,7 +56,7 @@ export interface PiRunnerHarness {
   sleeps: number[];
   attemptIds: string[];
   attemptCollisions: string[];
-  materializedProfiles: MaterializeInput[];
+  materializedProfiles: ExpertMaterializeInput[];
 }
 
 export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunnerHarness {
@@ -67,7 +67,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   const sleeps: number[] = [];
   const attemptIds: string[] = [];
   const attemptCollisions: string[] = [];
-  const materializedProfiles: MaterializeInput[] = [];
+  const materializedProfiles: ExpertMaterializeInput[] = [];
 
   const providers: ProviderConfig[] = ['p1', 'p2'].map((id, priority) => ({
     id, kind: 'openai', displayName: id, enabled: true, priority,
@@ -114,7 +114,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
   // 物化器桩：返回一个临时 profile 目录（fake CLI 不读取 profile 内容，run plan 只引用路径）。
   const stableProfileDir = mkdtempSync(join(tmpdir(), 'pi-runner-profile-'));
   const materializer = {
-    materialize: (profile: MaterializeInput) => {
+    materializeExpert: (profile: ExpertMaterializeInput) => {
       materializedProfiles.push(profile);
       return { profileDir: stableProfileDir, digest: 'fake-digest' };
     },
