@@ -7,6 +7,28 @@ export { tx } from './tx.js';
 export { createProviderHealthRepo, type ProviderHealthRepo } from './provider-health.js';
 export { createExecutionAttemptsRepo, type ExecutionAttemptsRepo, type ExecutionAttemptRecord } from './execution-attempts.js';
 export {
+  createKnowledgeRunsRepo,
+  type KnowledgeRunsRepo,
+  type KnowledgeRunRecord,
+} from './knowledge-runs.js';
+export {
+  createKnowledgeFindingsRepo,
+  type KnowledgeFindingsRepo,
+  type KnowledgeFindingRecord,
+} from './knowledge-findings.js';
+export {
+  createKnowledgeRetrievalsRepo,
+  type KnowledgeRetrievalsRepo,
+  type KnowledgeRetrievalRecord,
+  type KnowledgeRetrievalCompletion,
+} from './knowledge-retrievals.js';
+export {
+  createKnowledgeDepositionsRepo,
+  type KnowledgeDepositionsRepo,
+  type KnowledgeDepositionRecordRow,
+  type KnowledgeDepositionCompletion,
+} from './knowledge-depositions.js';
+export {
   createRepositories,
   type Repositories,
   type ProjectsRepo,

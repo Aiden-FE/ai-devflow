@@ -25,6 +25,22 @@ import type {
 import { tx } from './tx.js';
 import { createProviderHealthRepo, type ProviderHealthRepo } from './provider-health.js';
 import { createExecutionAttemptsRepo, type ExecutionAttemptsRepo } from './execution-attempts.js';
+import {
+  createKnowledgeRunsRepo,
+  type KnowledgeRunsRepo,
+} from './knowledge-runs.js';
+import {
+  createKnowledgeFindingsRepo,
+  type KnowledgeFindingsRepo,
+} from './knowledge-findings.js';
+import {
+  createKnowledgeRetrievalsRepo,
+  type KnowledgeRetrievalsRepo,
+} from './knowledge-retrievals.js';
+import {
+  createKnowledgeDepositionsRepo,
+  type KnowledgeDepositionsRepo,
+} from './knowledge-depositions.js';
 
 // ---------- 行映射辅助 ----------
 
@@ -237,6 +253,10 @@ export interface Repositories {
   pendingInteractions: PendingInteractionsRepo;
   providerHealth: ProviderHealthRepo;
   executionAttempts: ExecutionAttemptsRepo;
+  knowledgeRuns: KnowledgeRunsRepo;
+  knowledgeFindings: KnowledgeFindingsRepo;
+  knowledgeRetrievals: KnowledgeRetrievalsRepo;
+  knowledgeDepositions: KnowledgeDepositionsRepo;
 }
 
 export function createRepositories(db: DatabaseSync): Repositories {
@@ -258,6 +278,10 @@ export function createRepositories(db: DatabaseSync): Repositories {
     pendingInteractions: pendingInteractionsRepo(db),
     providerHealth: createProviderHealthRepo(db),
     executionAttempts: createExecutionAttemptsRepo(db),
+    knowledgeRuns: createKnowledgeRunsRepo(db),
+    knowledgeFindings: createKnowledgeFindingsRepo(db),
+    knowledgeRetrievals: createKnowledgeRetrievalsRepo(db),
+    knowledgeDepositions: createKnowledgeDepositionsRepo(db),
   };
 }
 

@@ -1,6 +1,7 @@
 // 版本化迁移。每个迁移是一段幂等 DDL（IF NOT EXISTS），按顺序执行并记录版本号。
 import { PI_ONLY_MIGRATION_V9 } from './pi-only-migration-v9.js';
 import { AGENT_ROLE_MIGRATION_V11 } from './migrations/agent-role-migration-v11.js';
+import { KNOWLEDGE_AUDIT_MIGRATION_V12 } from './migrations/knowledge-audit-migration-v12.js';
 
 export interface Migration {
   version: number;
@@ -268,4 +269,5 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   AGENT_ROLE_MIGRATION_V11,
+  KNOWLEDGE_AUDIT_MIGRATION_V12,
 ];
