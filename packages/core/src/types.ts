@@ -85,7 +85,9 @@ export interface Task {
   title: string;
   description: string;
   status: TaskStatus;
+  /** @deprecated 按泳道派发，不再使用；保留兼容旧数据。 */
   role: TaskRole;
+  /** @deprecated 多角色 stages 废弃；研发专家在 in_progress 单次执行内自行完成设计->实现->自验。保留兼容。 */
   stages: Stage[];
   /** 当前阶段索引。 */
   currentStage: number;
@@ -103,6 +105,8 @@ export interface Task {
    * 前置任务进入 in_review 或 archived 视为"完成"（开发工作已交付），其后继任务方可启动。
    */
   dependsOn?: string[];
+  /** 任务类型标签（前端/后端/全栈/联调），仅展示与拆分自检，不影响执行者派发。 */
+  typeLabel?: TaskTypeLabel;
 }
 
 /** Agent 执行事件（与 agents 包一致，但定义在 core 以便 Renderer 订阅）。 */

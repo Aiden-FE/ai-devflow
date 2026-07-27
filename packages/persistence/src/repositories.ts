@@ -93,6 +93,7 @@ function mapTask(r: Record<string, unknown>): Task {
     retryCount: r.retry_count as number,
     pausedFrom: (r.paused_from as TaskStatus | null) ?? undefined,
     dependsOn: parseJSON<string[]>(r.depends_on_json as string, []).filter(Boolean),
+    typeLabel: (r.type_label as Task['typeLabel'] | null) ?? undefined,
   };
 }
 
@@ -382,13 +383,13 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
     insert(t) {
       db.prepare(
         `INSERT INTO tasks(id,requirement_id,iteration_id,project_id,title,description,status,role,
-           stages_json,current_stage,status_changed_at,created_at,updated_at,worktree_path,retry_count,paused_from,depends_on_json)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           stages_json,current_stage,status_changed_at,created_at,updated_at,worktree_path,retry_count,paused_from,depends_on_json,type_label)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
         t.id, t.requirementId, t.iterationId, t.projectId, t.title, t.description, t.status,
         t.role, JSON.stringify(t.stages), t.currentStage, t.statusChangedAt,
         t.createdAt, t.updatedAt, t.worktreePath ?? null, t.retryCount, t.pausedFrom ?? null,
-        JSON.stringify(t.dependsOn ?? []),
+        JSON.stringify(t.dependsOn ?? []), t.typeLabel ?? null,
       );
     },
     insertMany(tasks) {
@@ -423,11 +424,11 @@ function tasksRepo(db: DatabaseSync): TasksRepo {
     update(t) {
       db.prepare(
         `UPDATE tasks SET title=?,description=?,status=?,role=?,stages_json=?,current_stage=?,
-           status_changed_at=?,updated_at=?,worktree_path=?,retry_count=?,paused_from=?,depends_on_json=? WHERE id=?`,
+           status_changed_at=?,updated_at=?,worktree_path=?,retry_count=?,paused_from=?,depends_on_json=?,type_label=? WHERE id=?`,
       ).run(
         t.title, t.description, t.status, t.role, JSON.stringify(t.stages),
         t.currentStage, t.statusChangedAt, t.updatedAt, t.worktreePath ?? null, t.retryCount, t.pausedFrom ?? null,
-        JSON.stringify(t.dependsOn ?? []), t.id,
+        JSON.stringify(t.dependsOn ?? []), t.typeLabel ?? null, t.id,
       );
     },
     updateStatus(id, status, at) {
