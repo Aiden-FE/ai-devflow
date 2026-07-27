@@ -301,7 +301,15 @@ async function execute(
   runner: PiRunner,
   request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux'; prompt: string; cwd: string },
 ): Promise<RunResult> {
-  const run = await runner.run(request);
+  const resultKind = request.expert === 'test' ? 'task_review' : 'task_execution';
+  const run = await runner.run({
+    scope: { kind: 'task', taskId: request.taskId },
+    executionId: request.executionId,
+    expert: request.expert,
+    resultKind,
+    prompt: request.prompt,
+    cwd: request.cwd,
+  });
   const events: AgentEvent[] = [];
   for await (const event of run.events) events.push(event);
   const done = await run.done();

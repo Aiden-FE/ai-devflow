@@ -17,11 +17,33 @@ function reportResult(summary, extra = {}) {
   });
 }
 
-function succeed(summary = 'done') {
-  if (process.env.AI_DEVFLOW_ROLE === 'reviewer' && !summary.includes('REVIEW_VERDICT:')) {
-    summary += '\nREVIEW_VERDICT: PASS';
+function payloadFor(resultKind, summary) {
+  if (resultKind === 'task_review') {
+    const pass = /REVIEW_VERDICT:\s*PASS/i.test(summary);
+    return {
+      kind: 'task_review',
+      review: {
+        pass,
+        summary: pass ? '审查通过' : '审查不通过',
+        checks: ['需求覆盖', '测试/构建/lint', '明显回归', '安全问题', '无关改动'],
+      },
+      knowledgeAssessment: {
+        verdict: 'none',
+        reason: '本次审查无新增长期知识价值',
+        evidence: ['packages/scheduler/src/orchestrator.ts'],
+      },
+    };
   }
-  reportResult(summary);
+  return undefined;
+}
+
+function succeed(summary = 'done') {
+  const resultKind = process.env.AI_DEVFLOW_RESULT_KIND || '';
+  if (resultKind === 'reviewer' || process.env.AI_DEVFLOW_ROLE === 'reviewer') {
+    if (!summary.includes('REVIEW_VERDICT:')) summary += '\nREVIEW_VERDICT: PASS';
+  }
+  const payload = payloadFor(resultKind, summary);
+  reportResult(summary, payload ? { payload } : {});
   emit({ type: 'agent_end', messages: [] });
   process.exit(0);
 }

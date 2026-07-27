@@ -110,13 +110,26 @@ export interface Task {
 }
 
 /** Agent 执行事件（与 agents 包一致，但定义在 core 以便 Renderer 订阅）。 */
+import type {
+  KnowledgeAgentPayload,
+  KnowledgeReadEvidence,
+} from './knowledge.js';
+
 export type AgentEvent =
   | { type: 'log'; level: 'info' | 'warn' | 'error'; text: string; t: number }
   | { type: 'file_change'; path: string; action: 'create' | 'modify' | 'delete'; t: number }
   | { type: 'test_result'; passed: boolean; summary: string; evidence: string; t: number }
   | { type: 'ask_user'; question: string; context: string; t: number }
   | { type: 'status'; stage: string; detail?: string; t: number }
-  | { type: 'done'; summary: string; t: number }
+  | {
+      type: 'done';
+      summary: string;
+      /** 跨边界的领域载荷（非 task_execution 结果必须携带对应判别值）。 */
+      result?: KnowledgeAgentPayload;
+      /** 本次运行实际读取的知识证据（仅 ID/路径/原因/字符数，不含正文）。 */
+      knowledgeReads?: KnowledgeReadEvidence[];
+      t: number;
+    }
   | { type: 'error'; message: string; recoverable: boolean; failureKind?: FailureKind; t: number }
   | {
       type: 'approval_request';

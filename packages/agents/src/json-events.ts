@@ -3,8 +3,8 @@
 // 解析 Pi `--mode json` 的 JSON Lines 流（非 stdout 正则），映射为 AgentEvent 并维护 AttemptJournal。
 // 未知事件按向前兼容原则记为诊断，不崩溃；缺少必需事件或 schema 非法属 protocol failure。
 // 完成条件：Pi 正常结束（agent_end）∧ 收到合法 ai_devflow_report_result。出口前 redact 活跃路线密钥。
-import type { AgentEvent } from '@ai-devflow/core';
-import { now, redactText } from '@ai-devflow/core';
+import type { AgentEvent, KnowledgeAgentPayload, KnowledgeReadEvidence } from '@ai-devflow/core';
+import { isKnowledgeAgentPayload, now, redactText } from '@ai-devflow/core';
 import type { AttemptJournal } from './attempt-journal.js';
 
 export interface PiEventTranslatorOptions {
@@ -22,6 +22,10 @@ export interface StructuredResult {
   verification: string[];
   changedFiles: string[];
   unresolved: string[];
+  /** 跨边界的领域载荷（非 task_execution 结果必须携带对应判别值）。 */
+  payload?: KnowledgeAgentPayload;
+  /** 本次运行实际读取的知识证据（仅 ID/路径/原因/字符数，不含正文）。 */
+  knowledgeReads: KnowledgeReadEvidence[];
 }
 
 export interface PiEventTranslator {
@@ -79,7 +83,27 @@ function normalize(r: StructuredResult): StructuredResult {
     verification: Array.isArray(r.verification) ? r.verification : [],
     changedFiles: Array.isArray(r.changedFiles) ? r.changedFiles : [],
     unresolved: Array.isArray(r.unresolved) ? r.unresolved : [],
+    payload: normalizePayload(r.payload),
+    knowledgeReads: Array.isArray(r.knowledgeReads)
+      ? r.knowledgeReads.filter(isReadEvidence)
+      : [],
   };
+}
+
+function normalizePayload(payload: unknown): KnowledgeAgentPayload | undefined {
+  if (payload === undefined || payload === null) return undefined;
+  return isKnowledgeAgentPayload(payload) ? payload : undefined;
+}
+
+function isReadEvidence(value: unknown): value is KnowledgeReadEvidence {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.knowledgeId === 'string' &&
+    typeof v.path === 'string' &&
+    typeof v.reason === 'string' &&
+    typeof v.chars === 'number'
+  );
 }
 
 function interactionInput(value: unknown): { kind: 'clarification' | 'confirmation'; title: string; detail: string } | undefined {
@@ -182,6 +206,13 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
                 verification: structured.verification.map(redact),
                 changedFiles: structured.changedFiles.map(redact),
                 unresolved: structured.unresolved.map(redact),
+                payload: structured.payload,
+                knowledgeReads: structured.knowledgeReads.map((r) => ({
+                  knowledgeId: r.knowledgeId,
+                  path: r.path,
+                  reason: redact(r.reason),
+                  chars: r.chars,
+                })),
               };
             }
           } else if (name === INTERACTION_TOOL) {

@@ -53,6 +53,69 @@ describe('createPiEventTranslator', () => {
     expect(() => translator.finish()).not.toThrow();
   });
 
+  it('preserves the payload and knowledgeReads of a strict task_review report', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', args: {},
+    }));
+    translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', isError: false,
+      result: {
+        details: {
+          aiDevflowResult: {
+            summary: 'ok\nREVIEW_VERDICT: PASS',
+            verification: ['ok'],
+            changedFiles: [],
+            unresolved: [],
+            payload: {
+              kind: 'task_review',
+              review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+              knowledgeAssessment: { verdict: 'none', reason: 'no value', evidence: ['x.ts'] },
+            },
+            knowledgeReads: [
+              { knowledgeId: 'context:runtime', path: 'docs/knowledge/context/runtime.md', reason: 'overview', chars: 42 },
+            ],
+          },
+        },
+      },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+    expect(translator.hasStructuredResult()).toBe(true);
+    const result = translator.structuredResult()!;
+    expect(result.payload).toMatchObject({
+      kind: 'task_review',
+      knowledgeAssessment: { verdict: 'none' },
+    });
+    expect(result.knowledgeReads).toEqual([
+      { knowledgeId: 'context:runtime', path: 'docs/knowledge/context/runtime.md', reason: 'overview', chars: 42 },
+    ]);
+    expect(() => translator.finish()).not.toThrow();
+  });
+
+  it('rejects a malformed payload (dropped, not stored) without failing the base fields', () => {
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', args: {},
+    }));
+    translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', isError: false,
+      result: {
+        details: {
+          aiDevflowResult: {
+            summary: 'done', verification: ['ok'], changedFiles: [], unresolved: [],
+            payload: { kind: 'task_review', review: { pass: true } }, // missing knowledgeAssessment
+            knowledgeReads: [{ knowledgeId: 'x', path: 'p', reason: 'r', chars: 1 }],
+          },
+        },
+      },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+    const result = translator.structuredResult()!;
+    expect(result.payload).toBeUndefined();
+    expect(result.knowledgeReads).toHaveLength(1);
+    expect(() => translator.finish()).not.toThrow();
+  });
+
   it('rejects a report result when agent_end is missing', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     translator.push(JSON.stringify({

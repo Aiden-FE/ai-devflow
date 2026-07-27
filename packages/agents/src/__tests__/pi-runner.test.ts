@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { validateExpertCompletion } from '../pi-runner.js';
+import type { StructuredResult } from '../json-events.js';
 import { createPiRunnerHarness } from './helpers/pi-runner-harness.js';
 
 async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
@@ -10,21 +11,44 @@ async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
 }
 
 it('enforces the narrow expert-specific structured-result evidence contract', () => {
-  const base = { summary: 'done', verification: ['pnpm test: pass'], changedFiles: [], unresolved: [] };
-  expect(validateExpertCompletion('dev_lead', base)).toBeUndefined();
-  expect(validateExpertCompletion('dev', { ...base, verification: [] })).toMatch(/验证证据/);
-  expect(validateExpertCompletion('test', { ...base, verification: ['   '] })).toMatch(/验证证据/);
-  expect(validateExpertCompletion('test', { ...base, summary: 'reviewed' })).toMatch(/REVIEW_VERDICT/);
-  expect(validateExpertCompletion('test', {
+  const base: StructuredResult = { summary: 'done', verification: ['pnpm test: pass'], changedFiles: [], unresolved: [], knowledgeReads: [] };
+  const execReq = (expert: import('@ai-devflow/core').ExpertKey) => ({ expert, resultKind: 'task_execution' as const });
+  expect(validateExpertCompletion(execReq('dev_lead'), base)).toBeUndefined();
+  expect(validateExpertCompletion(execReq('dev'), { ...base, verification: [] })).toMatch(/验证证据/);
+  expect(validateExpertCompletion(execReq('test'), { ...base, verification: ['   '] })).toMatch(/验证证据/);
+  expect(validateExpertCompletion(execReq('test'), { ...base, summary: 'reviewed' })).toMatch(/REVIEW_VERDICT/);
+  expect(validateExpertCompletion(execReq('test'), {
     ...base,
     summary: 'reviewed\nREVIEW_VERDICT: PASS',
   })).toBeUndefined();
 });
 
+it('rejects task_review results missing the assessment payload', () => {
+  const base: StructuredResult = { summary: 'reviewed\nREVIEW_VERDICT: PASS', verification: ['ok'], changedFiles: [], unresolved: [], knowledgeReads: [] };
+  expect(validateExpertCompletion({ expert: 'test', resultKind: 'task_review' }, base)).toMatch(/缺少领域载荷/);
+  const withPayload: StructuredResult = {
+    ...base,
+    payload: {
+      kind: 'task_review',
+      review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+      knowledgeAssessment: { verdict: 'none', reason: '无沉淀价值', evidence: ['x.ts'] },
+    },
+  };
+  expect(validateExpertCompletion({ expert: 'test', resultKind: 'task_review' }, withPayload)).toBeUndefined();
+});
+
+it('rejects task_execution results that carry a payload', () => {
+  const base: StructuredResult = {
+    summary: 'done', verification: ['ok'], changedFiles: [], unresolved: [], knowledgeReads: [],
+    payload: { kind: 'task_review', review: { pass: true, summary: 'x' }, knowledgeAssessment: { verdict: 'none', reason: 'r', evidence: ['e'] } },
+  };
+  expect(validateExpertCompletion({ expert: 'dev', resultKind: 'task_execution' }, base)).toMatch(/不得携带领域载荷/);
+});
+
 it('uses the absolute fake Pi entry and emits done only after report_result', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'change fixture', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'change fixture', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -36,7 +60,7 @@ it('uses the absolute fake Pi entry and emits done only after report_result', as
 it('passes a mutation checkpoint to the next attempt', async () => {
   const harness = createPiRunnerHarness({ scenario: 'mutate-then-provider-error' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'change fixture', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'change fixture', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -56,7 +80,7 @@ it('injects bounded untrusted project instructions before the task request', asy
   const harness = createPiRunnerHarness({ scenario: 'success' });
   writeFileSync(`${harness.cwd}/AGENTS.md`, 'PROJECT-ONLY-INSTRUCTION');
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'instructions', expert: 'dev', prompt: 'TASK-REQUEST', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'instructions', expert: 'dev', resultKind: 'task_execution', prompt: 'TASK-REQUEST', cwd: harness.cwd,
   });
   await collect(run.events);
   expect((await run.done()).ok).toBe(true);
@@ -69,7 +93,7 @@ it('injects bounded untrusted project instructions before the task request', asy
 it('serializes a validated scheduler checkpoint into resume context', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'resume', expert: 'dev', prompt: 'continue', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'resume', expert: 'dev', resultKind: 'task_execution', prompt: 'continue', cwd: harness.cwd,
     resumeFrom: {
       id: 'cp-1', taskId: 't1', stageId: 'build', stageIndex: 2,
       context: 'validated prior context', createdAt: 123,
@@ -86,7 +110,7 @@ it('serializes a validated scheduler checkpoint into resume context', async () =
 it('rejects malformed scheduler checkpoints before spawning Pi', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'invalid-resume', expert: 'dev', prompt: 'continue', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'invalid-resume', expert: 'dev', resultKind: 'task_execution', prompt: 'continue', cwd: harness.cwd,
     resumeFrom: {
       id: 'cp-1', taskId: 'other-task', stageId: 'build', stageIndex: -1,
       context: 'invalid', createdAt: 123,
@@ -101,7 +125,7 @@ it('rejects malformed scheduler checkpoints before spawning Pi', async () => {
 it('fails over after an authentication error on the first attempt', async () => {
   const harness = createPiRunnerHarness({ scenario: 'authentication' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -111,7 +135,7 @@ it('fails over after an authentication error on the first attempt', async () => 
 it('retries a runtime crash once then recovers', async () => {
   const harness = createPiRunnerHarness({ scenario: 'runtime-crash' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -121,7 +145,7 @@ it('retries a runtime crash once then recovers', async () => {
 it('treats protocol corruption as recoverable and fails over', async () => {
   const harness = createPiRunnerHarness({ scenario: 'protocol-corruption' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -131,7 +155,7 @@ it('treats protocol corruption as recoverable and fails over', async () => {
 it('stops without failover on an interaction and surfaces ask_user', async () => {
   const harness = createPiRunnerHarness({ scenario: 'interaction' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'ask_user' }));
@@ -143,7 +167,7 @@ it('stops without failover on an interaction and surfaces ask_user', async () =>
 it('actively terminates the Pi process group after an interaction tool ends (§7.4)', async () => {
   const harness = createPiRunnerHarness({ scenario: 'interaction-then-hang' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'hang', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'hang', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'ask_user' }));
@@ -160,7 +184,7 @@ it('actively terminates the Pi process group after an interaction tool ends (§7
 it('fails a reviewer latch-blocked interaction terminal without pausing', async () => {
   const harness = createPiRunnerHarness({ scenario: 'reviewer-latch-blocked-interaction' });
   const run = await harness.runner.run({
-    taskId: 'reviewer-blocked', executionId: 'reviewer-blocked', expert: 'test', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 'reviewer-blocked' }, executionId: 'reviewer-blocked', expert: 'test', resultKind: 'task_review', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
 
@@ -173,7 +197,7 @@ it('fails a reviewer latch-blocked interaction terminal without pausing', async 
 it('does not fail over on a task-result failure (structured result received)', async () => {
   const harness = createPiRunnerHarness({ scenario: 'task-result-failure' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -183,7 +207,7 @@ it('does not fail over on a task-result failure (structured result received)', a
 it('rejects an expert result without verification evidence and does not fail over', async () => {
   const harness = createPiRunnerHarness({ scenario: 'missing-verification' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'e1', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -200,7 +224,7 @@ it.each([
 ] as const)('fails closed for invalid terminal protocol: %s', async (scenario) => {
   const harness = createPiRunnerHarness({ scenario });
   const run = await harness.runner.run({
-    taskId: 'terminal', executionId: `terminal-${scenario}`, expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 'terminal' }, executionId: `terminal-${scenario}`, expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   const events = await collect(run.events);
   expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
@@ -218,7 +242,7 @@ it('verifies the runtime via the locator', async () => {
 it('materializes with the real provider revision and resolved model set', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const run = await harness.runner.run({
-    taskId: 't1', executionId: 'profile-identity', expert: 'dev', prompt: 'p', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'profile-identity', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
   });
   await collect(run.events);
   expect((await run.done()).ok).toBe(true);
@@ -235,7 +259,7 @@ it('uses globally unique attempt ids for repeated same-expert executions', async
   const harness = createPiRunnerHarness({ scenario: 'success' });
   for (const executionId of ['execution-a', 'execution-b']) {
     const run = await harness.runner.run({
-      taskId: executionId, executionId, expert: 'dev', prompt: 'review', cwd: harness.cwd,
+      scope: { kind: 'task', taskId: executionId }, executionId, expert: 'dev', resultKind: 'task_execution', prompt: 'review', cwd: harness.cwd,
     });
     await collect(run.events);
     expect((await run.done()).ok).toBe(true);
@@ -252,7 +276,7 @@ it('uses globally unique attempt ids for repeated same-expert executions', async
 it('gives concurrent attempts distinct writable config and session roots', async () => {
   const harness = createPiRunnerHarness({ scenario: 'success' });
   const runs = await Promise.all(['one', 'two'].map((executionId) => harness.runner.run({
-    taskId: executionId, executionId, expert: 'dev', prompt: 'verify', cwd: harness.cwd,
+    scope: { kind: 'task', taskId: executionId }, executionId, expert: 'dev', resultKind: 'task_execution', prompt: 'verify', cwd: harness.cwd,
   })));
   await Promise.all(runs.map(async (run) => {
     await collect(run.events);

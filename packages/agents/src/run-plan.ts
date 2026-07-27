@@ -35,6 +35,7 @@ export interface PiRunPlanInput {
   executionId: string;
   attemptId: string;
   expert: ExpertKey;
+  resultKind?: string;
   initialMessage: string;
   route: ProviderRoute;
   /** 角色工具执行所需的受控 PATH（不参与 Pi 入口解析）。 */
@@ -125,6 +126,7 @@ export function buildPiRunPlan(input: PiRunPlanInput): PiRunPlan {
     TEMP: input.tempDir,
     TMP: input.tempDir,
     AI_DEVFLOW_EXPERT: input.expert,
+    AI_DEVFLOW_RESULT_KIND: input.resultKind ?? '',
     AI_DEVFLOW_EXECUTION_ID: input.executionId,
     AI_DEVFLOW_ATTEMPT_ID: input.attemptId,
   };

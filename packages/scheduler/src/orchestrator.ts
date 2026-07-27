@@ -274,9 +274,10 @@ export class Orchestrator extends EventEmitter {
 
       const prompt = this.buildPrompt(task);
       const run = await this.runner.run({
-        taskId: task.id,
+        scope: { kind: 'task', taskId: task.id },
         executionId: execution.id,
         expert,
+        resultKind: 'task_execution',
         prompt,
         cwd: worktreePath!,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
@@ -401,8 +402,9 @@ export class Orchestrator extends EventEmitter {
           this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，但未自动合并：${mergeRes.reason}（工作保留在分支 ${branchName}）` });
         }
       }
-      // 审查通过才进入待验收（门禁 reviewPassed 强制，拒绝拖拽/IPC 绕过）。
-      this.transition(task, 'in_review', { reviewPassed: true });
+      // 审查通过才进入待验收（门禁 reviewPassed + knowledgeGatePassed 强制，拒绝拖拽/IPC 绕过）。
+      // 知识门禁的正式实现见 finalizeTaskKnowledge（Task 9）：在此之前默认放行以维持流水线可运行。
+      this.transition(task, 'in_review', { reviewPassed: true, knowledgeGatePassed: true });
       return;
     }
 
@@ -461,9 +463,10 @@ export class Orchestrator extends EventEmitter {
     let errored: string | undefined;
     try {
       const run = await this.runner.run({
-        taskId: task.id,
+        scope: { kind: 'task', taskId: task.id },
         executionId: execution.id,
         expert,
+        resultKind: 'task_review',
         prompt,
         cwd: task.worktreePath ?? project.path,
       });
