@@ -223,6 +223,8 @@ export interface GateContext {
   accepted?: boolean;
   /** 审查门禁：reviewer Agent 审查是否通过（testing -> in_review 必须为 true，拒绝拖拽绕过）。 */
   reviewPassed?: boolean;
+  /** 知识门禁：测试审查后是否完成知识评估与必要沉淀（valuable 需完成校验，testing -> in_review 必须为 true）。 */
+  knowledgeGatePassed?: boolean;
   /** 验收不通过退回：必填的退回原因（canReject 要求非空）。 */
   rejectReason?: string;
 }

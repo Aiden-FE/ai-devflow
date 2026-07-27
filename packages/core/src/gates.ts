@@ -38,6 +38,9 @@ export function canTransition(
     if (task.status === 'testing' && ctx.reviewPassed !== true) {
       reasons.push('进入待验收前需审查通过（reviewer Agent）');
     }
+    if (task.status === 'testing' && ctx.knowledgeGatePassed !== true) {
+      reasons.push('进入待验收前需完成知识评估与必要沉淀');
+    }
   }
   // 进入测试中：开发完成后需有执行产物（开发 Agent 已交付）。
   if (target === 'testing' && !ctx.hasArtifacts) {

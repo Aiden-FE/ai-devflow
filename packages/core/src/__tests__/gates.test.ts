@@ -47,16 +47,31 @@ describe('gates', () => {
   it('requires reviewPassed for testing -> in_review (no drag/IPC bypass)', () => {
     // 审查未通过 -> 拒绝进入待验收
     expect(
-      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: false })).ok,
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: false, knowledgeGatePassed: true })).ok,
     ).toBe(false);
     // 未提供审查结论（如拖拽）-> 拒绝
     expect(
-      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true })).ok,
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, knowledgeGatePassed: true })).ok,
     ).toBe(false);
-    // 审查通过 + 产物 -> 允许
+    // 审查通过 + 产物 + 知识门禁 -> 允许
     expect(
-      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: true })).ok,
+      canTransition({ status: 'testing' }, 'in_review', ctx({ hasArtifacts: true, reviewPassed: true, knowledgeGatePassed: true })).ok,
     ).toBe(true);
+  });
+
+  it('blocks testing to in_review until the knowledge gate passes', () => {
+    const result = canTransition(
+      { status: 'testing' },
+      'in_review',
+      {
+        hasAcceptance: true,
+        hasAgentAssigned: true,
+        hasArtifacts: true,
+        reviewPassed: true,
+        knowledgeGatePassed: false,
+      },
+    );
+    expect(result).toEqual({ ok: false, reasons: ['进入待验收前需完成知识评估与必要沉淀'] });
   });
 
   it('allows review-fail return testing -> in_progress', () => {

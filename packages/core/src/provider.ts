@@ -22,7 +22,8 @@ export type Workload =
   | 'task_proposal'
   | 'dev_execution'
   | 'testing'
-  | 'task_chat';
+  | 'task_chat'
+  | 'knowledge_maintenance';
 
 /** 专家键（内部稳定英文标识符；UI 显示中文标签）。 */
 export type AgentKey =
@@ -31,6 +32,7 @@ export type AgentKey =
   | 'dev_lead'  // 研发负责人
   | 'dev'       // 研发专家
   | 'test'      // 测试专家
+  | 'project_lead' // 项目负责人（知识治理）
   | 'chat';     // 通用对话
 
 /** 按 agent 覆盖 provider + 模型（用户配置；无密钥，引用 ProviderConfig.id）。 */
@@ -56,6 +58,8 @@ export function workloadAgentKey(workload: Workload): AgentKey {
       return 'test';
     case 'task_chat':
       return 'chat';
+    case 'knowledge_maintenance':
+      return 'project_lead';
   }
 }
 

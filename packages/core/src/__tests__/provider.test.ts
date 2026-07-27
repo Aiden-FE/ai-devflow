@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { normalizeProviderInput, workloadAgentKey, type AgentKey, type Workload } from '../provider.js';
 
 describe('workloadAgentKey', () => {
-  it('路由到 6 专家键', () => {
+  it('路由到专家键', () => {
     const cases: Array<[Workload, AgentKey]> = [
       ['requirement_chat', 'product'],
       ['requirement_proposal', 'product'],
@@ -11,15 +11,16 @@ describe('workloadAgentKey', () => {
       ['dev_execution', 'dev'],
       ['testing', 'test'],
       ['task_chat', 'chat'],
+      ['knowledge_maintenance', 'project_lead'],
     ];
     for (const [wl, expected] of cases) {
       expect(workloadAgentKey(wl)).toBe(expected);
     }
   });
 
-  it('AgentKey 仅含 6 个专家键', () => {
-    const keys: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
-    expect(keys).toHaveLength(6);
+  it('AgentKey 含 7 个专家键', () => {
+    const keys: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead', 'chat'];
+    expect(keys).toHaveLength(7);
   });
 });
 
