@@ -4,11 +4,12 @@ import { ProjectsPage } from './pages/Projects.js';
 import { WorkspacePage } from './pages/Workspace.js';
 import { SettingsPage } from './pages/Settings.js';
 import { useT } from './i18n/index.js';
-import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot } from 'lucide-react';
+import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot, Library } from 'lucide-react';
 import { BrandMark } from './components/brand-mark.js';
 import type { Project, TaskStatus } from '@ai-devflow/core';
+import { KnowledgePage } from './pages/Knowledge.js';
 
-type Route = 'projects' | 'workspace' | 'settings';
+type Route = 'projects' | 'workspace' | 'knowledge' | 'settings';
 
 export function App(): React.ReactElement {
   const t = useT();
@@ -45,6 +46,8 @@ export function App(): React.ReactElement {
   const openProject = useCallback((p: Project) => {
     setProject(p);
     setRoute('workspace');
+    // 打开项目时触发一次只读轻检（不阻塞）。
+    api.knowledge?.startAudit(p.id, 'light').catch(() => {});
   }, []);
 
   const switchProject = useCallback((id: string) => {
@@ -73,6 +76,16 @@ export function App(): React.ReactElement {
         </div>
         {navItem('projects', <FolderKanban className="h-4 w-4" />, t('nav.projects'))}
         {navItem('workspace', <LayoutDashboard className="h-4 w-4" />, t('nav.workspace'))}
+        <button
+          className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+            route === 'knowledge' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground'
+          } ${project ? '' : 'cursor-not-allowed opacity-40'}`}
+          disabled={!project}
+          onClick={() => project && setRoute('knowledge')}
+        >
+          <Library className="h-4 w-4" />
+          {t('nav.knowledge')}
+        </button>
         {navItem('settings', <SettingsIcon className="h-4 w-4" />, t('nav.settings'))}
 
         <div className="flex-1" />
@@ -97,6 +110,7 @@ export function App(): React.ReactElement {
             onNavigateSettings={() => setRoute('settings')}
           />
         )}
+        {route === 'knowledge' && project && <KnowledgePage project={project} />}
         {route === 'settings' && <SettingsPage />}
       </main>
     </div>

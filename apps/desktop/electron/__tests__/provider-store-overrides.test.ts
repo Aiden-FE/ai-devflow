@@ -102,3 +102,14 @@ describe('ProviderStore.migrateAgentOverridesToExperts', () => {
     expect(store.listAgentOverrides()).toEqual([]);
   });
 });
+
+describe('ProviderStore project_lead override round-trip', () => {
+  it('saves, lists, and removes a project_lead override', () => {
+    const store = makeStore();
+    store.saveAgentOverride({ agentKey: 'project_lead', providerId: 'p1', model: 'lead-kb-model' });
+    const listed = store.listAgentOverrides();
+    expect(listed.find((o) => o.agentKey === 'project_lead')).toEqual({ agentKey: 'project_lead', providerId: 'p1', model: 'lead-kb-model' });
+    store.removeAgentOverride('project_lead');
+    expect(store.listAgentOverrides().find((o) => o.agentKey === 'project_lead')).toBeUndefined();
+  });
+});

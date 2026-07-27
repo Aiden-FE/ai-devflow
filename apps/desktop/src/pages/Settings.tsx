@@ -17,8 +17,9 @@ import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, Them
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
-const MODEL_ROLES: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
-const AGENT_KEYS: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'chat'];
+const AGENT_KEYS: AgentKey[] = ['product', 'ux', 'dev_lead', 'dev', 'test', 'project_lead', 'chat'];
+const MODEL_ROLES: AgentKey[] = AGENT_KEYS.filter((k) => k !== 'chat');
+export { AGENT_KEYS };
 
 const NOTIF_STATUSES: TaskStatus[] = ['ready', 'in_progress', 'awaiting_input', 'in_review'];
 
