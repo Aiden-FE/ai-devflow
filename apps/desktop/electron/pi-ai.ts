@@ -4,9 +4,10 @@
 import { randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AiChatMessage, AiRequirementProposal, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
+import type { AiChatMessage, AiRequirementProposal, AgentKey, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
 import { redactText } from '@ai-devflow/core';
 import { z } from 'zod';
+import { runUxConsultation } from './ux-consult.js';
 import type {
   PiProcessSupervisor,
   ProviderRoute,
@@ -39,6 +40,19 @@ export const TASK_PROPOSAL_TOOL = 'ai_devflow_propose_task';
 
 export type ChatWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 'requirement_proposal';
 
+/** 对话 workload -> 专家 AgentKey（供 ProviderRouter 路由）。 */
+export function chatWorkloadToExpert(workload: ChatWorkload): AgentKey {
+  switch (workload) {
+    case 'requirement_chat':
+    case 'requirement_proposal':
+      return 'product';
+    case 'task_proposal':
+      return 'dev_lead';
+    case 'task_chat':
+      return 'chat';
+  }
+}
+
 export interface PiTextExecutor {
   (
     workload: ChatWorkload,
@@ -47,13 +61,19 @@ export interface PiTextExecutor {
     options?: { onlyProviderId?: string; cwd?: string },
     onToolResult?: (toolName: string, payload: unknown) => void,
     onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
+    onConsultUx?: (requirementContext: string) => Promise<string>,
+    systemPromptOverride?: string,
   ): Promise<string>;
 }
 
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void }): Promise<string>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void; onConsultUx?: (requirementContext: string) => Promise<string> }): Promise<string>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
+  /**
+   * UX 子咨询：产品专家经 ai_devflow_consult_ux 调用时，启动一次 UX专家 run 返回结构化建议。
+   */
+  consultUx(requirementContext: string): Promise<string>;
   /**
    * 列出兼容网关可用模型；标准提供商返回空数组（不发起网络请求）。
    * `provider` / `secret` 由调用方（IPC 层）从 ProviderStore 解析；密钥不进入 Renderer。
@@ -280,6 +300,8 @@ export async function executeTextOnRoute(
   onToolResult?: (toolName: string, payload: unknown) => void,
   cwdOverride?: string,
   onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
+  onConsultUx?: (requirementContext: string) => Promise<string>,
+  systemPromptOverride?: string,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
@@ -287,7 +309,7 @@ export async function executeTextOnRoute(
   const step = stepAgentForWorkload(workload);
   const profileDir = step
     ? materializeStepAgentProfile(sessionDir, step, deps.assetsRoot)
-    : materializeChatProfile(sessionDir, systemPromptFor(workload));
+    : materializeChatProfile(sessionDir, systemPromptOverride ?? systemPromptFor(workload));
   const messagesText = formatMessages(messages);
   const plan = buildChatPlan(entry, route, sessionDir, profileDir, workload, messagesText, deps.projectToolPath, step);
   if (plan.modelsJson) {
@@ -307,6 +329,14 @@ export async function executeTextOnRoute(
     const m = msg as { kind?: string; toolUseId?: string; payload?: unknown };
     if (m?.kind === 'ask' && m.toolUseId) {
       onAsk?.(m.toolUseId, m.payload, (reply: unknown) => spawned.send(reply));
+    } else if (m?.kind === 'consult_ux' && m.toolUseId && onConsultUx && m.payload && typeof (m.payload as { requirementContext?: unknown }).requirementContext === 'string') {
+      // UX 子咨询：产品专家调用 ai_devflow_consult_ux。主进程启动一次 UX专家 run，把建议回灌。
+      const ctx = (m.payload as { requirementContext: string }).requirementContext;
+      void onConsultUx(ctx).then((advice) => {
+        spawned.send({ kind: 'consult_ux_result', toolUseId: m.toolUseId, advice });
+      }).catch((err) => {
+        spawned.send({ kind: 'consult_ux_result', toolUseId: m.toolUseId, advice: `UX 子咨询失败：${(err as Error).message}` });
+      });
     }
   });
 
@@ -463,14 +493,14 @@ function buildPiFailureDetail(
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
-  return async (workload, messages, onDelta, options, onToolResult, onAsk) => {
+  return async (workload, messages, onDelta, options, onToolResult, onAsk, onConsultUx, systemPromptOverride) => {
     // cwd 仅用于 task_proposal spawn 的工作目录，不属于路由选项；从 options 中取出后不透传给 router。
     const { cwd, ...routerOptions } = options ?? {};
     const result = await deps.router.execute(
-      workload,
+      chatWorkloadToExpert(workload),
       async (route) => {
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk);
+          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk, onConsultUx, systemPromptOverride);
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -547,7 +577,7 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
           : messages;
       // task_proposal（mode='task_proposal'）需要探索真实仓库代码：以项目仓库根作为 spawn cwd，
       // 令 task_proposer 的 read/grep/find/ls 能读到实际工程。其余 workload 不传 cwd，保持隔离临时目录。
-      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk);
+      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx);
     },
 
     proposeRequirement(messages) {
@@ -556,6 +586,10 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
 
     testConnection(providerId) {
       return testConnectionWithRouter(executeText, providerId);
+    },
+
+    consultUx(requirementContext) {
+      return runUxConsultation(requirementContext, { executeText });
     },
 
     async listModels(provider, secret) {

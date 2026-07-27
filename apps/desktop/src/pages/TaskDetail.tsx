@@ -15,7 +15,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
 import { Pencil, Pause, Play, ChevronDown, ChevronRight, CheckCircle2, ShieldQuestion, MessageCircleQuestion, AlertTriangle, Send, XCircle } from 'lucide-react';
-import type { Task, LogEntry, ExecutionRecord, PendingQuestion, Requirement, TaskRole, TaskMessage, PendingInteraction } from '@ai-devflow/core';
+import type { Task, LogEntry, ExecutionRecord, PendingQuestion, Requirement, TaskTypeLabel, TaskMessage, PendingInteraction } from '@ai-devflow/core';
 import { Checkbox } from '../components/ui/checkbox.js';
 
 export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => void }): React.ReactElement {
@@ -377,7 +377,7 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
   const t = useT();
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
-  const [role, setRole] = useState<TaskRole>(task.role);
+  const [typeLabel, setTypeLabel] = useState<TaskTypeLabel | ''>(task.typeLabel ?? '');
   const [dependsOn, setDependsOn] = useState<string[]>(task.dependsOn ?? []);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
@@ -385,7 +385,7 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
   const save = async () => {
     setBusy(true); setError(undefined);
     try {
-      await api.tasks.update({ id: task.id, title, description, role, dependsOn });
+      await api.tasks.update({ id: task.id, title, description, typeLabel: typeLabel || undefined, dependsOn });
       onSaved();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -398,14 +398,15 @@ function EditTaskDialog({ task, siblings, onClose, onSaved }: { task: Task; sibl
           <div className="flex flex-col gap-1.5"><Label>{t('task.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
           <div className="flex flex-col gap-1.5"><Label>{t('task.description')}</Label><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} /></div>
           <div className="flex flex-col gap-1.5">
-            <Label>{t('task.role')}</Label>
-            <Select value={role} onValueChange={(v) => setRole(v as TaskRole)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+            <Label>{t('task.typeLabel')}</Label>
+            <Select value={typeLabel} onValueChange={(v) => setTypeLabel(v as TaskTypeLabel | '')}>
+              <SelectTrigger><SelectValue placeholder={t('task.typeLabel.none')} /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="planner">{t('role.planner')}</SelectItem>
-                <SelectItem value="coder">{t('role.coder')}</SelectItem>
-                <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
-                <SelectItem value="tester">{t('role.tester')}</SelectItem>
+                <SelectItem value="">{t('task.typeLabel.none')}</SelectItem>
+                <SelectItem value="frontend">{t('task.typeLabel.frontend')}</SelectItem>
+                <SelectItem value="backend">{t('task.typeLabel.backend')}</SelectItem>
+                <SelectItem value="fullstack">{t('task.typeLabel.fullstack')}</SelectItem>
+                <SelectItem value="integration">{t('task.typeLabel.integration')}</SelectItem>
               </SelectContent>
             </Select>
           </div>

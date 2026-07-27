@@ -53,6 +53,7 @@ export const BUILTIN_EXTENSIONS = [
   'requirement-bridge',
   'task-bridge',
   'ask-bridge',
+  'ux-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
@@ -149,11 +150,11 @@ export type StepWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 
 export const STEP_AGENTS: Record<string, StepAgentProfile> = {
   requirement_refiner: {
     step: 'requirement_refiner',
-    version: 2,
+    version: 3,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
-    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask'],
-    extensions: ['requirement-bridge', 'ask-bridge'],
+    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask', 'ai_devflow_consult_ux'],
+    extensions: ['requirement-bridge', 'ask-bridge', 'ux-bridge'],
     timeoutMs: 10 * 60_000,
   },
   task_proposer: {

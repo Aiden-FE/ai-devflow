@@ -606,6 +606,11 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
           sendAi({ type: 'question', sessionId: payload.sessionId, toolUseId, tabs: tabs as AskTabs });
           pendingAsks.set(payload.sessionId, { toolUseId, send });
         },
+        onConsultUx: (requirementContext) => {
+          // UX 子咨询：产品专家调用 ai_devflow_consult_ux。主进程启动 UX专家 run，同步返回建议。
+          if (!services.piAi) return Promise.resolve('UX 子咨询不可用：AI 服务未就绪');
+          return services.piAi.consultUx(requirementContext);
+        },
       });
       pendingAsks.delete(payload.sessionId);
       sendAi({ type: 'done', sessionId: payload.sessionId, fullText });

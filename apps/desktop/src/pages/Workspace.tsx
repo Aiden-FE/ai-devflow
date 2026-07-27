@@ -20,7 +20,7 @@ import {
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
 import { Plus, MessageSquarePlus, Archive, AlertCircle, Info, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
-import type { Project, Iteration, Requirement, Task, TaskStatus, TaskRole, AiTaskProposal } from '@ai-devflow/core';
+import type { Project, Iteration, Requirement, Task, TaskStatus, TaskTypeLabel, AiTaskProposal } from '@ai-devflow/core';
 import type { AskTabs, AskAnswer } from '../../electron/api.js';
 
 export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSettings }: {
@@ -673,11 +673,11 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
   const t = useT();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [role, setRole] = useState<TaskRole>('coder');
+  const [typeLabel, setTypeLabel] = useState<TaskTypeLabel | ''>('');
   const [dependsOn, setDependsOn] = useState<string[]>([]);
   const toggleDep = (id: string) => setDependsOn((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   const submit = async () => {
-    const task = await api.tasks.create({ requirementId, title, description, role, dependsOn: dependsOn.length ? dependsOn : undefined });
+    const task = await api.tasks.create({ requirementId, title, description, typeLabel: typeLabel || undefined, dependsOn: dependsOn.length ? dependsOn : undefined });
     onCreated(task.id);
   };
   return (
@@ -685,14 +685,15 @@ function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementI
       <div className="flex flex-col gap-1.5"><Label>{t('task.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
       <div className="flex flex-col gap-1.5"><Label>{t('task.description')}</Label><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} /></div>
       <div className="flex flex-col gap-1.5">
-        <Label>{t('task.role')}</Label>
-        <Select value={role} onValueChange={(v) => setRole(v as TaskRole)}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
+        <Label>{t('task.typeLabel')}</Label>
+        <Select value={typeLabel} onValueChange={(v) => setTypeLabel(v as TaskTypeLabel | '')}>
+          <SelectTrigger><SelectValue placeholder={t('task.typeLabel.none')} /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="planner">{t('role.planner')}</SelectItem>
-            <SelectItem value="coder">{t('role.coder')}</SelectItem>
-            <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
-            <SelectItem value="tester">{t('role.tester')}</SelectItem>
+            <SelectItem value="">{t('task.typeLabel.none')}</SelectItem>
+            <SelectItem value="frontend">{t('task.typeLabel.frontend')}</SelectItem>
+            <SelectItem value="backend">{t('task.typeLabel.backend')}</SelectItem>
+            <SelectItem value="fullstack">{t('task.typeLabel.fullstack')}</SelectItem>
+            <SelectItem value="integration">{t('task.typeLabel.integration')}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -762,7 +763,7 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
         mode: 'task_proposal',
         context,
         projectPath,
-        onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, role: x.role, dependsOn: x.dependsOn })) as AiTaskProposal[]),
+        onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, typeLabel: x.typeLabel, dependsOn: x.dependsOn })) as AiTaskProposal[]),
         onQuestion: (sessionId, toolUseId, tabs) => {
           sessionRef.current = sessionId;
           setAskCards((prev) => ({ ...prev, [toolUseId]: { toolUseId, tabs, submitted: false } }));
@@ -792,7 +793,7 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   };
   const addDraft = () => {
     const draftId = `draft-${Date.now()}`;
-    setProposals((prev) => [...(prev ?? []), { draftId, title: '', description: '', role: 'coder', dependsOn: [] }]);
+    setProposals((prev) => [...(prev ?? []), { draftId, title: '', description: '', dependsOn: [] }]);
   };
 
   const createAll = async () => {
@@ -853,13 +854,14 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
             <div key={p.draftId} className="rounded-md border border-border p-2 text-xs">
               <div className="flex flex-wrap items-center gap-1.5">
                 <Input className="h-7 flex-1" value={p.title} onChange={(e) => updateDraft(p.draftId, { title: e.target.value })} placeholder={t('task.title')} />
-                <Select value={p.role} onValueChange={(v) => updateDraft(p.draftId, { role: v as TaskRole })}>
-                  <SelectTrigger className="h-7 w-24"><SelectValue /></SelectTrigger>
+                <Select value={p.typeLabel ?? ''} onValueChange={(v) => updateDraft(p.draftId, { typeLabel: (v || undefined) as TaskTypeLabel | undefined })}>
+                  <SelectTrigger className="h-7 w-24"><SelectValue placeholder={t('task.typeLabel.none')} /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="planner">{t('role.planner')}</SelectItem>
-                    <SelectItem value="coder">{t('role.coder')}</SelectItem>
-                    <SelectItem value="reviewer">{t('role.reviewer')}</SelectItem>
-                    <SelectItem value="tester">{t('role.tester')}</SelectItem>
+                    <SelectItem value="">{t('task.typeLabel.none')}</SelectItem>
+                    <SelectItem value="frontend">{t('task.typeLabel.frontend')}</SelectItem>
+                    <SelectItem value="backend">{t('task.typeLabel.backend')}</SelectItem>
+                    <SelectItem value="fullstack">{t('task.typeLabel.fullstack')}</SelectItem>
+                    <SelectItem value="integration">{t('task.typeLabel.integration')}</SelectItem>
                   </SelectContent>
                 </Select>
                 <Button size="sm" variant="ghost" className="text-destructive" onClick={() => deleteDraft(p.draftId)}>{t('task.ai.deleteDraft')}</Button>
