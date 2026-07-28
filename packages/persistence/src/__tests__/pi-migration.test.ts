@@ -13,7 +13,7 @@ function freshPath(): string {
 describe('Pi-only schema migration (v9, active)', () => {
   it('migrates a fresh db to v9: drops agent columns, creates provider_health & execution_attempts', () => {
     const db = openDatabase(freshPath());
-    expect(getCurrentVersion(db)).toBe(12);
+    expect(getCurrentVersion(db)).toBe(14);
     const taskCols = (db.prepare('PRAGMA table_info(tasks)').all() as Array<{ name: string }>).map((c) => c.name);
     const execCols = (db.prepare('PRAGMA table_info(execution_records)').all() as Array<{ name: string }>).map((c) => c.name);
     expect(taskCols).not.toContain('agent_type');
@@ -34,7 +34,7 @@ describe('Pi-only schema migration (v9, active)', () => {
     v8.close();
 
     const db = openDatabase(path);
-    expect(getCurrentVersion(db)).toBe(12);
+    expect(getCurrentVersion(db)).toBe(14);
     // 备份已创建
     const backups = readdirSync(join(path, '..', 'backups')).filter((n) => n.endsWith('.db'));
     expect(backups.length).toBeGreaterThanOrEqual(1);
@@ -57,7 +57,7 @@ describe('Pi-only schema migration (v9, active)', () => {
     v8.close();
 
     const db = openDatabase(path);
-    expect(getCurrentVersion(db)).toBe(12);
+    expect(getCurrentVersion(db)).toBe(14);
     expect(readdirSync(join(path, '..', 'backups')).filter((name) => name.endsWith('.db'))).toHaveLength(1);
   });
 
@@ -100,7 +100,7 @@ describe('Pi-only schema migration (v9, active)', () => {
 
   it('rejects re-applying v9 after openDatabase already migrated', () => {
     const db = openDatabase(freshPath());
-    expect(getCurrentVersion(db)).toBe(12);
+    expect(getCurrentVersion(db)).toBe(14);
     expect(() => applyPiOnlyMigrationV9(db)).toThrow();
     expect((db.prepare('SELECT count(*) AS n FROM tasks').get() as { n: number }).n).toBe(0);
   });

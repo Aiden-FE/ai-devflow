@@ -302,8 +302,8 @@ export interface DesktopApi {
     /**
      * 流式对话：onChunk 接收增量文本，resolve 完整文本。
      * mode 决定聚焦：task（任务对话）/ requirement（需求完善）/ task_proposal（研发视角拆解子任务）。
-     * context 为附加上下文（如当前需求内容）。mode='task_proposal' 时需传 projectPath 以便 AI 探索仓库代码，
-     * 并通过 onTaskProposal 接收 AI 在方案确定后产出的任务草稿。
+     * context 为附加上下文（如当前需求内容）。requirement / task_proposal 模式传 projectPath 后，
+     * AI 会结合项目知识与仓库现状；任务草稿通过 onTaskProposal 回传。
      */
     chat(
       messages: AiChatMessage[],

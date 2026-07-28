@@ -153,16 +153,16 @@ export type StepWorkload = 'task_chat' | 'requirement_chat' | 'task_proposal' | 
 export const STEP_AGENTS: Record<string, StepAgentProfile> = {
   requirement_refiner: {
     step: 'requirement_refiner',
-    version: 3,
+    version: 4,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
-    tools: ['ai_devflow_propose_requirement', 'ai_devflow_ask', 'ai_devflow_consult_ux'],
+    tools: ['read', 'grep', 'find', 'ls', 'ai_devflow_propose_requirement', 'ai_devflow_ask', 'ai_devflow_consult_ux'],
     extensions: ['requirement-bridge', 'ask-bridge', 'ux-bridge'],
     timeoutMs: 10 * 60_000,
   },
   task_proposer: {
     step: 'task_proposer',
-    version: 3,
+    version: 4,
     systemPromptFile: 'SYSTEM.md',
     skills: ['brainstorming'],
     // read-only 探索工具用于「探索相关项目逻辑」：研读真实代码以判断子任务拆分与实施计划是否可行。

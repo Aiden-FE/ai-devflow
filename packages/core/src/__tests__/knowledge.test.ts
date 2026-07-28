@@ -132,6 +132,7 @@ describe('isKnowledgeAgentPayload', () => {
         kind: 'knowledge_deposition',
         changedPaths: ['docs/knowledge/feature/b.md'],
         knowledgeIds: ['feature:b'],
+        candidateKnowledge: [{ candidateIndex: 0, knowledgeId: 'feature:b' }],
         assessment: { verdict: 'none', reason: 'x', evidence: ['y'] },
       },
       { kind: 'iteration_changelog', changedPaths: [], coveredTaskIds: ['t1'] },
@@ -153,6 +154,17 @@ describe('isKnowledgeAgentPayload', () => {
     ).toBe(false);
     expect(
       isKnowledgeAgentPayload({ kind: 'iteration_changelog', changedPaths: [], coveredTaskIds: 't1' as unknown as string[] }),
+    ).toBe(false);
+    expect(
+      isKnowledgeAgentPayload({
+        kind: 'knowledge_deposition',
+        changedPaths: ['docs/knowledge/feature/a.md'],
+        knowledgeIds: ['feature:a'],
+        assessment: {
+          verdict: 'valuable',
+          candidates: [{ type: 'feature', summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }],
+        },
+      }),
     ).toBe(false);
   });
 });

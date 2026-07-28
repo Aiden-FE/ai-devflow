@@ -28,7 +28,7 @@ import {
 } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
 import type { AgentRunner, AgentRun } from '@ai-devflow/agents';
-import { createWorktree, removeWorktree, mergeWorktreeBranch, mergeBranchInto, ensureSprintBranch, sprintBranchName, branchExists, WorktreeError } from './worktree.js';
+import { createWorktree, removeWorktree, mergeWorktreeBranch, mergeBranchInto, commitWorktreeChanges, syncWorktreeWithBranch, ensureSprintBranch, sprintBranchName, branchExists, WorktreeError } from './worktree.js';
 import { Semaphore } from './semaphore.js';
 
 export interface OrchestratorOptions {
@@ -299,6 +299,11 @@ export class Orchestrator extends EventEmitter {
 
       try {
         const consumed = await this.consumeRun(task, execution, run, entry, stage, i);
+        this.completeTaskManifest(
+          knowledgeManifest,
+          consumed.knowledgeReads,
+          consumed.error || consumed.interacted || !consumed.done ? 'failed' : 'completed',
+        );
         if (consumed.interacted) return;
         if (consumed.error) throw new TaskRunError(consumed.error, consumed.failureKind);
         if (!consumed.done) {
@@ -387,49 +392,13 @@ export class Orchestrator extends EventEmitter {
     if (!review) return;
     const { verdict, assessment } = review;
     if (verdict.pass) {
-      // 知识门禁：valuable 必须完成沉淀校验；none 必须有非空理由与证据。
-      const gate = await this.finalizeTaskKnowledge(task, project, assessment);
-      if (!gate.gatePassed) {
-        this.emit('task-error', { taskId: task.id, error: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}` });
-        return;
-      }
-      const branchName = `ai-devflow/${task.id}`;
-      // 迭代激活时合并任务分支到迭代分支，否则合并到项目默认分支。
-      const sprintBranch = await this.resolveSprintTarget(task);
-      const latest = this.repos.executions.getLatest(task.id);
-      let merged = false;
-      let mergeReason: string | undefined;
-      if (sprintBranch) {
-        const mergeRes = await mergeBranchInto({
-          repoPath: project.path,
-          into: sprintBranch,
-          source: branchName,
-        });
-        merged = mergeRes.merged;
-        mergeReason = mergeRes.reason;
-        if (merged) {
-          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到迭代分支 ${sprintBranch}` });
-        }
+      const finalize = () => this.finalizePassedReview(task, project, assessment);
+      const coordinator = this.opts.knowledgeCoordinator;
+      if (coordinator && task.iterationId) {
+        await coordinator.withIterationLock(task.iterationId, finalize);
       } else {
-        const mergeRes = await mergeWorktreeBranch({
-          repoPath: project.path,
-          branchName,
-          defaultBranch: project.defaultBranch,
-        });
-        merged = mergeRes.merged;
-        mergeReason = mergeRes.reason;
-        if (merged) {
-          this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
-        }
+        await finalize();
       }
-      if (!merged) {
-        // 合并失败：任务保持 testing，任务分支/worktree 保留以供重试。
-        this.recordMessage(task, latest, { role: 'system', kind: 'error', text: `审查通过但合并失败：${mergeReason ?? '未知原因'}（工作保留在分支 ${branchName}）` });
-        this.emit('task-error', { taskId: task.id, error: `任务分支合并失败：${mergeReason ?? '未知原因'}` });
-        return;
-      }
-      // 审查通过 + 知识门禁 + 合并成功才进入待验收。
-      this.transition(task, 'in_review', { reviewPassed: true, knowledgeGatePassed: true });
       return;
     }
 
@@ -459,6 +428,113 @@ export class Orchestrator extends EventEmitter {
     task.currentStage = 0;
     this.repos.tasks.update(task);
     await this.runPipeline(task, project, { userInput: `[审查反馈，请据此修复] ${feedback}` }, entry);
+  }
+
+  private async finalizePassedReview(
+    task: Task,
+    project: Project,
+    assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined,
+  ): Promise<void> {
+    const branchName = `ai-devflow/${task.id}`;
+    if (!task.worktreePath) {
+      this.emit('task-error', { taskId: task.id, error: '任务 worktree 缺失，无法提交审查通过的改动' });
+      return;
+    }
+    const commit = await commitWorktreeChanges({
+      worktreePath: task.worktreePath,
+      message: `task: ${task.id}`,
+    });
+    if (commit.reason) {
+      const latest = this.repos.executions.getLatest(task.id);
+      this.recordMessage(task, latest, {
+        role: 'system',
+        kind: 'error',
+        text: `提交审查通过的任务改动失败：${commit.reason}（工作保留在 ${task.worktreePath}）`,
+      });
+      this.emit('task-error', { taskId: task.id, error: `任务改动提交失败：${commit.reason}` });
+      return;
+    }
+    const sprintBranch = await this.resolveSprintTarget(task);
+    if (sprintBranch) {
+      const sync = await syncWorktreeWithBranch({
+        worktreePath: task.worktreePath,
+        sourceBranch: sprintBranch,
+      });
+      if (!sync.merged) {
+        const latest = this.repos.executions.getLatest(task.id);
+        this.recordMessage(task, latest, {
+          role: 'system',
+          kind: 'error',
+          text: `同步迭代分支失败：${sync.reason ?? '未知原因'}（工作保留在分支 ${branchName}）`,
+        });
+        this.emit('task-error', { taskId: task.id, error: `同步迭代分支失败：${sync.reason ?? '未知原因'}` });
+        return;
+      }
+    }
+    // 知识门禁：valuable 必须完成沉淀校验；none 必须有非空理由与证据。
+    const gate = await this.finalizeTaskKnowledge(task, project, assessment);
+    if (!gate.gatePassed) {
+      if (gate.awaitingInitialization) {
+        const title = '检测到可复用知识，请先在项目知识库中确认初始化草稿，再回复此任务继续沉淀。';
+        const message = this.recordMessage(task, this.repos.executions.getLatest(task.id), {
+          role: 'system', kind: 'clarification_request', text: title,
+        });
+        this.createInteraction(task, 'confirmation', title, {
+          messageId: message.id,
+          detail: gate.diagnostics.join('; '),
+        });
+        const pausedFrom = task.status;
+        this.transition(task, 'awaiting_input');
+        task.pausedFrom = pausedFrom;
+        this.repos.tasks.update(task);
+        return;
+      }
+      this.emit('task-error', { taskId: task.id, error: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}` });
+      return;
+    }
+    // 迭代激活时合并任务分支到迭代分支，否则合并到项目默认分支。
+    const latest = this.repos.executions.getLatest(task.id);
+    let merged = gate.taskIntegrated === true;
+    let mergeReason: string | undefined;
+    if (merged) {
+      this.recordMessage(task, latest, {
+        role: 'system',
+        kind: 'status',
+        text: sprintBranch
+          ? `审查通过，任务代码与知识已原子合并到迭代分支 ${sprintBranch}`
+          : `审查通过，任务代码与知识已原子合并到 ${project.defaultBranch}`,
+      });
+    } else if (sprintBranch) {
+      const mergeRes = await mergeBranchInto({
+        repoPath: project.path,
+        into: sprintBranch,
+        source: branchName,
+      });
+      merged = mergeRes.merged;
+      mergeReason = mergeRes.reason;
+      if (merged) {
+        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到迭代分支 ${sprintBranch}` });
+      }
+    } else {
+      const mergeRes = await mergeWorktreeBranch({
+        repoPath: project.path,
+        branchName,
+        defaultBranch: project.defaultBranch,
+      });
+      merged = mergeRes.merged;
+      mergeReason = mergeRes.reason;
+      if (merged) {
+        this.recordMessage(task, latest, { role: 'system', kind: 'status', text: `审查通过，已合并到 ${project.defaultBranch}，产出已落入主项目` });
+      }
+    }
+    if (!merged) {
+      // 合并失败：任务保持 testing，任务分支/worktree 保留以供重试。
+      this.recordMessage(task, latest, { role: 'system', kind: 'error', text: `审查通过但合并失败：${mergeReason ?? '未知原因'}（工作保留在分支 ${branchName}）` });
+      this.emit('task-error', { taskId: task.id, error: `任务分支合并失败：${mergeReason ?? '未知原因'}` });
+      return;
+    }
+    // 审查通过 + 知识门禁 + 合并成功才进入待验收。
+    this.transition(task, 'in_review', { reviewPassed: true, knowledgeGatePassed: true });
   }
 
   /**
@@ -507,6 +583,11 @@ export class Orchestrator extends EventEmitter {
           entry,
           { id: REVIEW_STAGE_ID },
           task.currentStage,
+        );
+        this.completeTaskManifest(
+          knowledgeManifest,
+          consumed.knowledgeReads,
+          consumed.error || consumed.interacted || !consumed.done ? 'failed' : 'completed',
         );
         if (consumed.interacted) return undefined;
         output = consumed.output;
@@ -1101,7 +1182,7 @@ export class Orchestrator extends EventEmitter {
     task: Task,
     project: Project,
     assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined,
-  ): Promise<{ gatePassed: boolean; diagnostics: string[] }> {
+  ): Promise<{ gatePassed: boolean; taskIntegrated?: boolean; diagnostics: string[]; awaitingInitialization?: boolean }> {
     const coordinator = this.opts.knowledgeCoordinator;
     if (!coordinator) return { gatePassed: true, diagnostics: [] };
     const executionId = this.repos.executions.getLatest(task.id)?.id;
@@ -1113,7 +1194,12 @@ export class Orchestrator extends EventEmitter {
         assessment,
         worktreePath: task.worktreePath ?? project.path,
       });
-      return { gatePassed: result.gatePassed, diagnostics: result.diagnostics };
+      return {
+        gatePassed: result.gatePassed,
+        taskIntegrated: result.taskIntegrated,
+        diagnostics: result.diagnostics,
+        awaitingInitialization: result.awaitingInitialization,
+      };
     } catch (err) {
       return { gatePassed: false, diagnostics: [(err as Error).message] };
     }
@@ -1130,18 +1216,22 @@ export class Orchestrator extends EventEmitter {
   ): Promise<import('@ai-devflow/core').KnowledgeRetrievalManifest | undefined> {
     const coordinator = this.opts.knowledgeCoordinator;
     if (!coordinator) return undefined;
-    try {
-      return await coordinator.prepareTaskExecution({
-        task,
-        project: { id: project.id, path: project.path, defaultBranch: project.defaultBranch },
-        executionId,
-        expert: expert as 'dev' | 'test',
-        stage,
-        cwd,
-      });
-    } catch {
-      return undefined;
-    }
+    return coordinator.prepareTaskExecution({
+      task,
+      project: { id: project.id, path: project.path, defaultBranch: project.defaultBranch },
+      executionId,
+      expert: expert as 'dev' | 'test',
+      stage,
+      cwd,
+    });
+  }
+
+  private completeTaskManifest(
+    manifest: import('@ai-devflow/core').KnowledgeRetrievalManifest | undefined,
+    reads: import('@ai-devflow/core').KnowledgeReadEvidence[] | undefined,
+    state: 'completed' | 'failed',
+  ): void {
+    this.opts.knowledgeCoordinator?.completeRetrieval(manifest, reads, state);
   }
 
   /** 应用重启后恢复：扫描运行中/待沟通任务。 */

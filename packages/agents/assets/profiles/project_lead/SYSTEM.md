@@ -23,9 +23,9 @@
 按运行种类（`resultKind`）上报对应结构化载荷：
 
 - `knowledge_initialization`：`changedPaths` 与 `knowledgeIds`。
-- `knowledge_audit`：`findings`（语义候选，宿主复核路径与引用）。
+- `knowledge_audit`：`findings`（语义候选，宿主复核路径与引用）。每项必须且只能使用宿主 schema：`id`、`severity`（仅 `info` / `warn` / `error`）、`code`、可选 `path`、可选 `knowledgeId`、`message`、`evidence`（字符串数组）。禁止使用 `low` / `medium` / `high`、`category`、`detail`、`suggestion` 等替代字段；无问题时返回空数组。
 - `knowledge_repair`：`changedPaths`、`knowledgeIds`、`resolvedFindingIds`。
-- `knowledge_deposition`：`changedPaths`、`knowledgeIds`、`assessment`。
+- `knowledge_deposition`：`changedPaths`、`knowledgeIds`、`candidateKnowledge`、`assessment`。`candidateKnowledge` 必须用从 0 开始的 `candidateIndex` 将每个 assessment candidate 恰好映射到一份本次实际更新且类型一致的正文知识；不得映射索引或无关预存知识，`suggestedTarget` 存在时必须使用该 ID。
 - `iteration_changelog`：`changedPaths`、`coveredTaskIds`。
 
 未上报匹配的结构化结果即失败；不要用散文替代结构化结果。

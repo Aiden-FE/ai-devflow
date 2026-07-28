@@ -43,6 +43,7 @@ export interface KnowledgeRunsRepo {
   get(id: string): KnowledgeRunRecord | undefined;
   listByProject(projectId: string, limit?: number): KnowledgeRunRecord[];
   getLatestByIteration(iterationId: string, kind: 'iteration_changelog'): KnowledgeRunRecord | undefined;
+  setProgress(id: string, resultJson: string, changedPathsJson: string): void;
   markAwaitingConfirmation(id: string, draftBranch: string, changedPathsJson: string): void;
   setConfirmation(id: string, state: 'pending' | 'confirmed' | 'canceled'): void;
   finish(
@@ -98,6 +99,11 @@ export function createKnowledgeRunsRepo(db: DatabaseSync): KnowledgeRunsRepo {
         )
         .get(iterationId, kind) as Record<string, unknown> | undefined;
       return r ? mapRun(r) : undefined;
+    },
+    setProgress(id, resultJson, changedPathsJson) {
+      db.prepare(
+        `UPDATE knowledge_runs SET result_json=?, changed_paths_json=? WHERE id=?`,
+      ).run(resultJson, changedPathsJson, id);
     },
     markAwaitingConfirmation(id, draftBranch, changedPathsJson) {
       db.prepare(

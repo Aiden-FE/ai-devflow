@@ -25,6 +25,7 @@ description: 项目负责人专用——初始化、语义巡检、修复、沉�
 
 - 判断知识是否过期、冲突、缺失或应被归并；产出语义候选问题。
 - 宿主复核路径、引用与来源存在性；只读巡检不改写知识。
+- 每项 finding 必须严格为 `{ id, severity, code, path?, knowledgeId?, message, evidence }`；`severity` 仅允许 `info`、`warn`、`error`，`evidence` 必须是字符串数组。不得使用 `low` / `medium` / `high` 或 `category` / `detail` / `suggestion` 等别名字段。
 - 结构化结果：`{ kind: 'knowledge_audit', findings }`。
 
 ### knowledge_repair（修复）
@@ -37,7 +38,9 @@ description: 项目负责人专用——初始化、语义巡检、修复、沉�
 
 - 基于测试专家的候选与证据、任务 diff、检索 manifest 与现有知识，更新长期知识、索引、任务 MEMORY 与任务 CHANGELOG。
 - 归并多个候选，避免重复或互相矛盾的文档。
-- 结构化结果：`{ kind: 'knowledge_deposition', changedPaths, knowledgeIds, assessment }`。
+- 为每个 assessment candidate 返回一条显式映射：`candidateKnowledge: [{ candidateIndex, knowledgeId }]`。索引从 0 开始，每个候选恰好映射一次；可将多个候选归并到同一份本次实际更新的正文知识，但不得映射到索引或未修改的预存知识。
+- 映射知识的类型必须与候选类型一致；候选带 `suggestedTarget` 时必须映射到该稳定 ID。
+- 结构化结果：`{ kind: 'knowledge_deposition', changedPaths, knowledgeIds, candidateKnowledge, assessment }`。
 
 ### iteration_changelog（迭代归档前聚合）
 

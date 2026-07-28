@@ -40,6 +40,54 @@ describe('migrations', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('enforces one iteration version per project at the database boundary', () => {
+    repos.projects.insert({ id: 'p1', name: 'P1', path: '/p1', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.projects.insert({ id: 'p2', name: 'P2', path: '/p2', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'i1', projectId: 'p1', name: 'I1', version: 'v1', status: 'active', createdAt: 1 });
+
+    expect(() => repos.iterations.insert({
+      id: 'i2', projectId: 'p1', name: 'I2', version: 'v1', status: 'active', createdAt: 2,
+    })).toThrow();
+    expect(() => repos.iterations.insert({
+      id: 'i3', projectId: 'p2', name: 'I3', version: 'v1', status: 'active', createdAt: 2,
+    })).not.toThrow();
+  });
+
+  it.each([
+    ['duplicate versions', ['v1', 'v1']],
+    ['versions mapped to the same sprint branch', ['release 1', 'release-1']],
+    ['a single noncanonical version', ['release 1']],
+    ['a version containing a double dot', ['a..b']],
+    ['a version ending in dot-lock', ['release.lock']],
+  ])('diagnoses legacy %s before applying the iteration uniqueness migration', (_label, versions) => {
+    const dir = mkdtempSync(join(tmpdir(), 'aidf-v13-'));
+    const path = join(dir, 'legacy.db');
+    try {
+      const legacy = openDatabase(path, { maxVersion: 12 });
+      const legacyRepos = createRepositories(legacy);
+      legacyRepos.projects.insert({
+        id: 'p1', name: 'P1', path: '/p1', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {},
+      });
+      versions.forEach((version, index) => legacyRepos.iterations.insert({
+        id: `i${index + 1}`,
+        projectId: 'p1',
+        name: `I${index + 1}`,
+        version,
+        status: 'active',
+        createdAt: index + 1,
+      }));
+      legacy.close();
+
+      expect(() => openDatabase(path)).toThrow(/p1.*(?:release 1|v1|a\.\.b|release\.lock)/i);
+
+      const unchanged = openDatabase(path, { maxVersion: 12 });
+      expect(getCurrentVersion(unchanged)).toBe(12);
+      unchanged.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('transactions', () => {
@@ -69,6 +117,24 @@ describe('transactions', () => {
     });
     expect(repos.projects.get('p3')).toBeDefined();
     expect(repos.projects.get('p4')).toBeDefined();
+  });
+
+  it('exposes a repository transaction boundary for cross-repository state changes', () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
+    repos.knowledgeRuns.create({
+      id: 'run', projectId: 'p', iterationId: 'it', kind: 'iteration_changelog', state: 'running',
+      confirmationState: 'not_required', changedPathsJson: '[]', diagnosticsJson: '[]', resultJson: '{}', startedAt: 1,
+    });
+
+    expect(() => repos.transaction(() => {
+      repos.knowledgeRuns.finish('run', 'succeeded', 2);
+      repos.iterations.archive('it', 2);
+      throw new Error('rollback both');
+    })).toThrow('rollback both');
+
+    expect(repos.knowledgeRuns.get('run')?.state).toBe('running');
+    expect(repos.iterations.get('it')?.status).toBe('active');
   });
 });
 

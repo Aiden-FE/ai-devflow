@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { ProjectKnowledgeService } from '../service.js';
 import {
   emptyFixtureRepo,
@@ -150,5 +150,67 @@ describe('ProjectKnowledgeService.audit', () => {
     expect(snapshot.findings.map((f) => f.code)).toEqual(
       expect.arrayContaining(['untracked_markdown', 'ignored_markdown']),
     );
+    expect(snapshot.findings.find((finding) => finding.code === 'ignored_markdown')?.severity).toBe('error');
+    expect(snapshot.state).toBe('blocked');
+  });
+
+  it('requires non-index knowledge documents to declare at least one source', async () => {
+    const repo = await emptyFixtureRepo();
+    const service = new ProjectKnowledgeService();
+    await service.initializeKnowledge({ repoPath: repo, date: '2026-07-27' });
+    await mkdir(join(repo, 'docs/knowledge/feature'), { recursive: true });
+    await writeFile(join(repo, 'docs/knowledge/feature/no-source.md'), document({
+      id: 'feature:no-source',
+      sources: [],
+      related: [],
+    }));
+
+    const snapshot = await service.audit({ projectId: 'p1', repoPath: repo });
+
+    expect(snapshot.findings).toContainEqual(expect.objectContaining({
+      code: 'missing_sources',
+      knowledgeId: 'feature:no-source',
+      severity: 'error',
+    }));
+  });
+
+  it('reports source paths that do not exist in the repository', async () => {
+    const repo = await emptyFixtureRepo();
+    const service = new ProjectKnowledgeService();
+    await service.initializeKnowledge({ repoPath: repo, date: '2026-07-27' });
+    await mkdir(join(repo, 'docs/knowledge/feature'), { recursive: true });
+    await writeFile(join(repo, 'docs/knowledge/feature/missing-source.md'), document({
+      id: 'feature:missing-source',
+      sources: ['does/not/exist.ts'],
+      related: [],
+    }));
+
+    const snapshot = await service.audit({ projectId: 'p1', repoPath: repo });
+
+    expect(snapshot.findings).toContainEqual(expect.objectContaining({
+      code: 'missing_source_path',
+      knowledgeId: 'feature:missing-source',
+      evidence: ['does/not/exist.ts'],
+    }));
+  });
+
+  it('accepts an existing repository-relative source path', async () => {
+    const repo = await emptyFixtureRepo();
+    const service = new ProjectKnowledgeService();
+    await service.initializeKnowledge({ repoPath: repo, date: '2026-07-27' });
+    await writeFile(join(repo, 'README.md'), '# fixture\n');
+    await mkdir(join(repo, 'docs/knowledge/feature'), { recursive: true });
+    await writeFile(join(repo, 'docs/knowledge/feature/traced.md'), document({
+      id: 'feature:traced',
+      sources: ['README.md'],
+      related: [],
+    }));
+
+    const snapshot = await service.audit({ projectId: 'p1', repoPath: repo });
+    const sourceFindings = snapshot.findings.filter((finding) =>
+      finding.knowledgeId === 'feature:traced' && ['missing_sources', 'missing_source_path', 'invalid_source_path'].includes(finding.code),
+    );
+
+    expect(sourceFindings).toEqual([]);
   });
 });

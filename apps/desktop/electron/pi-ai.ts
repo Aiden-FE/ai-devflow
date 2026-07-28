@@ -316,8 +316,8 @@ export async function executeTextOnRoute(
     writeFileSync(join(profileDir, 'models.json'), plan.modelsJson);
   }
 
-  // task_proposal 需探索真实仓库代码：spawn 的 cwd 指向项目仓库根（cwdOverride），
-  // 令 read/grep/find/ls 看到真实工程。其余 workload 保持 cwd=sessionDir（隔离临时目录）。
+  // 需求/任务创建需探索真实仓库：传入 cwdOverride 时 spawn 指向项目根，令只读工具看到实际工程。
+  // 未绑定项目的 workload 保持 cwd=sessionDir（隔离临时目录）。
   const spawned = deps.supervisor.spawn(plan, {
     cwd: cwdOverride ?? sessionDir,
     timeoutMs: 120_000,
@@ -328,7 +328,10 @@ export async function executeTextOnRoute(
   spawned.onMessage((msg) => {
     const m = msg as { kind?: string; toolUseId?: string; payload?: unknown };
     if (m?.kind === 'ask' && m.toolUseId) {
-      onAsk?.(m.toolUseId, m.payload, (reply: unknown) => spawned.send(reply));
+      const tabs = m.payload && typeof m.payload === 'object' && !Array.isArray(m.payload)
+        ? (m.payload as { tabs?: unknown }).tabs
+        : m.payload;
+      onAsk?.(m.toolUseId, tabs, (reply: unknown) => spawned.send(reply));
     } else if (m?.kind === 'consult_ux' && m.toolUseId && onConsultUx && m.payload && typeof (m.payload as { requirementContext?: unknown }).requirementContext === 'string') {
       // UX 子咨询：产品专家调用 ai_devflow_consult_ux。主进程启动一次 UX专家 run，把建议回灌。
       const ctx = (m.payload as { requirementContext: string }).requirementContext;
@@ -572,11 +575,10 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
     chat(messages, onDelta, opts) {
       const workload = workloadFromMode(opts?.mode);
       const promptMessages: AiChatMessage[] =
-        opts?.context && messages.length > 0
-          ? [{ role: 'user', content: `【上下文】\n${opts.context}\n\n${messages[messages.length - 1]!.content}` }]
+        opts?.context
+          ? [{ role: 'user', content: `【上下文】\n${opts.context}` }, ...messages]
           : messages;
-      // task_proposal（mode='task_proposal'）需要探索真实仓库代码：以项目仓库根作为 spawn cwd，
-      // 令 task_proposer 的 read/grep/find/ls 能读到实际工程。其余 workload 不传 cwd，保持隔离临时目录。
+      // 绑定项目的需求/任务创建以项目根作为 spawn cwd，令步骤 Agent 的只读工具能探索实际工程。
       return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx);
     },
 

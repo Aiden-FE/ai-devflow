@@ -15,6 +15,7 @@ export interface KnowledgeDepositionRecordRow {
   changedPathsJson: string;
   gatePassed: boolean;
   diagnosticsJson: string;
+  progressJson?: string;
   startedAt: number;
   endedAt?: number;
 }
@@ -26,6 +27,12 @@ export interface KnowledgeDepositionCompletion {
   gatePassed: boolean;
   diagnosticsJson: string;
   endedAt: number;
+}
+
+export interface KnowledgeDepositionProgressUpdate {
+  relatedKnowledgeIdsJson: string;
+  changedPathsJson: string;
+  progressJson: string;
 }
 
 function mapDeposition(r: Record<string, unknown>): KnowledgeDepositionRecordRow {
@@ -42,6 +49,7 @@ function mapDeposition(r: Record<string, unknown>): KnowledgeDepositionRecordRow
     changedPathsJson: r.changed_paths_json as string,
     gatePassed: (r.gate_passed as number) === 1,
     diagnosticsJson: r.diagnostics_json as string,
+    progressJson: (r.progress_json as string | null) ?? '{}',
     startedAt: r.started_at as number,
     endedAt: (r.ended_at as number | null) ?? undefined,
   };
@@ -51,6 +59,7 @@ export interface KnowledgeDepositionsRepo {
   create(value: KnowledgeDepositionRecordRow): void;
   get(id: string): KnowledgeDepositionRecordRow | undefined;
   finish(id: string, value: KnowledgeDepositionCompletion): void;
+  updateProgress(id: string, value: KnowledgeDepositionProgressUpdate): void;
   getLatestByTask(taskId: string): KnowledgeDepositionRecordRow | undefined;
   listByTask(taskId: string): KnowledgeDepositionRecordRow[];
 }
@@ -62,8 +71,8 @@ export function createKnowledgeDepositionsRepo(db: DatabaseSync): KnowledgeDepos
         `INSERT INTO knowledge_depositions(
            id, project_id, task_id, execution_id, retrieval_id, verdict, state,
            assessment_json, related_knowledge_ids_json, changed_paths_json,
-           gate_passed, diagnostics_json, started_at, ended_at
-         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           gate_passed, diagnostics_json, progress_json, started_at, ended_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
         value.id,
         value.projectId,
@@ -77,6 +86,7 @@ export function createKnowledgeDepositionsRepo(db: DatabaseSync): KnowledgeDepos
         value.changedPathsJson,
         value.gatePassed ? 1 : 0,
         value.diagnosticsJson,
+        value.progressJson ?? '{}',
         value.startedAt,
         value.endedAt ?? null,
       );
@@ -102,6 +112,13 @@ export function createKnowledgeDepositionsRepo(db: DatabaseSync): KnowledgeDepos
         value.endedAt,
         id,
       );
+    },
+    updateProgress(id, value) {
+      db.prepare(
+        `UPDATE knowledge_depositions
+           SET related_knowledge_ids_json=?, changed_paths_json=?, progress_json=?
+         WHERE id=?`,
+      ).run(value.relatedKnowledgeIdsJson, value.changedPathsJson, value.progressJson, id);
     },
     getLatestByTask(taskId) {
       const r = db

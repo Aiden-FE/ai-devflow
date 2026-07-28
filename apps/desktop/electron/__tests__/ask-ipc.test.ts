@@ -61,8 +61,13 @@ describe('ask IPC bridge (executeTextOnRoute onAsk)', () => {
     // executeTextOnRoute 在首个 await（locator.verify）后才 spawn+注册 onMessage，需让出微任务。
     await new Promise((r) => setTimeout(r, 0));
     expect(messageCb).not.toBeNull();
-    messageCb!({ kind: 'ask', toolUseId: 'tu1', payload: { tabs: [] } });
-    expect(onAsk).toHaveBeenCalledWith('tu1', { tabs: [] }, expect.any(Function));
+    const tabs = [{
+      id: 'scope',
+      title: '需求范围',
+      questions: [{ id: 'goal', kind: 'text', question: '目标是什么？', required: true }],
+    }];
+    messageCb!({ kind: 'ask', toolUseId: 'tu1', payload: { tabs } });
+    expect(onAsk).toHaveBeenCalledWith('tu1', tabs, expect.any(Function));
     // 调用 send 应回灌到 spawned.send
     const sendFn = onAsk.mock.calls[0]![2] as (msg: unknown) => boolean;
     sendFn({ kind: 'ask_answer', toolUseId: 'tu1', answers: [] });

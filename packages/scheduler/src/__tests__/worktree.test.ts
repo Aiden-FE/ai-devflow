@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createWorktree, removeWorktree, listWorktrees, isGitRepo, WorktreeError, mergeWorktreeBranch, sprintBranchName, sanitizeBranchSegment, ensureSprintBranch, mergeBranchInto, branchExists } from '../worktree.js';
+import { createWorktree, removeWorktree, listWorktrees, isGitRepo, WorktreeError, mergeWorktreeBranch, commitWorktreeChanges, sprintBranchName, sanitizeBranchSegment, ensureSprintBranch, mergeBranchInto, branchExists, compareAndSwapBranchRef, resolveProjectDefaultBranch } from '../worktree.js';
 
 let repo: string;
 let base: string;
@@ -70,6 +70,18 @@ describe('git worktree lifecycle', () => {
     expect(list.some((w) => w.branch === handle.branch)).toBe(false);
   });
 
+  it('removeWorktree reports a branch that could not be removed', async () => {
+    const handle = await createWorktree({ repoPath: repo, baseDir: base, id: 'cleanup-residual', baseBranch: 'main' });
+
+    await expect(removeWorktree({
+      repoPath: repo,
+      worktreePath: handle.path,
+      branchName: 'main',
+    })).rejects.toThrow(/main.*仍存在|仍存在.*main/);
+
+    expect(await branchExists(repo, 'main')).toBe(true);
+  });
+
   it('createWorktree cleans up stale existing path', async () => {
     const stale = join(base, 't4');
     mkdirSync(stale, { recursive: true });
@@ -100,6 +112,44 @@ describe('git worktree lifecycle', () => {
       ).rejects.toMatchObject({
         message: /没有可用的提交/,
         hint: /初始提交/,
+      });
+    } finally {
+      rmSync(emptyRepo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('project default branch resolution', () => {
+  it('keeps a configured branch that resolves to a commit', async () => {
+    await expect(resolveProjectDefaultBranch(repo, 'main')).resolves.toEqual({
+      branch: 'main',
+      recovered: false,
+    });
+  });
+
+  it('recovers an invalid configured branch to the current named branch', async () => {
+    sh('git', ['branch', '-m', 'master'], repo);
+
+    await expect(resolveProjectDefaultBranch(repo, 'main')).resolves.toEqual({
+      branch: 'master',
+      recovered: true,
+    });
+  });
+
+  it('rejects detached HEAD instead of guessing a branch', async () => {
+    sh('git', ['checkout', '--detach'], repo);
+
+    await expect(resolveProjectDefaultBranch(repo, 'missing')).rejects.toMatchObject({
+      message: expect.stringMatching(/默认分支|detached|游离/),
+    });
+  });
+
+  it('rejects a repository without commits', async () => {
+    const emptyRepo = mkdtempSync(join(tmpdir(), 'aidf-default-empty-'));
+    sh('git', ['init', '-q', '-b', 'main'], emptyRepo);
+    try {
+      await expect(resolveProjectDefaultBranch(emptyRepo, 'main')).rejects.toMatchObject({
+        hint: expect.stringMatching(/初始提交/),
       });
     } finally {
       rmSync(emptyRepo, { recursive: true, force: true });
@@ -182,6 +232,23 @@ describe('mergeWorktreeBranch', () => {
   });
 });
 
+describe('host task commits', () => {
+  it('rejects sensitive paths and leaves their changes uncommitted', async () => {
+    writeFileSync(join(repo, '.env.local'), 'BASELINE=true\n');
+    sh('git', ['add', '-f', '.env.local'], repo);
+    sh('git', ['commit', '-q', '-m', 'tracked sensitive fixture'], repo);
+    const handle = await createWorktree({ repoPath: repo, baseDir: base, id: 'sensitive', baseBranch: 'main' });
+    writeFileSync(join(handle.path, '.env.local'), 'SECRET=not-a-real-secret\n');
+
+    const result = await commitWorktreeChanges({ worktreePath: handle.path, message: 'task: sensitive' });
+
+    expect(result.committed).toBe(false);
+    expect(result.reason).toMatch(/敏感路径|\.env/);
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd: handle.path, encoding: 'utf8' })).toContain('.env.local');
+    expect(execFileSync('git', ['show', 'HEAD:.env.local'], { cwd: handle.path, encoding: 'utf8' })).toContain('BASELINE=true');
+  });
+});
+
 describe('sprint branch helpers', () => {
   it('sprintBranchName prefixes version with ai-devflow-sprint/', () => {
     expect(sprintBranchName('v1.0.0')).toBe('ai-devflow-sprint/v1.0.0');
@@ -200,6 +267,9 @@ describe('sprint branch helpers', () => {
     expect(r1.branch).toBe('ai-devflow-sprint/v1.0.0');
     expect(r1.created).toBe(true);
     expect(await branchExists(repo, 'ai-devflow-sprint/v1.0.0')).toBe(true);
+    expect(r1.commit).toBe(execFileSync('git', [
+      'rev-parse', 'ai-devflow-sprint/v1.0.0',
+    ], { cwd: repo, encoding: 'utf8' }).trim());
     // 重复调用：复用现有分支，不动其指向
     const r2 = await ensureSprintBranch({ repoPath: repo, version: 'v1.0.0', baseBranch: 'main' });
     expect(r2.created).toBe(false);
@@ -252,5 +322,30 @@ describe('sprint branch helpers', () => {
     const res = await mergeBranchInto({ repoPath: repo, into: 'ai-devflow-sprint/missing', source: 'main' });
     expect(res.merged).toBe(false);
     expect(res.reason).toMatch(/不存在/);
+  });
+
+  it('does not overwrite a branch that advanced after its expected head was read', async () => {
+    await ensureSprintBranch({ repoPath: repo, version: 'cas', baseBranch: 'main' });
+    const branch = 'ai-devflow-sprint/cas';
+    const expected = execFileSync('git', ['rev-parse', branch], { cwd: repo, encoding: 'utf8' }).trim();
+    const source = await createWorktree({ repoPath: repo, baseDir: base, id: 'cas-source', baseBranch: branch });
+    writeFileSync(join(source.path, 'source.txt'), 'source');
+    sh('git', ['add', '.'], source.path);
+    sh('git', ['commit', '-q', '-m', 'source'], source.path);
+    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source.path, encoding: 'utf8' }).trim();
+    const advance = await createWorktree({ repoPath: repo, baseDir: base, id: 'cas-advance', baseBranch: branch });
+    writeFileSync(join(advance.path, 'advance.txt'), 'advance');
+    sh('git', ['add', '.'], advance.path);
+    sh('git', ['commit', '-q', '-m', 'advance'], advance.path);
+    const advancedCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: advance.path, encoding: 'utf8' }).trim();
+    sh('git', ['update-ref', `refs/heads/${branch}`, advancedCommit, expected], repo);
+
+    const result = await compareAndSwapBranchRef({
+      repoPath: repo, branch, newCommit: sourceCommit, expectedCommit: expected,
+    });
+
+    expect(result.updated).toBe(false);
+    expect(result.reason).toMatch(/已变化|expected|期望/i);
+    expect(execFileSync('git', ['rev-parse', branch], { cwd: repo, encoding: 'utf8' }).trim()).toBe(advancedCommit);
   });
 });

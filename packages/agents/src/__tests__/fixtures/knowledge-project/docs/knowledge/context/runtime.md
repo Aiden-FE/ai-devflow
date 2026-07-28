@@ -6,7 +6,7 @@ owner: project
 updated: 2026-07-27
 confidence: 0.85
 sources:
-  - packages/agents/src/pi-runner.ts
+  - AGENTS.md
 related: []
 ---
 

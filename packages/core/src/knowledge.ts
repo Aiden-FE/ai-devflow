@@ -112,7 +112,13 @@ export type KnowledgeAgentPayload =
   | { kind: 'knowledge_initialization'; changedPaths: string[]; knowledgeIds: string[] }
   | { kind: 'knowledge_audit'; findings: KnowledgeFinding[] }
   | { kind: 'knowledge_repair'; changedPaths: string[]; knowledgeIds: string[]; resolvedFindingIds: string[] }
-  | { kind: 'knowledge_deposition'; changedPaths: string[]; knowledgeIds: string[]; assessment: KnowledgeAssessment }
+  | {
+      kind: 'knowledge_deposition';
+      changedPaths: string[];
+      knowledgeIds: string[];
+      candidateKnowledge: Array<{ candidateIndex: number; knowledgeId: string }>;
+      assessment: KnowledgeAssessment;
+    }
   | { kind: 'iteration_changelog'; changedPaths: string[]; coveredTaskIds: string[] };
 
 /** 沉淀记录：一次 knowledge_deposition 运行的持久化状态。 */
@@ -280,6 +286,18 @@ function isKnowledgeFinding(value: unknown): value is KnowledgeFinding {
   );
 }
 
+function isCandidateKnowledge(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.candidateIndex === 'number' &&
+    Number.isInteger(v.candidateIndex) &&
+    v.candidateIndex >= 0 &&
+    typeof v.knowledgeId === 'string' &&
+    v.knowledgeId.trim().length > 0
+  );
+}
+
 /** 校验跨边界的领域载荷：字段必须与判别值匹配。 */
 export function isKnowledgeAgentPayload(value: unknown): value is KnowledgeAgentPayload {
   if (typeof value !== 'object' || value === null) return false;
@@ -304,6 +322,8 @@ export function isKnowledgeAgentPayload(value: unknown): value is KnowledgeAgent
       return (
         isStringArray(v.changedPaths) &&
         isStringArray(v.knowledgeIds) &&
+        Array.isArray(v.candidateKnowledge) &&
+        v.candidateKnowledge.every((mapping) => isCandidateKnowledge(mapping)) &&
         isKnowledgeAssessment(v.assessment)
       );
     case 'iteration_changelog':

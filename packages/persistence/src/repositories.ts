@@ -236,6 +236,7 @@ function mapPendingInteraction(r: Record<string, unknown>): PendingInteraction {
 // ---------- Repositories ----------
 
 export interface Repositories {
+  transaction<T>(action: () => T): T;
   projects: ProjectsRepo;
   iterations: IterationsRepo;
   requirements: RequirementsRepo;
@@ -261,6 +262,7 @@ export interface Repositories {
 
 export function createRepositories(db: DatabaseSync): Repositories {
   return {
+    transaction: <T>(action: () => T) => tx(db, action),
     projects: projectsRepo(db),
     iterations: iterationsRepo(db),
     requirements: requirementsRepo(db),
@@ -328,9 +330,13 @@ function projectsRepo(db: DatabaseSync): ProjectsRepo {
 
 export interface IterationsRepo {
   insert(i: Iteration): void;
+  claim(i: Iteration): void;
+  activate(id: string): void;
   get(id: string): Iteration | undefined;
   listByProject(projectId: string): Iteration[];
+  listInitializing(): Iteration[];
   archive(id: string, at: number): void;
+  delete(id: string): void;
 }
 function iterationsRepo(db: DatabaseSync): IterationsRepo {
   return {
@@ -339,15 +345,30 @@ function iterationsRepo(db: DatabaseSync): IterationsRepo {
         `INSERT INTO iterations(id,project_id,name,version,status,created_at) VALUES(?,?,?,?,?,?)`,
       ).run(i.id, i.projectId, i.name, i.version, i.status, i.createdAt);
     },
+    claim(i) {
+      db.prepare(
+        `INSERT INTO iterations(id,project_id,name,version,status,created_at) VALUES(?,?,?,?,?,?)`,
+      ).run(i.id, i.projectId, i.name, i.version, 'initializing', i.createdAt);
+    },
+    activate(id) {
+      db.prepare("UPDATE iterations SET status='active' WHERE id=? AND status='initializing'").run(id);
+    },
     get(id) {
-      const r = db.prepare('SELECT * FROM iterations WHERE id=?').get(id) as Record<string, unknown> | undefined;
+      const r = db.prepare("SELECT * FROM iterations WHERE id=? AND status!='initializing'").get(id) as Record<string, unknown> | undefined;
       return r ? mapIteration(r) : undefined;
     },
     listByProject(projectId) {
-      return (db.prepare('SELECT * FROM iterations WHERE project_id=? ORDER BY created_at DESC').all(projectId) as Record<string, unknown>[]).map(mapIteration);
+      return (db.prepare("SELECT * FROM iterations WHERE project_id=? AND status!='initializing' ORDER BY created_at DESC").all(projectId) as Record<string, unknown>[]).map(mapIteration);
+    },
+    listInitializing() {
+      return (db.prepare("SELECT * FROM iterations WHERE status='initializing' ORDER BY created_at, id").all() as Record<string, unknown>[])
+        .map((row) => ({ ...mapIteration(row), status: 'active' as const }));
     },
     archive(id, at) {
       db.prepare("UPDATE iterations SET status='archived', archived_at=? WHERE id=?").run(at, id);
+    },
+    delete(id) {
+      db.prepare('DELETE FROM iterations WHERE id=?').run(id);
     },
   };
 }

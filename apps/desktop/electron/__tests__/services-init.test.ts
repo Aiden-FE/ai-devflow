@@ -22,6 +22,12 @@ describe('initializeServices', () => {
 
   it('awaits credential migration before runtime verification', async () => {
     const status = await initializeServices({
+      knowledge: {
+        async recoverInterrupted() {
+          calls.push('knowledge-recovery');
+          return { failedRuns: [], failedDepositions: [] };
+        },
+      },
       piRuntime: {
         async cleanupOrphans() {
           calls.push('cleanup');
@@ -41,7 +47,7 @@ describe('initializeServices', () => {
       },
     });
 
-    expect(calls).toEqual(['migration', 'cleanup', 'runtime']);
+    expect(calls).toEqual(['migration', 'cleanup', 'knowledge-recovery', 'runtime']);
     expect(status).toEqual({ credentialMigration: 'migrated', runtime: 'ready' });
   });
 

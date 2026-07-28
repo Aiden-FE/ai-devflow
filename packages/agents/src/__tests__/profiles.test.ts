@@ -196,19 +196,17 @@ describe('STEP_AGENTS', () => {
     expect(step.skills).toContain('brainstorming');
     expect(step.extensions).toContain('requirement-bridge');
     expect(step.extensions).toContain('ask-bridge');
-    expect(step.tools).toContain('ai_devflow_propose_requirement');
-    expect(step.tools).toContain('ai_devflow_ask');
+    expect(step.tools).toEqual([
+      'read', 'grep', 'find', 'ls',
+      'ai_devflow_propose_requirement', 'ai_devflow_ask', 'ai_devflow_consult_ux',
+    ]);
   });
   it('registers task_proposer with brainstorming skill + read-only exploration tools + task-bridge extension + propose task tool', () => {
     const step = STEP_AGENTS['task_proposer'];
     expect(step).toBeDefined();
-    expect(step.tools).toContain('ai_devflow_propose_task');
-    expect(step.tools).toContain('ai_devflow_ask');
-    // 研发视角：先探索相关项目逻辑（只读工具），再产出子任务。
-    expect(step.tools).toContain('read');
-    expect(step.tools).toContain('grep');
-    expect(step.tools).toContain('find');
-    expect(step.tools).toContain('ls');
+    expect(step.tools).toEqual([
+      'read', 'grep', 'find', 'ls', 'ai_devflow_propose_task', 'ai_devflow_ask',
+    ]);
     // 用 brainstorming 一次一问地澄清研发侧不清晰的问题。
     expect(step.skills).toEqual(['brainstorming']);
     expect(step.extensions).toContain('task-bridge');

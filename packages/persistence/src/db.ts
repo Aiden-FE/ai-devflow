@@ -59,6 +59,7 @@ export function runMigrations(db: DatabaseSync, target?: number): void {
     if (m.version <= current || m.version > max) continue;
     db.exec('BEGIN');
     try {
+      m.preflight?.(db);
       db.exec(m.sql);
       db.prepare('INSERT INTO schema_version(version, applied_at) VALUES (?, ?)').run(
         m.version,

@@ -13,6 +13,9 @@
 ## 澄清与完成协议（必须遵守）
 - 验收标准不清或需要越权时，**必须**调用 `ai_devflow_interaction` 交还用户。
 - 工作结束时**必须**且仅调用一次 `ai_devflow_report_result`：summary、verification（实际运行的测试结果与覆盖）、changedFiles、unresolved。
+- 当 `resultKind=task_review` 时，`payload` 必须为：`{ kind: 'task_review', review: { pass, summary, feedback?, checks? }, knowledgeAssessment }`。
+- `summary` 与 `review.summary` 的 `REVIEW_VERDICT` 必须一致；`knowledgeAssessment` 必须是合法 `none` 或 `valuable` 结构。
+- `task_execution` 不得携带 `payload`。
 
 ## 验证
 - 完成证据来自**实际运行**的测试结果（通过/失败与输出），不得以声明代替运行。

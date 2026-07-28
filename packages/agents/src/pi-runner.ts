@@ -18,6 +18,8 @@ import { buildPiRunPlan } from './run-plan.js';
 import type { AgentRun, AgentRunRequest, AgentResultKind, AgentRunner } from './runner-types.js';
 import type { LoadedInstructions } from './project-instructions.js';
 
+const AGENT_END_EXIT_GRACE_MS = 100;
+
 /** 结构化依赖端口（便于测试注入桩；生产由 BundledPiLocator/ProfileMaterializer 满足）。 */
 export interface RuntimeLocator {
   verify(): Promise<{ version: string; entry: string }>;
@@ -219,6 +221,9 @@ export class PiRunner implements AgentRunner {
     });
 
     let interactionTerminated = false;
+    let agentEndObserved = false;
+    let agentEndCancelTimer: NodeJS.Timeout | undefined;
+    let cancelAfterAgentEnd: Promise<void> | undefined;
     for await (const line of spawned.lines) {
       if (line.stream !== 'stdout') continue; // stderr 已在 supervisor 脱敏入诊断缓冲
       const events = translator.push(line.text);
@@ -232,8 +237,19 @@ export class PiRunner implements AgentRunner {
         await spawned.cancel();
         break;
       }
+      // Keep draining briefly after agent_end so trailing provider/protocol errors cannot be hidden.
+      if (!agentEndObserved && translator.agentEnded()) {
+        agentEndObserved = true;
+        agentEndCancelTimer = setTimeout(() => {
+          cancelAfterAgentEnd = spawned.cancel();
+          void cancelAfterAgentEnd.catch(() => undefined);
+        }, AGENT_END_EXIT_GRACE_MS);
+        agentEndCancelTimer.unref?.();
+      }
     }
 
+    if (agentEndCancelTimer) clearTimeout(agentEndCancelTimer);
+    if (cancelAfterAgentEnd) await cancelAfterAgentEnd;
     const exitInfo = await spawned.done();
     let finishError: unknown;
     try {
@@ -245,7 +261,13 @@ export class PiRunner implements AgentRunner {
     const pe = translator.lastProviderError();
     const hadInteraction = translator.hadInteraction();
 
-    if (!finishError && !pe && !hadInteraction && translator.hasStructuredResult() && exitInfo.exitCode === 0) {
+    if (
+      !finishError &&
+      !pe &&
+      !hadInteraction &&
+      translator.hasStructuredResult() &&
+      (exitInfo.exitCode === 0 || (agentEndObserved && cancelAfterAgentEnd !== undefined && exitInfo.signal !== null))
+    ) {
       const structured = translator.structuredResult()!;
       const invalid = validateExpertCompletion(request, structured);
       if (invalid) {

@@ -37,6 +37,36 @@ export interface ServiceInitializationStatus {
   runtime: 'ready' | 'unavailable';
 }
 
+export interface KnowledgeWorkflowOptions {
+  repos: Repositories;
+  runner: AgentRunner;
+  worktreesBaseDir: string;
+  maxConcurrent?: number;
+  autoRetry?: boolean;
+  hasProvider?: () => boolean;
+}
+
+/** 生产与测试共用的知识工作流组合根，保证 Orchestrator 始终使用同一个 coordinator。 */
+export function createKnowledgeWorkflow(options: KnowledgeWorkflowOptions): {
+  knowledge: KnowledgeCoordinator;
+  orchestrator: Orchestrator;
+} {
+  const knowledge = new KnowledgeCoordinator({
+    repos: options.repos,
+    runner: options.runner,
+    knowledge: new ProjectKnowledgeService(),
+    worktreesBaseDir: options.worktreesBaseDir,
+  } as KnowledgeCoordinatorOptions);
+  const orchestrator = new Orchestrator(options.repos, options.runner, {
+    worktreesBaseDir: options.worktreesBaseDir,
+    maxConcurrent: options.maxConcurrent ?? 2,
+    autoRetry: options.autoRetry ?? true,
+    hasProvider: options.hasProvider,
+    knowledgeCoordinator: knowledge,
+  });
+  return { knowledge, orchestrator };
+}
+
 export function hasUsableProvider(
   providers: ReadonlyArray<Pick<ProviderSummary, 'enabled' | 'hasCredential'>>,
   runtime: ServiceInitializationStatus['runtime'] | undefined,
@@ -45,6 +75,7 @@ export function hasUsableProvider(
 }
 
 interface InitializableServices {
+  knowledge?: Pick<KnowledgeCoordinator, 'recoverInterrupted'>;
   piRuntime?: {
     cleanupOrphans?(): Promise<void>;
     providerStore: {
@@ -77,6 +108,12 @@ export async function initializeServices(
     // Cleanup is best-effort and deliberately silent; runtime verification still proceeds.
   }
 
+  try {
+    await services.knowledge?.recoverInterrupted();
+  } catch {
+    // Recovery is best-effort; individual records retain diagnostics and app startup continues.
+  }
+
   let runtime: ServiceInitializationStatus['runtime'] = 'unavailable';
   try {
     await services.piRuntime?.locator.verify();
@@ -105,7 +142,9 @@ export function createServices(notifier: Notifier): Services {
     }),
   );
   let services: Services | undefined;
-  const orchestrator = new Orchestrator(repos, piRuntime.runner, {
+  const workflow = createKnowledgeWorkflow({
+    repos,
+    runner: piRuntime.runner,
     worktreesBaseDir,
     maxConcurrent: 2,
     autoRetry: true,
@@ -114,12 +153,7 @@ export function createServices(notifier: Notifier): Services {
       services?.initializationStatus?.runtime,
     ),
   });
-  const knowledge = new KnowledgeCoordinator({
-    repos,
-    runner: piRuntime.runner,
-    knowledge: new ProjectKnowledgeService(),
-    worktreesBaseDir,
-  } as KnowledgeCoordinatorOptions);
+  const { orchestrator, knowledge } = workflow;
   const webhooks = new WebhookSender(repos, { maxAttempts: 3, timeoutMs: 10_000, baseDelayMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, notifier, webhooks, { intervalMs: 30_000 });
   const updater = createUpdater();

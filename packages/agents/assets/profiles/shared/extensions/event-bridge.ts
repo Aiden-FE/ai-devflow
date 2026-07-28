@@ -31,7 +31,7 @@ export default function (pi: ExtensionAPI) {
       changedFiles: Type.Array(Type.String()),
       unresolved: Type.Array(Type.String()),
       // 跨边界的领域载荷（结构在宿主侧二次校验）：非 task_execution 结果必须携带对应判别值。
-      payload: Type.Unknown(),
+      payload: Type.Optional(Type.Unknown()),
       knowledgeReads: Type.Optional(
         Type.Array(
           Type.Object({

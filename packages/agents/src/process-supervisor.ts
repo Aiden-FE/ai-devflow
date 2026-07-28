@@ -162,10 +162,7 @@ export class PiProcessSupervisor {
           return;
         }
       }
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, KILL_GRACE_MS);
-        timer.unref?.();
-      });
+      await waitForSettlement(settledPromise, KILL_GRACE_MS);
       if (!settled) {
         try {
           process.kill(-child.pid, 'SIGKILL');
@@ -273,6 +270,24 @@ export class PiProcessSupervisor {
         }
       },
     };
+  }
+}
+
+async function waitForSettlement(
+  settledPromise: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      settledPromise.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

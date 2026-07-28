@@ -124,6 +124,31 @@ switch (scenario) {
     setTimeout(() => process.exit(99), 10_000);
     break;
 
+  case 'report-then-hang':
+    reportResult('done');
+    emit({ type: 'agent_end', messages: [] });
+    // A completed protocol terminal must not depend on Pi releasing every open handle.
+    // Exit 99 only as a bounded failure signal when the runner neglects to cancel.
+    setInterval(() => {}, 60_000);
+    setTimeout(() => process.exit(99), 1_000);
+    break;
+
+  case 'report-end-provider-error':
+    reportResult('done');
+    emit({ type: 'agent_end', messages: [] });
+    setTimeout(() => {
+      emit({ type: 'provider_error', status: 503, message: 'late provider failure' });
+      process.exit(0);
+    }, 20);
+    break;
+
+  case 'report-end-delayed-code-7':
+    reportResult('done');
+    emit({ type: 'agent_end', messages: [] });
+    process.on('SIGTERM', () => {});
+    setTimeout(() => process.exit(7), 150);
+    break;
+
   case 'task-result-failure':
     emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'pnpm test' } });
     emit({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: true, result: { content: [{ type: 'text', text: 'test failed' }] } });

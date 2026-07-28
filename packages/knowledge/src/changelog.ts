@@ -3,6 +3,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { IterationChangelogVerification, KnowledgeFinding } from '@ai-devflow/core';
 import type { KnowledgeGitProbe } from './audit.js';
+import { loadKnowledgeCatalog } from './catalog.js';
 
 export interface VerifyChangelogInput {
   repoPath: string;
@@ -15,6 +16,16 @@ export interface VerifyChangelogInput {
 
 function sanitizeSegment(name: string): string {
   return name.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function mentionsTask(content: string, taskId: string, taskChangelog: string): boolean {
+  if (content.includes(taskChangelog.toLowerCase())) return true;
+  const escaped = escapeRegExp(taskId.toLowerCase());
+  return new RegExp(`(^|[^a-z0-9._-])${escaped}($|[^a-z0-9._-])`, 'm').test(content);
 }
 
 /** 校验迭代 CHANGELOG：根 H1、每个预期任务覆盖、任务 CHANGELOG 路径、关联知识 ID 与 Git 跟踪。 */
@@ -65,7 +76,7 @@ export async function verifyIterationChangelog(input: VerifyChangelogInput): Pro
     const taskSeg = sanitizeSegment(taskId);
     const taskChangelog = `docs/iterations/${versionSeg}/tasks/${taskSeg}/CHANGELOG.md`;
     // 任务被 CHANGELOG 覆盖：正文中出现任务 ID 或任务 CHANGELOG 路径引用。
-    const mentioned = lower.includes(taskId.toLowerCase()) || lower.includes(taskSeg.toLowerCase());
+    const mentioned = mentionsTask(lower, taskId, taskChangelog);
     if (mentioned) {
       covered.push(taskId);
       // 任务级 CHANGELOG 路径存在性
@@ -88,11 +99,24 @@ export async function verifyIterationChangelog(input: VerifyChangelogInput): Pro
     }
   }
 
-  // 关联知识 ID 引用（context:root 等前缀）：校验引用目标在仓库知识目录存在（仅检查路径引用格式）
-  const knowledgeIdRefs = content.match(/\b(context|adr|feature|runbook|product|ux):[a-z0-9_-]+\b/gi) ?? [];
-  for (const ref of knowledgeIdRefs) {
-    // 不阻断：仅记录为信息级（确定性服务不解析知识正文是否存在；由巡检覆盖）
-    void ref;
+  // 关联知识 ID 必须指向 Markdown catalog 中已解析的稳定 ID。
+  const knowledgeIdRefs = [...new Set(
+    content.match(/\b(context|adr|feature|runbook|product|ux):[a-z0-9_-]+\b/gi) ?? [],
+  )].sort();
+  if (knowledgeIdRefs.length > 0) {
+    const catalog = await loadKnowledgeCatalog(input.repoPath);
+    for (const ref of knowledgeIdRefs) {
+      if (catalog.documents.has(ref)) continue;
+      findings.push({
+        id: `missing_knowledge_reference:${ref}`,
+        severity: 'error',
+        code: 'missing_knowledge_reference',
+        path: changelogPath,
+        knowledgeId: ref,
+        message: `迭代 CHANGELOG 引用了不存在的知识 ID：${ref}`,
+        evidence: [changelogPath, ref],
+      });
+    }
   }
 
   // Git 跟踪：CHANGELOG 与任务 CHANGELOG 必须被跟踪

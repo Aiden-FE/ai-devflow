@@ -71,6 +71,24 @@ describe('verifyIterationChangelog', () => {
     expect(v.findings.map((f) => f.code)).toContain('missing_changelog');
   });
 
+  it('is invalid when the changelog references an unknown knowledge id', async () => {
+    const repo = await emptyFixtureRepo();
+    await mkdir(join(repo, 'docs/iterations/1.0/tasks/t1'), { recursive: true });
+    await writeFile(join(repo, 'docs/iterations/1.0/CHANGELOG.md'), '# Changelog\n\n- t1: see feature:missing\n');
+    await writeFile(join(repo, 'docs/iterations/1.0/tasks/t1/CHANGELOG.md'), '# t1\n');
+    const service = new ProjectKnowledgeService();
+    const v = await service.verifyIterationChangelog({
+      repoPath: repo, version: '1.0', iterationId: 'it', expectedTaskIds: ['t1'],
+      git: gitProbe(new Set(['docs/iterations/1.0/CHANGELOG.md', 'docs/iterations/1.0/tasks/t1/CHANGELOG.md'])),
+      verifiedAt: 100,
+    });
+    expect(v.state).toBe('invalid');
+    expect(v.findings).toContainEqual(expect.objectContaining({
+      code: 'missing_knowledge_reference',
+      knowledgeId: 'feature:missing',
+    }));
+  });
+
   it('sorts covered and missing task ids ascending', async () => {
     const repo = await emptyFixtureRepo();
     await mkdir(join(repo, 'docs/iterations/1.0/tasks/t2'), { recursive: true });
@@ -86,5 +104,21 @@ describe('verifyIterationChangelog', () => {
     });
     expect(v.coveredTaskIds).toEqual(['t10', 't2']);
     expect(v.missingTaskIds).toEqual(['t3']);
+  });
+
+  it('does not treat a longer task id as coverage for its prefix', async () => {
+    const repo = await emptyFixtureRepo();
+    await mkdir(join(repo, 'docs/iterations/1.0/tasks/t1'), { recursive: true });
+    await writeFile(join(repo, 'docs/iterations/1.0/CHANGELOG.md'), '# Changelog\n\n- t10: done\n');
+    await writeFile(join(repo, 'docs/iterations/1.0/tasks/t1/CHANGELOG.md'), '# t1\n');
+
+    const v = await new ProjectKnowledgeService().verifyIterationChangelog({
+      repoPath: repo, version: '1.0', iterationId: 'it', expectedTaskIds: ['t1'],
+      git: gitProbe(new Set(['docs/iterations/1.0/CHANGELOG.md', 'docs/iterations/1.0/tasks/t1/CHANGELOG.md'])),
+      verifiedAt: 1,
+    });
+
+    expect(v.coveredTaskIds).toEqual([]);
+    expect(v.missingTaskIds).toEqual(['t1']);
   });
 });

@@ -220,6 +220,13 @@ function fakeCompletionChunk(model, delta, finishReason) {
   };
 }
 
+function contentIncludesText(content, expected) {
+  if (typeof content === 'string') return content.includes(expected);
+  if (Array.isArray(content)) return content.some((part) => contentIncludesText(part, expected));
+  if (!content || typeof content !== 'object') return false;
+  return typeof content.text === 'string' && content.text.includes(expected);
+}
+
 async function startFakeProvider(fakeKey) {
   const authorizations = [];
   const requests = [];
@@ -241,6 +248,9 @@ async function startFakeProvider(fakeKey) {
       let body;
       try { body = JSON.parse(raw); } catch { body = {}; }
       const hasToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool');
+      const isTaskReview = Array.isArray(body.messages) && body.messages.some((message) =>
+        contentIncludesText(message?.content, '你是一名严格的代码审查 Agent'),
+      );
       const model = typeof body.model === 'string' ? body.model : 'packaged-fake-model';
       let chunk;
       if (hasToolResult) {
@@ -251,6 +261,17 @@ async function startFakeProvider(fakeKey) {
           verification: ['bundled Pi isolation'],
           changedFiles: [],
           unresolved: [],
+          ...(isTaskReview ? {
+            payload: {
+              kind: 'task_review',
+              review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+              knowledgeAssessment: {
+                verdict: 'none',
+                reason: 'deterministic E2E review found no reusable knowledge',
+                evidence: ['README.md'],
+              },
+            },
+          } : {}),
         });
         chunk = fakeCompletionChunk(model, {
           role: 'assistant',

@@ -67,6 +67,7 @@ export interface KnowledgeRetrievalsRepo {
   create(value: KnowledgeRetrievalRecord): void;
   get(id: string): KnowledgeRetrievalRecord | undefined;
   complete(id: string, value: KnowledgeRetrievalCompletion): void;
+  listByState(state: KnowledgeRetrievalManifest['state']): KnowledgeRetrievalRecord[];
   listByTask(taskId: string, limit?: number): KnowledgeRetrievalRecord[];
   listByExecution(executionId: string): KnowledgeRetrievalRecord[];
 }
@@ -125,6 +126,12 @@ export function createKnowledgeRetrievalsRepo(db: DatabaseSync): KnowledgeRetrie
         value.completedAt,
         id,
       );
+    },
+    listByState(state) {
+      const rows = db
+        .prepare('SELECT * FROM knowledge_retrievals WHERE state=? ORDER BY created_at ASC, id ASC')
+        .all(state) as Record<string, unknown>[];
+      return rows.map(mapRetrieval);
     },
     listByTask(taskId, limit) {
       const sql = limit

@@ -2,11 +2,15 @@
 import { PI_ONLY_MIGRATION_V9 } from './pi-only-migration-v9.js';
 import { AGENT_ROLE_MIGRATION_V11 } from './migrations/agent-role-migration-v11.js';
 import { KNOWLEDGE_AUDIT_MIGRATION_V12 } from './migrations/knowledge-audit-migration-v12.js';
+import { ITERATION_VERSION_UNIQUE_V13 } from './migrations/iteration-version-unique-v13.js';
+import { KNOWLEDGE_DEPOSITION_PROGRESS_V14 } from './migrations/knowledge-deposition-progress-v14.js';
+import type { DatabaseSync } from './db.js';
 
 export interface Migration {
   version: number;
   description: string;
   sql: string;
+  preflight?: (db: DatabaseSync) => void;
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -270,4 +274,6 @@ export const MIGRATIONS: Migration[] = [
   },
   AGENT_ROLE_MIGRATION_V11,
   KNOWLEDGE_AUDIT_MIGRATION_V12,
+  ITERATION_VERSION_UNIQUE_V13,
+  KNOWLEDGE_DEPOSITION_PROGRESS_V14,
 ];

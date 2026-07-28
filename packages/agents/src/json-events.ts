@@ -35,6 +35,8 @@ export interface PiEventTranslator {
   journal(): AttemptJournal;
   /** 流结束：要求 report_result 与 agent_end 成对出现；纯 interaction 是唯一非完成终态。 */
   finish(): void;
+  /** Pi 已发出 agent_end；该协议终态后无需继续等待进程释放内部句柄。 */
+  agentEnded(): boolean;
   hasStructuredResult(): boolean;
   structuredResult(): StructuredResult | undefined;
   /** Pi 报告的最后一次提供商侧错误（用于故障分类与降级）；无则 undefined。 */
@@ -278,6 +280,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     },
     journal(): AttemptJournal {
       return journal;
+    },
+    agentEnded(): boolean {
+      return agentEnded;
     },
     finish(): void {
       for (const call of journal.toolCalls) {

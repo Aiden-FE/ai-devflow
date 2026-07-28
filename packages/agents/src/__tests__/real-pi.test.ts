@@ -21,6 +21,7 @@ import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type {
   AgentEvent,
+  KnowledgeRetrievalManifest,
   ProviderConfig,
   ProviderHealth,
   ProviderKind,
@@ -300,7 +301,7 @@ function makeRunner(name: string, providers: ProviderConfig[]): PiRunner {
 
 async function execute(
   runner: PiRunner,
-  request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux' | 'project_lead'; prompt: string; cwd: string },
+  request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux' | 'project_lead'; prompt: string; cwd: string; knowledgeManifest?: KnowledgeRetrievalManifest },
 ): Promise<RunResult> {
   const resultKind = request.expert === 'test'
     ? 'task_review'
@@ -314,6 +315,7 @@ async function execute(
     resultKind,
     prompt: request.prompt,
     cwd: request.cwd,
+    knowledgeManifest: request.knowledgeManifest,
   });
   const events: AgentEvent[] = [];
   for await (const event of run.events) events.push(event);
@@ -361,13 +363,11 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
 
     const planner = await execute(runner, {
       taskId: 'role-planner', executionId: 'role-planner', expert: 'dev_lead', cwd,
-      prompt: 'Use the write tool to create docs/planner-output.md with exactly this one line: Authorized planner documentation. Do not modify any other file. Then call ai_devflow_report_result exactly once with a concise plan, a non-empty verification array, changedFiles=["docs/planner-output.md"], and unresolved=[].',
+      prompt: 'Read README.md and src/app.ts without modifying any file. Then call ai_devflow_report_result exactly once with a concise implementation plan, a non-empty verification array, changedFiles=[], and unresolved=[].',
     });
     expectSuccessful(planner, 'planner');
-    expect(readFileSync(join(cwd, 'docs', 'planner-output.md'), 'utf8').trim())
-      .toBe('Authorized planner documentation.');
     expect(execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd, encoding: 'utf8' }).trim())
-      .toBe('?? docs/planner-output.md');
+      .toBe('');
 
     expectSuccessful(await execute(runner, {
       taskId: 'role-coder', executionId: 'role-coder', expert: 'dev', cwd,
@@ -471,13 +471,40 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     // 未发生越界写入（git 状态为空）
     expect(execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' }).trim()).toBe('');
 
-    // 测试专家 task_review：携带知识价值评估载荷。
+    // 测试专家 task_review：携带宿主生成的有界 manifest 并回填实际读取证据。
+    const manifest: KnowledgeRetrievalManifest = {
+      id: 'kb-review-manifest',
+      projectId: 'knowledge-fixture',
+      taskId: 'kb-review',
+      executionId: 'kb-review',
+      expert: 'test',
+      stage: 'review',
+      level: 2,
+      state: 'planned',
+      candidates: [{
+        id: 'context:runtime', type: 'context', status: 'active', owner: 'project', updated: '2026-07-27',
+        confidence: 0.85, sources: ['packages/agents/src/pi-runner.ts'], related: [],
+        title: 'Runtime architecture', summary: 'The runtime uses a single Pi agent runtime.',
+        path: 'docs/knowledge/context/runtime.md',
+      }],
+      reads: [], skipped: [], differences: [],
+      budget: { maxFiles: 1, maxChars: 2000 },
+      used: { files: 0, chars: 0 },
+      createdAt: Date.now(),
+    };
     const review = await execute(runner, {
       taskId: 'kb-review', executionId: 'kb-review', expert: 'test', cwd,
-      prompt: 'Review the working tree (no changes). Call ai_devflow_report_result exactly once with summary containing REVIEW_VERDICT: PASS, non-empty verification, changedFiles=[], unresolved=[], and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "no new knowledge", evidence: ["docs/knowledge/context/runtime.md"] } }.',
+      knowledgeManifest: manifest,
+      prompt: 'Read the manifest candidate docs/knowledge/context/runtime.md, then review the working tree (no changes). Call ai_devflow_report_result exactly once with summary containing REVIEW_VERDICT: PASS, non-empty verification, changedFiles=[], unresolved=[], knowledgeReads=[{ knowledgeId: "context:runtime", path: "docs/knowledge/context/runtime.md", reason: "verify runtime architecture", chars: 398 }], and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "no new knowledge", evidence: ["docs/knowledge/context/runtime.md"] } }.',
     });
     expectSuccessful(review, 'knowledge review');
     const reviewDone = review.events.find((e) => e.type === 'done');
     expect(reviewDone?.result?.kind).toBe('task_review');
+    expect(reviewDone?.knowledgeReads).toEqual([{
+      knowledgeId: 'context:runtime',
+      path: 'docs/knowledge/context/runtime.md',
+      reason: 'verify runtime architecture',
+      chars: 398,
+    }]);
   }, 600_000);
 });

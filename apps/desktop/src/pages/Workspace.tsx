@@ -189,7 +189,7 @@ function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { itera
             <Checkbox checked={showArchived} onCheckedChange={(v) => setShowArchived(v === true)} />
             {showArchived ? t('ws.hideArchived') : t('ws.showArchived')}
           </label>
-          <CreateReqButton iterationId={iterationId} onCreated={reqsQ.reload} onNavigateSettings={onNavigateSettings} />
+          <CreateReqButton iterationId={iterationId} projectPath={projectPath} onCreated={reqsQ.reload} onNavigateSettings={onNavigateSettings} />
         </div>
         <LoadingOrError loading={reqsQ.loading} error={reqsQ.error} data={visibleReqs} reload={reqsQ.reload}>
           {(rs) => (
@@ -417,7 +417,7 @@ function CreateIterationButton({ projectId, onCreated }: { projectId: string; on
   );
 }
 
-function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { iterationId: string; onCreated: () => void; onNavigateSettings?: () => void }): React.ReactElement {
+function CreateReqButton({ iterationId, projectPath, onCreated, onNavigateSettings }: { iterationId: string; projectPath?: string; onCreated: () => void; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
@@ -446,6 +446,7 @@ function CreateReqButton({ iterationId, onCreated, onNavigateSettings }: { itera
           {/* Step 1：AI 沟通 */}
           {hasUsableProvider ? (
             <AiRefineRequirement
+              projectPath={projectPath}
               onApplied={(p) => {
                 setTitle(p.title); setDesc(p.description); setAcceptance(p.acceptance); setPriority(p.priority);
                 setAppliedHint(true);
@@ -571,7 +572,7 @@ function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (answers:
   );
 }
 
-function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
+function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string; onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -594,6 +595,7 @@ function AiRefineRequirement({ onApplied }: { onApplied: (p: { title: string; de
         ));
       }, {
         mode: 'requirement',
+        projectPath,
         // AI 在需求足够清晰时调用 ai_devflow_propose_requirement 工具生成草稿；
         // 工具结果经事件流回传，直接填入表单，无需用户点“生成需求草稿”按钮。
         onRequirementProposal: (draft) => onApplied(draft),

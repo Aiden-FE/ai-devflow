@@ -52,6 +52,23 @@ export function validatePrompt(prompt: string): ValidationResult {
   return { ok: true, errors: [] };
 }
 
+/** 将版本号归一为可用的本地 Git 分支片段。 */
+export function sanitizeGitBranchSegment(value: string): string {
+  const cleaned = value.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
+  return cleaned || 'unnamed';
+}
+
+/** 新版本号的完整 Git ref 片段约束；迁移预检与运行时必须共享此谓词。 */
+export function isCanonicalGitBranchSegment(value: string): boolean {
+  return (
+    value === sanitizeGitBranchSegment(value) &&
+    value !== '@' &&
+    !value.includes('..') &&
+    !value.endsWith('.') &&
+    !value.endsWith('.lock')
+  );
+}
+
 /** 已知的敏感字段名（小写匹配）。 */
 export const SENSITIVE_FIELDS = new Set([
   'secret',

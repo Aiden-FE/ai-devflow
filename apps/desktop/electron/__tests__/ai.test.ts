@@ -13,6 +13,7 @@ import {
   TASK_PROPOSAL_TOOL,
 } from '../pi-ai.js';
 import { STEP_AGENTS, stepAgentForWorkload } from '@ai-devflow/agents';
+import type { AiChatMessage } from '@ai-devflow/core';
 import type {
   ChatWorkload,
   PiTextExecutor,
@@ -79,6 +80,26 @@ describe('PiAiService', () => {
     });
     await service.chat([{ role: 'user', content: 'hi' }], () => {}, { mode: 'task_proposal', projectPath: '/repo/path' });
     expect(options).toEqual([{ cwd: '/repo/path' }]);
+  });
+
+  it('prepends context without dropping multi-turn conversation history', async () => {
+    let captured: AiChatMessage[] = [];
+    const service = createPiAiService(async (_workload, messages) => {
+      captured = messages;
+      return 'ok';
+    });
+    const history: AiChatMessage[] = [
+      { role: 'user', content: '新增登录能力' },
+      { role: 'assistant', content: '需要兼容现有会话吗？' },
+      { role: 'user', content: '需要兼容' },
+    ];
+
+    await service.chat(history, () => {}, { mode: 'task_proposal', context: 'project knowledge' });
+
+    expect(captured).toEqual([
+      { role: 'user', content: '【上下文】\nproject knowledge' },
+      ...history,
+    ]);
   });
 
   it('surfaces ai_devflow_propose_task tool result via onToolResult for task_proposal mode', async () => {
@@ -325,7 +346,7 @@ describe('requirement brainstorming skill loading', () => {
     const reqProfileDir = materializeStepAgentProfile(sessionDir, step, assetsRoot);
     const reqPlan = buildChatPlan('/pi.js', ROUTE, sessionDir, reqProfileDir, 'requirement_chat', 'hi', '/usr/bin', step);
     expect(reqPlan.args).toContain('--tools');
-    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(`${REQUIREMENT_PROPOSAL_TOOL},ai_devflow_ask,ai_devflow_consult_ux`);
+    expect(reqPlan.args[reqPlan.args.indexOf('--tools') + 1]).toBe(`read,grep,find,ls,${REQUIREMENT_PROPOSAL_TOOL},ai_devflow_ask,ai_devflow_consult_ux`);
     expect(reqPlan.args).toContain('--extension');
     expect(reqPlan.args[reqPlan.args.indexOf('--extension') + 1]).toMatch(/requirement-bridge\.ts$/);
     expect(reqPlan.args).toContain('--skill');

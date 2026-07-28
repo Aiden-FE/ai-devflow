@@ -37,7 +37,9 @@ function makeFinding(
 }
 
 function isInvalidSourcePath(source: string): boolean {
-  return source.includes('..') || source.includes('\0') || /^[A-Za-z]:[\\/]/.test(source) || source.startsWith('/');
+  if (!source.trim() || source.includes('\0') || source.includes('\\')) return true;
+  if (/^[A-Za-z]:\//.test(source) || source.startsWith('/')) return true;
+  return source.split('/').some((segment) => segment === '..' || segment === '.' || segment.length === 0);
 }
 
 function sortFindings(findings: KnowledgeFinding[]): KnowledgeFinding[] {
@@ -155,12 +157,33 @@ export async function auditKnowledgeLayout(input: AuditInput): Promise<Knowledge
     }
   }
 
-  // 非法来源路径
+  // 非索引正文必须有可追溯来源；每个来源必须是安全且真实存在的仓库相对路径。
   for (const ref of refs) {
+    const isIndex = ref.id === 'context:root' || ref.id.endsWith(':index');
+    if (!isIndex && ref.sources.length === 0) {
+      findings.push(
+        makeFinding('error', 'missing_sources', `知识文档缺少来源证据：${ref.id}`, {
+          path: ref.path,
+          knowledgeId: ref.id,
+        }),
+      );
+    }
     for (const source of ref.sources) {
       if (isInvalidSourcePath(source)) {
         findings.push(
           makeFinding('error', 'invalid_source_path', `来源路径非法：${source}`, {
+            path: ref.path,
+            knowledgeId: ref.id,
+            evidence: [source],
+          }),
+        );
+        continue;
+      }
+      try {
+        await stat(join(input.repoPath, source));
+      } catch {
+        findings.push(
+          makeFinding('error', 'missing_source_path', `来源路径不存在：${source}`, {
             path: ref.path,
             knowledgeId: ref.id,
             evidence: [source],
@@ -186,7 +209,7 @@ export async function auditKnowledgeLayout(input: AuditInput): Promise<Knowledge
       const ignored = await input.git.isIgnored(input.repoPath, ref.path);
       if (ignored) {
         findings.push(
-          makeFinding('warn', 'ignored_markdown', `知识文档被 .gitignore 忽略：${ref.path}`, {
+          makeFinding('error', 'ignored_markdown', `知识文档被 .gitignore 忽略：${ref.path}`, {
             path: ref.path,
             knowledgeId: ref.id,
             evidence: [ref.path],

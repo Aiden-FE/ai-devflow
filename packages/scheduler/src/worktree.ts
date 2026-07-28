@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { mkdir, rm, access, lstat, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { isCanonicalGitBranchSegment, sanitizeGitBranchSegment } from '@ai-devflow/core';
 
 const exec = promisify(execFile);
 
@@ -60,6 +61,38 @@ async function isValidCommit(repoPath: string, ref: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve the branch persisted for a project before workflows create refs from it.
+ * A stale configured branch may recover only to the repository's current named branch.
+ */
+export async function resolveProjectDefaultBranch(
+  repoPath: string,
+  configuredBranch?: string,
+): Promise<{ branch: string; recovered: boolean }> {
+  if (!(await isGitRepo(repoPath))) {
+    throw new WorktreeError(`不是 Git 仓库：${repoPath}`, '请确认项目路径指向一个 Git 工作区');
+  }
+  if (configuredBranch && await isValidCommit(repoPath, configuredBranch)) {
+    return { branch: configuredBranch, recovered: false };
+  }
+
+  const { stdout } = await exec('git', ['branch', '--show-current'], { cwd: repoPath });
+  const branch = stdout.trim();
+  if (branch && await isValidCommit(repoPath, branch)) {
+    return { branch, recovered: branch !== configuredBranch };
+  }
+  if (await isValidCommit(repoPath, 'HEAD')) {
+    throw new WorktreeError(
+      '仓库处于游离 HEAD，无法恢复项目默认分支',
+      '请先切换到一个本地分支后重试',
+    );
+  }
+  throw new WorktreeError(
+    '仓库没有可用提交，无法解析项目默认分支',
+    '请先创建至少一个初始提交后再重试',
+  );
 }
 
 /**
@@ -209,6 +242,68 @@ export async function mergeWorktreeBranch(opts: {
   }
 }
 
+/** 在任务 worktree 内同步最新目标分支；脏工作区或冲突时保持原分支并返回诊断。 */
+export async function syncWorktreeWithBranch(opts: {
+  worktreePath: string;
+  sourceBranch: string;
+}): Promise<{ merged: boolean; reason?: string }> {
+  try {
+    const { stdout } = await git(opts.worktreePath, ['status', '--porcelain']);
+    if (stdout.trim()) {
+      return { merged: false, reason: '任务 worktree 存在未提交改动，无法同步迭代分支' };
+    }
+    await git(opts.worktreePath, ['merge', '--no-edit', opts.sourceBranch]);
+    return { merged: true };
+  } catch (err) {
+    await git(opts.worktreePath, ['merge', '--abort']).catch(() => undefined);
+    const e = err as WorktreeError;
+    return { merged: false, reason: e.hint ? `${e.message}（${e.hint}）` : e.message };
+  }
+}
+
+const HOST_COMMIT_FORBIDDEN_SEGMENTS = new Set([
+  'credentials',
+  'runtime-manifest.json',
+  'settings.json',
+  'system.md',
+  'models.json',
+  'node_modules',
+]);
+
+function hostCommitForbidden(path: string): boolean {
+  return path.split('/').some((segment) => {
+    const lower = segment.toLowerCase();
+    return lower.startsWith('.env') || HOST_COMMIT_FORBIDDEN_SEGMENTS.has(lower);
+  });
+}
+
+/** 提交 reviewer 已审查的任务改动；Agent 本身无 Git 变更权限。 */
+export async function commitWorktreeChanges(opts: {
+  worktreePath: string;
+  message: string;
+}): Promise<{ committed: boolean; changedPaths: string[]; reason?: string }> {
+  try {
+    await git(opts.worktreePath, ['add', '-A']);
+    const { stdout } = await git(opts.worktreePath, ['diff', '--cached', '--name-only', '-z']);
+    const changedPaths = stdout.split('\0').filter(Boolean).sort();
+    const forbidden = changedPaths.filter(hostCommitForbidden);
+    if (forbidden.length > 0) {
+      await git(opts.worktreePath, ['reset', '--mixed', 'HEAD']).catch(() => undefined);
+      return { committed: false, changedPaths, reason: `任务改动包含禁止提交的敏感路径：${forbidden.join(', ')}` };
+    }
+    if (changedPaths.length === 0) return { committed: false, changedPaths: [] };
+    await git(opts.worktreePath, [
+      '-c', 'user.name=ai-devflow',
+      '-c', 'user.email=ai-devflow@local',
+      'commit', '--no-verify', '-q', '-m', opts.message,
+    ]);
+    return { committed: true, changedPaths };
+  } catch (err) {
+    await git(opts.worktreePath, ['reset', '--mixed', 'HEAD']).catch(() => undefined);
+    return { committed: false, changedPaths: [], reason: (err as Error).message };
+  }
+}
+
 /** 移除 worktree 并清理分支。 */
 export async function removeWorktree(opts: {
   repoPath: string;
@@ -228,12 +323,25 @@ export async function removeWorktree(opts: {
   if (opts.branchName && !opts.keepBranch) {
     await git(opts.repoPath, ['branch', '-D', opts.branchName]).catch(() => {});
   }
+  if (existsSync(opts.worktreePath)) {
+    throw new WorktreeError(`worktree 清理后仍存在：${opts.worktreePath}`, '请检查文件占用与目录权限');
+  }
+  if (opts.branchName && !opts.keepBranch && await branchExists(opts.repoPath, opts.branchName)) {
+    throw new WorktreeError(`分支 ${opts.branchName} 清理后仍存在`, '请检查该分支是否仍被其他 worktree 使用');
+  }
 }
 
 /** 清洗版本号为合法 git 分支名片段：保留字母数字 . _ -，其余替换为 -，去首尾分隔符。 */
 export function sanitizeBranchSegment(version: string): string {
-  const cleaned = version.trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
-  return cleaned || 'unnamed';
+  return sanitizeGitBranchSegment(version);
+}
+
+/** 新迭代版本必须已是规范 Git 分支片段，禁止不同输入归一到同一 sprint 分支。 */
+export function requireCanonicalBranchSegment(version: string): string {
+  if (!isCanonicalGitBranchSegment(version)) {
+    throw new Error(`版本号不是规范 Git 分支片段：${version}`);
+  }
+  return version;
 }
 
 /** 迭代专用分支名：ai-devflow-sprint/<version>。 */
@@ -251,6 +359,25 @@ export async function branchExists(repoPath: string, name: string): Promise<bool
   }
 }
 
+/** 使用 expected-old OID 原子推进或删除分支；目标已变化时绝不覆盖。 */
+export async function compareAndSwapBranchRef(opts: {
+  repoPath: string;
+  branch: string;
+  newCommit?: string;
+  expectedCommit: string;
+}): Promise<{ updated: boolean; reason?: string }> {
+  const ref = `refs/heads/${opts.branch}`;
+  const args = opts.newCommit
+    ? ['update-ref', ref, opts.newCommit, opts.expectedCommit]
+    : ['update-ref', '-d', ref, opts.expectedCommit];
+  try {
+    await git(opts.repoPath, args);
+    return { updated: true };
+  } catch {
+    return { updated: false, reason: `分支 ${opts.branch} 已变化，不再按期望提交 ${opts.expectedCommit} 更新` };
+  }
+}
+
 /**
  * 确保迭代分支存在：已存在则复用（不动其指向），不存在则从 baseBranch 创建。
  * 用于迭代创建与任务启动两处，幂等。
@@ -259,14 +386,29 @@ export async function ensureSprintBranch(opts: {
   repoPath: string;
   version: string;
   baseBranch: string;
-}): Promise<{ branch: string; created: boolean }> {
+}): Promise<{ branch: string; created: boolean; commit: string }> {
   const branch = sprintBranchName(opts.version);
   if (await branchExists(opts.repoPath, branch)) {
-    return { branch, created: false };
+    const { stdout } = await exec('git', ['rev-parse', branch], { cwd: opts.repoPath });
+    return { branch, created: false, commit: stdout.trim() };
   }
   const base = await resolveBase(opts.repoPath, opts.baseBranch);
-  await git(opts.repoPath, ['branch', branch, base]);
-  return { branch, created: true };
+  const { stdout } = await exec('git', ['rev-parse', `${base}^{commit}`], { cwd: opts.repoPath });
+  const baseCommit = stdout.trim();
+  const created = await compareAndSwapBranchRef({
+    repoPath: opts.repoPath,
+    branch,
+    newCommit: baseCommit,
+    expectedCommit: '0'.repeat(baseCommit.length),
+  });
+  if (!created.updated) {
+    if (await branchExists(opts.repoPath, branch)) {
+      const current = (await exec('git', ['rev-parse', branch], { cwd: opts.repoPath })).stdout.trim();
+      return { branch, created: false, commit: current };
+    }
+    throw new WorktreeError(`无法创建迭代分支 ${branch}`, created.reason);
+  }
+  return { branch, created: true, commit: baseCommit };
 }
 
 /**
@@ -280,41 +422,52 @@ export async function mergeBranchInto(opts: {
   repoPath: string;
   into: string;
   source: string;
-}): Promise<{ merged: boolean; reason?: string }> {
+}): Promise<{ merged: boolean; reason?: string; commit?: string; previousCommit?: string }> {
   if (!(await branchExists(opts.repoPath, opts.into))) {
     return { merged: false, reason: `目标分支不存在：${opts.into}` };
   }
   if (!(await branchExists(opts.repoPath, opts.source))) {
     return { merged: false, reason: `源分支不存在：${opts.source}` };
   }
+  const intoCommit = (await exec('git', ['rev-parse', opts.into], { cwd: opts.repoPath })).stdout.trim();
+  const sourceCommit = (await exec('git', ['rev-parse', opts.source], { cwd: opts.repoPath })).stdout.trim();
   // 快进判定：into 是 source 的祖先 -> 直接 branch -f 移动 into 指向 source。
   let isAncestor = false;
   try {
-    await exec('git', ['merge-base', '--is-ancestor', opts.into, opts.source], { cwd: opts.repoPath });
+    await exec('git', ['merge-base', '--is-ancestor', intoCommit, sourceCommit], { cwd: opts.repoPath });
     isAncestor = true;
   } catch {
     isAncestor = false;
   }
   if (isAncestor) {
-    try {
-      await git(opts.repoPath, ['branch', '-f', opts.into, opts.source]);
-      return { merged: true };
-    } catch (err) {
-      const e = err as WorktreeError;
-      return { merged: false, reason: e.hint ? `${e.message}（${e.hint}）` : e.message };
-    }
+    const updated = await compareAndSwapBranchRef({
+      repoPath: opts.repoPath,
+      branch: opts.into,
+      newCommit: sourceCommit,
+      expectedCommit: intoCommit,
+    });
+    return updated.updated
+      ? { merged: true, commit: sourceCommit, previousCommit: intoCommit }
+      : { merged: false, reason: updated.reason };
   }
   // 非快进：临时 worktree 检出 into 再合并 source。
   const tmpPath = join(opts.repoPath, '..', `.ai-devflow-merge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   try {
-    await git(opts.repoPath, ['worktree', 'add', '--detach', tmpPath, opts.into]);
+    await git(opts.repoPath, ['worktree', 'add', '--detach', tmpPath, intoCommit]);
     try {
-      await git(tmpPath, ['merge', '--no-ff', '-m', `merge: ${opts.source} into ${opts.into}`, opts.source]);
+      await git(tmpPath, ['merge', '--no-ff', '-m', `merge: ${opts.source} into ${opts.into}`, sourceCommit]);
       // 合并成功后 into 的工作区 HEAD 即合并结果，用 branch -f 把 into 指向该提交。
       const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: tmpPath });
       const mergedCommit = stdout.trim();
-      await git(opts.repoPath, ['branch', '-f', opts.into, mergedCommit]);
-      return { merged: true };
+      const updated = await compareAndSwapBranchRef({
+        repoPath: opts.repoPath,
+        branch: opts.into,
+        newCommit: mergedCommit,
+        expectedCommit: intoCommit,
+      });
+      return updated.updated
+        ? { merged: true, commit: mergedCommit, previousCommit: intoCommit }
+        : { merged: false, reason: updated.reason };
     } catch (err) {
       await git(tmpPath, ['merge', '--abort']).catch(() => {});
       const e = err as WorktreeError;

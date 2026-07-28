@@ -181,6 +181,36 @@ it('actively terminates the Pi process group after an interaction tool ends (§7
   expect(exit.code).not.toBe(99);
 }, 15_000);
 
+it('actively terminates Pi after a complete result terminal instead of timing out and retrying', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'report-then-hang' });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 'completed-hang' }, executionId: 'completed-hang', expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+
+  expect(events).toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect((await run.done()).ok).toBe(true);
+  expect(harness.spawnedCommands).toHaveLength(1);
+  const exit = harness.spawnExits[0]!;
+  expect(exit.signal).toMatch(/SIGTERM|SIGKILL/);
+  expect(exit.code).not.toBe(99);
+}, 5_000);
+
+it.each([
+  'report-end-provider-error',
+  'report-end-delayed-code-7',
+] as const)('does not accept an invalid terminal sequence: %s', async (scenario) => {
+  const harness = createPiRunnerHarness({ scenario });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: scenario }, executionId: scenario, expert: 'dev', resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  expect((await run.done()).ok).toBe(false);
+}, 5_000);
+
 it('fails a reviewer latch-blocked interaction terminal without pausing', async () => {
   const harness = createPiRunnerHarness({ scenario: 'reviewer-latch-blocked-interaction' });
   const run = await harness.runner.run({

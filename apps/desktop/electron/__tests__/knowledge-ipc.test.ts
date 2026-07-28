@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,9 +54,24 @@ function fakeRunner(): AgentRunner {
     async verifyRuntime() { return { version: 'fake', entry: 'fake' }; },
     async run(req: AgentRunRequest): Promise<AgentRun> {
       if (req.expert === 'project_lead' && req.resultKind === 'knowledge_initialization') {
-        writeFileSync(join(req.cwd, 'docs/knowledge/feature/task-review.md'), '# Task Review\n');
-        shGit(req.cwd, ['add', '.']);
-        shGit(req.cwd, ['commit', '-q', '-m', 'kb']);
+        writeFileSync(join(req.cwd, 'docs/knowledge/feature/task-review.md'), `---
+id: feature:task-review
+type: feature
+status: active
+owner: project
+updated: 2026-07-28
+confidence: 0.9
+sources:
+  - README.md
+related: []
+---
+
+# Task Review
+
+Reusable task review guidance.
+`);
+        const indexPath = join(req.cwd, 'docs/knowledge/feature/index.md');
+        writeFileSync(indexPath, readFileSync(indexPath, 'utf8').replace('related: []', 'related:\n  - feature:task-review'));
       }
       const payload: KnowledgeAgentPayload | undefined =
         req.resultKind === 'knowledge_initialization'
@@ -143,5 +158,52 @@ describe('knowledge IPC', () => {
     const run = await call('knowledge', 'startAudit', 'p1', 'light') as { state: string; kind: string };
     expect(run.state).toBe('succeeded');
     expect(run.kind).toBe('light_audit');
+  });
+
+  it('returns persisted task evidence and iteration verification through IPC', async () => {
+    services.repos.iterations.insert({
+      id: 'iteration-ipc', projectId: 'p1', name: 'I', version: '1.0', status: 'active', createdAt: 1,
+    });
+    services.repos.requirements.insert({
+      id: 'requirement-ipc', iterationId: 'iteration-ipc', title: 'R', description: '',
+      priority: 'medium', acceptance: 'a', createdAt: 1, archived: false,
+    });
+    services.repos.tasks.insert({
+      id: 'task-ipc', requirementId: 'requirement-ipc', iterationId: 'iteration-ipc', projectId: 'p1',
+      title: 'Task', description: '', status: 'testing', role: 'coder', stages: [], currentStage: 0,
+      statusChangedAt: 1, createdAt: 1, updatedAt: 1, retryCount: 0,
+    });
+    services.repos.knowledgeRetrievals.create({
+      id: 'ret-ipc', projectId: 'p1', taskId: 'task-ipc',
+      expertKey: 'test', stage: 'review', level: 2, state: 'completed',
+      candidateRefsJson: '[]', readEvidenceJson: '[]', skippedRefsJson: '[]', differencesJson: '[]',
+      budgetFiles: 1, budgetChars: 100, usedFiles: 0, usedChars: 0, confidence: 0,
+      createdAt: 10, completedAt: 11,
+    });
+    services.repos.knowledgeRuns.create({
+      id: 'changelog-ipc', projectId: 'p1', iterationId: 'iteration-ipc', kind: 'iteration_changelog',
+      state: 'running', confirmationState: 'not_required', changedPathsJson: '[]', diagnosticsJson: '[]',
+      resultJson: '{}', startedAt: 12,
+    });
+    services.repos.knowledgeRuns.finish('changelog-ipc', 'succeeded', 13, {
+      resultJson: JSON.stringify({
+        state: 'valid', coveredTaskIds: ['task-ipc'], missingTaskIds: [],
+        changedPaths: ['docs/iterations/1.0/CHANGELOG.md'], verifiedAt: 13,
+      }),
+    });
+
+    const evidence = await call('knowledge', 'getTaskEvidence', 'task-ipc') as { retrievals: Array<{ id: string }> };
+    const verification = await call('knowledge', 'getIterationVerification', 'iteration-ipc') as { state: string; coveredTaskIds: string[] };
+
+    expect(evidence.retrievals.map((item) => item.id)).toEqual(['ret-ipc']);
+    expect(verification).toEqual(expect.objectContaining({ state: 'valid', coveredTaskIds: ['task-ipc'] }));
+  });
+
+  it('does not let cancelRun overwrite a succeeded run', async () => {
+    const run = await call('knowledge', 'startInitialization', 'p1') as { id: string };
+    await call('knowledge', 'confirmRun', run.id);
+
+    await expect(call('knowledge', 'cancelRun', run.id)).rejects.toThrow(/不能取消/);
+    expect(await call('knowledge', 'getRun', run.id)).toEqual(expect.objectContaining({ state: 'succeeded' }));
   });
 });

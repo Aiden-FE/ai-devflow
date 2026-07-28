@@ -30,7 +30,8 @@ vi.mock('electron', () => ({
 }));
 
 import { openDatabase, createRepositories, type Repositories } from '@ai-devflow/persistence';
-import { Orchestrator } from '@ai-devflow/scheduler';
+import { KnowledgeCoordinator, Orchestrator } from '@ai-devflow/scheduler';
+import { ProjectKnowledgeService } from '@ai-devflow/knowledge';
 import { TimeoutEngine, WebhookSender, NullNotifier } from '@ai-devflow/notifications';
 import { encryptSecret, decryptSecret } from '../credentials.js';
 import { registerIpc, deriveProjectName } from '../ipc.js';
@@ -57,6 +58,17 @@ let services: Services;
 let workdir: string;
 let sent: StreamEvent[];
 let sentAi: AiStreamEvent[];
+let aiRequests: Array<{ workload: string; messages: import('@ai-devflow/core').AiChatMessage[] }>;
+let uxConsultationContext: string | undefined;
+
+function initGitRepo(path: string, branch = 'main'): void {
+  execFileSync('git', ['init', '-q', '-b', branch, path], { stdio: 'ignore' });
+  execFileSync('git', ['-C', path, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', path, 'config', 'user.name', 't'], { stdio: 'ignore' });
+  writeFileSync(join(path, 'README.md'), 'x');
+  execFileSync('git', ['-C', path, 'add', '.'], { stdio: 'ignore' });
+  execFileSync('git', ['-C', path, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+}
 
 function buildServices() {
   // Pi-only 编排器使用单一 AgentRunner；reviewer 与 dev 均产出含 PASS 结论的 done（供审查解析）。
@@ -74,7 +86,15 @@ function buildServices() {
       };
     },
   };
-  const orchestrator = new Orchestrator(repos, runner, { worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false });
+  const knowledge = new KnowledgeCoordinator({
+    repos,
+    runner,
+    knowledge: new ProjectKnowledgeService(),
+    worktreesBaseDir: join(workdir, 'knowledge-worktrees'),
+  });
+  const orchestrator = new Orchestrator(repos, runner, {
+    worktreesBaseDir: workdir, maxConcurrent: 2, autoRetry: false, knowledgeCoordinator: knowledge,
+  });
   const webhooks = new WebhookSender(repos, { maxAttempts: 1, timeoutMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, new NullNotifier(), webhooks, { intervalMs: 999_999_999 });
 
@@ -92,13 +112,17 @@ function buildServices() {
     },
     () => undefined,
   );
-  const fakeExecutor: PiTextExecutor = async (workload) => {
+  const fakeExecutor: PiTextExecutor = async (workload, messages, _onDelta, _options, _onToolResult, _onAsk, onConsultUx) => {
+    aiRequests.push({ workload, messages });
+    if (workload === 'requirement_chat' && uxConsultationContext && onConsultUx) {
+      await onConsultUx(uxConsultationContext);
+    }
     if (workload === 'requirement_proposal') return '{"title":"T","description":"D","acceptance":"A","priority":"medium"}';
     return 'hello';
   };
   const piAi = createPiAiService(fakeExecutor);
 
-  return { orchestrator, webhooks, timeoutEngine, providerStore, piAi } satisfies Partial<Services>;
+  return { orchestrator, knowledge, webhooks, timeoutEngine, providerStore, piAi } satisfies Partial<Services>;
 }
 
 beforeEach(() => {
@@ -107,11 +131,14 @@ beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'aidf-ipc-'));
   sent = [];
   sentAi = [];
+  aiRequests = [];
+  uxConsultationContext = undefined;
   handlers.clear();
   const built = buildServices();
   services = {
     repos,
     orchestrator: built.orchestrator,
+    knowledge: built.knowledge,
     webhooks: built.webhooks,
     timeoutEngine: built.timeoutEngine,
     providerStore: built.providerStore,
@@ -142,9 +169,21 @@ const sendEvent = (ns: string, method: string, ...args: unknown[]): unknown =>
 describe('typed IPC wiring', () => {
   it('projects.create validates and persists', async () => {
     await expect(call('projects', 'create', { name: '', path: '/x', defaultBranch: 'main' })).rejects.toThrow();
-    const p = await call('projects', 'create', { name: 'My Proj', path: '/abs/path', defaultBranch: 'main' }) as { id: string };
+    initGitRepo(workdir, 'main');
+    const p = await call('projects', 'create', { name: 'My Proj', path: workdir, defaultBranch: 'main' }) as { id: string };
     expect(repos.projects.get(p.id)).toBeDefined();
     expect((await call('projects', 'list') as unknown[]).length).toBe(1);
+  });
+
+  it('projects.create persists the current branch when the requested default is invalid', async () => {
+    initGitRepo(workdir, 'master');
+
+    const project = await call('projects', 'create', {
+      name: 'Master Repo', path: workdir, defaultBranch: 'main',
+    }) as { id: string; defaultBranch: string };
+
+    expect(project.defaultBranch).toBe('master');
+    expect(repos.projects.get(project.id)?.defaultBranch).toBe('master');
   });
 
   it('projects.createAtPath initializes git repo with an initial commit', async () => {
@@ -163,8 +202,8 @@ describe('typed IPC wiring', () => {
   it('projects.openFolder opens the resolved project path and rejects unknown ids', async () => {
     openPathMock.mockClear();
     const dir = mkdtempSync(join(tmpdir(), 'aidf-open-'));
-    const p = await call('projects', 'create', { name: 'P', path: dir, defaultBranch: 'main' }) as { id: string };
-    const r = (await call('projects', 'openFolder', p.id)) as { ok: boolean; error?: string };
+    repos.projects.insert({ id: 'open-project', name: 'P', path: dir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    const r = (await call('projects', 'openFolder', 'open-project')) as { ok: boolean; error?: string };
     expect(r.ok).toBe(true);
     expect(openPathMock).toHaveBeenCalledWith(dir);
     const bad = (await call('projects', 'openFolder', 'no-such-id')) as { ok: boolean };
@@ -308,6 +347,7 @@ describe('typed IPC wiring', () => {
   });
 
   it('iterations.archive gates on all tasks archived, then archives', async () => {
+    services.knowledge = undefined; // 此用例只覆盖无知识协调器的旧项目归档门禁。
     repos.projects.insert({ id: 'p', name: 'P', path: '/non-git', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
     repos.requirements.insert({ id: 'r', iterationId: 'it', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
@@ -329,6 +369,117 @@ describe('typed IPC wiring', () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/non-git', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
     await expect(call('iterations', 'create', 'p', 'I2', 'v1')).rejects.toThrow(/已存在/);
+  });
+
+  it('iterations.create rejects a non-canonical sprint version before inserting', async () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: '/non-git', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+
+    await expect(call('iterations', 'create', 'p', 'I', '.v1')).rejects.toThrow(/版本|Git|规范/);
+
+    expect(repos.iterations.listByProject('p')).toHaveLength(0);
+  });
+
+  it('iterations.create refuses to run without the knowledge coordinator', async () => {
+    execFileSync('git', ['init', '-q', '-b', 'main', workdir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.name', 't'], { stdio: 'ignore' });
+    writeFileSync(join(workdir, 'README.md'), 'x');
+    execFileSync('git', ['-C', workdir, 'add', '.'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+    repos.projects.insert({ id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    services.knowledge = undefined;
+
+    await expect(call('iterations', 'create', 'p', 'I', 'v-no-coordinator')).rejects.toThrow(/知识协调器|knowledge coordinator/i);
+
+    expect(() => execFileSync('git', [
+      'rev-parse', '--verify', 'refs/heads/ai-devflow-sprint/v-no-coordinator',
+    ], { cwd: workdir, stdio: 'pipe' })).toThrow();
+    expect(repos.iterations.listByProject('p')).toHaveLength(0);
+  });
+
+  it('iterations.create commits iteration documents only to the sprint branch', async () => {
+    execFileSync('git', ['init', '-q', '-b', 'main', workdir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.name', 't'], { stdio: 'ignore' });
+    writeFileSync(join(workdir, 'README.md'), 'x');
+    execFileSync('git', ['-C', workdir, 'add', '.'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+    repos.projects.insert({ id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    services.knowledge = new KnowledgeCoordinator({
+      repos,
+      runner: { async verifyRuntime() { return { version: 'fake', entry: 'fake' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: join(workdir, 'knowledge-worktrees'),
+    });
+
+    const iteration = await call('iterations', 'create', 'p', 'I1', 'v1') as { id: string };
+
+    expect(repos.iterations.get(iteration.id)).toBeDefined();
+    expect(() => execFileSync('git', ['show', 'main:docs/iterations/v1/index.md'], { cwd: workdir, stdio: 'pipe' })).toThrow();
+    expect(execFileSync('git', ['show', 'ai-devflow-sprint/v1:docs/iterations/v1/index.md'], { cwd: workdir, encoding: 'utf8' })).toContain(iteration.id);
+  });
+
+  it('iterations.create repairs a stale project default branch before creating the sprint branch', async () => {
+    initGitRepo(workdir, 'master');
+    repos.projects.insert({
+      id: 'p', name: 'P', path: workdir, defaultBranch: 'main',
+      createdAt: 1, updatedAt: 1, settings: {},
+    });
+
+    const iteration = await call('iterations', 'create', 'p', 'I1', 'v1') as { id: string };
+
+    expect(repos.projects.get('p')?.defaultBranch).toBe('master');
+    expect(repos.iterations.get(iteration.id)).toBeDefined();
+    expect(execFileSync('git', [
+      'show', 'ai-devflow-sprint/v1:docs/iterations/v1/index.md',
+    ], { cwd: workdir, encoding: 'utf8' })).toContain(iteration.id);
+  });
+
+  it('iterations.create rolls back a newly created sprint branch when the database insert fails', async () => {
+    execFileSync('git', ['init', '-q', '-b', 'main', workdir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.name', 't'], { stdio: 'ignore' });
+    writeFileSync(join(workdir, 'README.md'), 'x');
+    execFileSync('git', ['-C', workdir, 'add', '.'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+    repos.projects.insert({ id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    services.knowledge = new KnowledgeCoordinator({
+      repos,
+      runner: { async verifyRuntime() { return { version: 'fake', entry: 'fake' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: join(workdir, 'knowledge-worktrees'),
+    });
+    repos.iterations.claim = () => { throw new Error('injected database failure'); };
+
+    await expect(call('iterations', 'create', 'p', 'I1', 'v1')).rejects.toThrow(/database failure/);
+
+    expect(() => execFileSync('git', ['rev-parse', '--verify', 'refs/heads/ai-devflow-sprint/v1'], { cwd: workdir, stdio: 'pipe' })).toThrow();
+    expect(() => execFileSync('git', ['show', 'main:docs/iterations/v1/index.md'], { cwd: workdir, stdio: 'pipe' })).toThrow();
+  });
+
+  it('iterations.create restores rather than deletes a pre-existing sprint branch when the database insert fails', async () => {
+    execFileSync('git', ['init', '-q', '-b', 'main', workdir], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.email', 't@t'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'config', 'user.name', 't'], { stdio: 'ignore' });
+    writeFileSync(join(workdir, 'README.md'), 'x');
+    execFileSync('git', ['-C', workdir, 'add', '.'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'commit', '-qm', 'init'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', workdir, 'branch', 'ai-devflow-sprint/v1', 'main'], { stdio: 'ignore' });
+    const originalSprint = execFileSync('git', ['-C', workdir, 'rev-parse', 'ai-devflow-sprint/v1'], { encoding: 'utf8' }).trim();
+    repos.projects.insert({ id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    services.knowledge = new KnowledgeCoordinator({
+      repos,
+      runner: { async verifyRuntime() { return { version: 'fake', entry: 'fake' }; }, async run() { throw new Error('unused'); } },
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: join(workdir, 'knowledge-worktrees'),
+    });
+    repos.iterations.claim = () => { throw new Error('injected database failure'); };
+
+    await expect(call('iterations', 'create', 'p', 'I1', 'v1')).rejects.toThrow(/database failure/);
+
+    expect(execFileSync('git', ['-C', workdir, 'rev-parse', 'ai-devflow-sprint/v1'], { encoding: 'utf8' }).trim()).toBe(originalSprint);
+    expect(() => execFileSync('git', ['show', 'ai-devflow-sprint/v1:docs/iterations/v1/index.md'], { cwd: workdir, stdio: 'pipe' })).toThrow();
+    expect(() => execFileSync('git', ['show', 'main:docs/iterations/v1/index.md'], { cwd: workdir, stdio: 'pipe' })).toThrow();
   });
 
   it('tasks.update edits only ready tasks', async () => {
@@ -356,8 +507,9 @@ describe('typed IPC wiring', () => {
   });
 
   it('tasks.create persists dependsOn and start blocks on unmet dependency', async () => {
-    const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
-    const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
+    repos.projects.insert({ id: 'p-deps', name: 'P', path: '/abs', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    const it = { id: 'it-deps', projectId: 'p-deps', name: 'I1', version: 'v1', status: 'active' as const, createdAt: 1 };
+    repos.iterations.insert(it);
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
     const pred = await call('tasks', 'create', { requirementId: r.id, title: 'Pred', description: '', role: 'coder' }) as { id: string };
     const succ = await call('tasks', 'create', { requirementId: r.id, title: 'Succ', description: '', role: 'coder',  dependsOn: [pred.id] }) as { id: string };
@@ -372,12 +524,13 @@ describe('typed IPC wiring', () => {
   });
 
   it('ai.chat emits done event with full text after streaming completes', async () => {
+    repos.projects.insert({ id: 'chat-project', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     await call('providers', 'save', {
       id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
       priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
       defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
     } as never);
-    sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement' });
+    sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement', projectPath: workdir });
     // fakeExecutor 返回 'hello'；等微任务让 async 处理器完成
     await new Promise((r) => setTimeout(r, 10));
     const types = sentAi.map((e) => e.type);
@@ -386,9 +539,129 @@ describe('typed IPC wiring', () => {
     expect(done?.fullText).toBe('hello');
   });
 
+  it('rejects an unregistered project path before starting a creation agent', async () => {
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
+      defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
+    } as never);
+
+    sendEvent('ai', 'chat', {
+      sessionId: 'unregistered-project',
+      messages: [{ role: 'user', content: '设计登录需求' }],
+      mode: 'requirement',
+      projectPath: join(workdir, 'not-registered'),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(aiRequests).toEqual([]);
+    expect(sentAi).toContainEqual(expect.objectContaining({
+      type: 'error',
+      sessionId: 'unregistered-project',
+      error: expect.stringMatching(/项目/),
+    }));
+  });
+
+  it('injects project knowledge content and persists read evidence for requirement and task creation', async () => {
+    repos.projects.insert({ id: 'p', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    const knowledgeService = new ProjectKnowledgeService();
+    await knowledgeService.initializeKnowledge({ repoPath: workdir, date: '2026-07-28' });
+    writeFileSync(join(workdir, 'docs/knowledge/context/index.md'), `---
+id: context:root
+type: context
+status: active
+owner: project
+updated: 2026-07-28
+confidence: 0.9
+sources: []
+related: []
+---
+
+# Project Context
+
+PROJECT KNOWLEDGE BODY: existing login uses session cookies.
+`);
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
+      defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
+    } as never);
+
+    sendEvent('ai', 'chat', {
+      sessionId: 'knowledge-requirement-chat',
+      messages: [{ role: 'user', content: '设计登录需求' }],
+      mode: 'requirement',
+      projectPath: workdir,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    sendEvent('ai', 'chat', {
+      sessionId: 'knowledge-task-chat',
+      messages: [{ role: 'user', content: '拆解登录任务' }],
+      mode: 'task_proposal',
+      projectPath: workdir,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const retrievals = db.prepare(
+      'SELECT expert_key, stage, state, read_evidence_json FROM knowledge_retrievals WHERE project_id=? ORDER BY created_at',
+    ).all('p') as Array<{ expert_key: string; stage: string; state: string; read_evidence_json: string }>;
+    expect(retrievals).toHaveLength(2);
+    expect(retrievals.map(({ expert_key, stage, state }) => ({ expert_key, stage, state }))).toEqual([
+      { expert_key: 'product', stage: 'requirement_chat', state: 'completed' },
+      { expert_key: 'dev_lead', stage: 'task_proposal', state: 'completed' },
+    ]);
+    for (const retrieval of retrievals) {
+      expect(JSON.parse(retrieval.read_evidence_json)).toContainEqual(expect.objectContaining({
+        knowledgeId: 'context:root',
+        path: 'docs/knowledge/context/index.md',
+        reason: 'host_prompt_context',
+      }));
+    }
+    expect(aiRequests).toHaveLength(2);
+    for (const request of aiRequests) {
+      expect(request.messages[0]?.content).toContain('HOST KNOWLEDGE MANIFEST');
+      expect(request.messages[0]?.content).toContain('PROJECT KNOWLEDGE BODY: existing login uses session cookies.');
+    }
+  });
+
+  it('marks UX retrieval failed when knowledge materialization fails after planning', async () => {
+    repos.projects.insert({ id: 'ux-project', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    const knowledgeService = new ProjectKnowledgeService();
+    await knowledgeService.initializeKnowledge({ repoPath: workdir, date: '2026-07-28' });
+    const coordinator = services.knowledge!;
+    services.knowledge = {
+      prepareChatContext: async (input: Parameters<KnowledgeCoordinator['prepareChatContext']>[0]) => {
+        const manifest = await coordinator.prepareChatContext(input);
+        if (input.stage === 'ux_consult') rmSync(workdir, { recursive: true, force: true });
+        return manifest;
+      },
+      completeRetrieval: coordinator.completeRetrieval.bind(coordinator),
+    } as unknown as NonNullable<Services['knowledge']>;
+    uxConsultationContext = '检查登录交互';
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
+      defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
+    } as never);
+
+    sendEvent('ai', 'chat', {
+      sessionId: 'ux-materialization-failure',
+      messages: [{ role: 'user', content: '设计登录需求' }],
+      mode: 'requirement',
+      projectPath: workdir,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const uxRetrieval = db.prepare(
+      "SELECT state FROM knowledge_retrievals WHERE project_id=? AND stage='ux_consult'",
+    ).get('ux-project') as { state: string } | undefined;
+    expect(uxRetrieval?.state).toBe('failed');
+  });
+
   it('tasks.listAll returns all tasks', async () => {
-    const p = await call('projects', 'create', { name: 'P', path: '/abs', defaultBranch: 'main' }) as { id: string };
-    const it = await call('iterations', 'create', p.id, 'I1', 'v1') as { id: string };
+    repos.projects.insert({ id: 'p-list-all', name: 'P', path: '/abs', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    const it = { id: 'it-list-all', projectId: 'p-list-all', name: 'I1', version: 'v1', status: 'active' as const, createdAt: 1 };
+    repos.iterations.insert(it);
     const r = await call('requirements', 'create', it.id, 'Req', 'desc', 'high', 'acceptance') as { id: string };
     await call('tasks', 'create', { requirementId: r.id, title: 'Task', description: 'd', role: 'coder' });
     const all = (await call('tasks', 'listAll')) as unknown[];
