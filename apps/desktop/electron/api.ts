@@ -128,6 +128,7 @@ export type AskAnswer = Array<{
 
 export type AiStreamEvent =
   | { type: 'delta'; sessionId: string; text: string }
+  | { type: 'thinking'; sessionId: string; text: string }
   | { type: 'done'; sessionId: string; fullText: string }
   | { type: 'error'; sessionId: string; error: string }
   | { type: 'requirement_proposal'; sessionId: string; draft: AiRequirementProposalDraft }
@@ -315,6 +316,8 @@ export interface DesktopApi {
         onRequirementProposal?: (draft: AiRequirementProposalDraft) => void;
         onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void;
         onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void;
+        /** AI 思维链增量（thinking_delta）：供 UI 展示思考细节，与正文增量分离。 */
+        onThinking?: (text: string) => void;
       },
     ): Promise<string>;
     /** 提交问答工具的答案（统一提交所有 tab）。 */

@@ -15,13 +15,18 @@ export const zh: Record<string, string> = {
   'common.no': '否',
   'common.ok': '成功',
   'common.fail': '失败',
+  'common.discard.title': '放弃已编辑的内容？',
+  'common.discard.body': '关闭后，当前已编辑或生成的内容将会丢失，且无法恢复。',
+  'common.discard.confirm': '放弃并关闭',
+  'common.discard.keep': '继续编辑',
 
   // ---- 对话 ----
   'chat.newMessages': '↓ {n} 条新消息',
   'chat.ask.submit': '提交',
   'chat.ask.required': '请回答必填问题',
-  'chat.ask.submitted': '已提交',
+  'chat.ask.submitted': '已提交，AI 正在继续处理…',
   'chat.ask.next': '下一步',
+  'chat.thinking.title': '思考过程',
 
   // ---- 导航 ----
   'nav.projects': '项目',
@@ -184,6 +189,9 @@ export const zh: Record<string, string> = {
   'task.ai.unconfigured': '尚未配置 AI 服务商，请先在“设置 -> AI 服务商”中填写。',
   'task.ai.goSettings': '去配置',
   'task.ai.thinking': 'AI 思考中…',
+  'task.ai.quickGenerate': '一键生成任务',
+  'task.ai.quickGenerate.hint': '需求已足够清晰，跳过沟通直接生成任务草稿',
+  'task.ai.quickGenerate.prompt': '需求已经足够清晰，无需再向我提问澄清。请直接基于当前需求拆解任务，并调用工具生成任务草稿。',
 
   // ---- 任务详情（侧滑窗） ----
   'detail.start': '启动',

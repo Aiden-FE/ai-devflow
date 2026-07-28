@@ -63,11 +63,12 @@ export interface PiTextExecutor {
     onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
     onConsultUx?: (requirementContext: string) => Promise<string>,
     systemPromptOverride?: string,
+    onThinking?: (text: string) => void,
   ): Promise<string>;
 }
 
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void; onConsultUx?: (requirementContext: string) => Promise<string> }): Promise<string>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void; onConsultUx?: (requirementContext: string) => Promise<string>; onThinking?: (text: string) => void }): Promise<string>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
   /**
@@ -302,6 +303,7 @@ export async function executeTextOnRoute(
   onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
   onConsultUx?: (requirementContext: string) => Promise<string>,
   systemPromptOverride?: string,
+  onThinking?: (text: string) => void,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
@@ -382,8 +384,9 @@ export async function executeTextOnRoute(
           continue;
         }
         if (event.type === 'message_update') {
-          // 流式输出：仅转发 text_delta（正文增量），丢弃 thinking_delta（思维链抑制）。
-          // 早期实现缓冲到末尾才 flush，体验差；改为立即转发 onDelta。
+          // 流式输出：text_delta（正文增量）经 onDelta 立即转发；thinking_delta（思维链增量）经
+          // onThinking 单独转发，供 UI 展示“思考中”细节（思考与正文分离，不计入 full 正文）。
+          // 早期实现缓冲到末尾才 flush，体验差；改为立即转发。
           const ame = event.assistantMessageEvent;
           if (ame?.type === 'text_delta') {
             const delta = typeof ame.delta === 'string' ? ame.delta : '';
@@ -391,6 +394,9 @@ export async function executeTextOnRoute(
               full += delta;
               onDelta?.(delta);
             }
+          } else if (ame?.type === 'thinking_delta') {
+            const delta = typeof ame.delta === 'string' ? ame.delta : '';
+            if (delta) onThinking?.(delta);
           }
         } else if (event.type === 'agent_end') {
           sawAgentEnd = true;
@@ -496,14 +502,14 @@ function buildPiFailureDetail(
 }
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
-  return async (workload, messages, onDelta, options, onToolResult, onAsk, onConsultUx, systemPromptOverride) => {
+  return async (workload, messages, onDelta, options, onToolResult, onAsk, onConsultUx, systemPromptOverride, onThinking) => {
     // cwd 仅用于 task_proposal spawn 的工作目录，不属于路由选项；从 options 中取出后不透传给 router。
     const { cwd, ...routerOptions } = options ?? {};
     const result = await deps.router.execute(
       chatWorkloadToExpert(workload),
       async (route) => {
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk, onConsultUx, systemPromptOverride);
+          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk, onConsultUx, systemPromptOverride, onThinking);
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -579,7 +585,7 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
           ? [{ role: 'user', content: `【上下文】\n${opts.context}` }, ...messages]
           : messages;
       // 绑定项目的需求/任务创建以项目根作为 spawn cwd，令步骤 Agent 的只读工具能探索实际工程。
-      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx);
+      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx, undefined, opts?.onThinking);
     },
 
     proposeRequirement(messages) {

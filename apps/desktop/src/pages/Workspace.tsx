@@ -19,7 +19,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
-import { Plus, MessageSquarePlus, Archive, AlertCircle, Info, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2 } from 'lucide-react';
+import { Plus, MessageSquarePlus, Archive, AlertCircle, Info, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2, Loader2, Zap } from 'lucide-react';
 import type { Project, Iteration, Requirement, Task, TaskStatus, TaskTypeLabel, AiTaskProposal } from '@ai-devflow/core';
 import type { AskTabs, AskAnswer } from '../../electron/api.js';
 
@@ -436,49 +436,79 @@ function CreateReqButton({ iterationId, projectPath, onCreated, onNavigateSettin
     setOpen(false); reset(); onCreated();
   };
 
+  // 脏状态检测：表单已被编辑（手动填写或 AI 草稿已填入）时，关闭需二次确认防丢失（Issue 4）。
+  const dirty = !!(title.trim() || desc.trim() || acceptance.trim()) || priority !== 'medium';
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // 确认放弃后的后续动作（如“去配置”需跳转设置页）。
+  const [afterDiscard, setAfterDiscard] = useState<(() => void) | undefined>();
+  const requestClose = (after?: () => void) => {
+    if (dirty) { setAfterDiscard(() => after); setConfirmDiscard(true); }
+    else { setOpen(false); reset(); after?.(); }
+  };
+  const discard = () => {
+    setConfirmDiscard(false); setOpen(false); reset();
+    afterDiscard?.(); setAfterDiscard(undefined);
+  };
+
   return (
     <>
       <Button variant="outline" size="sm" onClick={() => setOpen(true)}><Plus className="h-3.5 w-3.5" /> {t('ws.createReq')}</Button>
-      <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset(); }}>
+      <Dialog open={open} onOpenChange={(o) => { if (o) setOpen(true); else requestClose(); }}>
         <DialogContent className="max-w-[min(1100px,92vw)] w-[92vw] h-[88vh] max-h-[88vh] flex flex-col gap-4 overflow-hidden">
-          <DialogHeader><DialogTitle>{t('req.ai.twoStepTitle')}</DialogTitle></DialogHeader>
-          {appliedHint && <div className="rounded-md border border-ok/30 bg-ok/10 px-3 py-1.5 text-xs text-ok">{t('req.ai.applied')}</div>}
-          {/* Step 1：AI 沟通 */}
-          {hasUsableProvider ? (
-            <AiRefineRequirement
-              projectPath={projectPath}
-              onApplied={(p) => {
-                setTitle(p.title); setDesc(p.description); setAcceptance(p.acceptance); setPriority(p.priority);
-                setAppliedHint(true);
-              }}
-            />
-          ) : (
-            <div className="flex flex-col items-center gap-2 py-6 text-center text-xs text-muted-foreground">
-              <span>{t('req.ai.noProvider')}</span>
-              <Button size="sm" variant="outline" onClick={() => { setOpen(false); onNavigateSettings?.(); }}>{t('req.ai.goSettings')}</Button>
+          <DialogHeader className="shrink-0"><DialogTitle>{t('req.ai.twoStepTitle')}</DialogTitle></DialogHeader>
+          {appliedHint && <div className="shrink-0 rounded-md border border-ok/30 bg-ok/10 px-3 py-1.5 text-xs text-ok">{t('req.ai.applied')}</div>}
+          {/* 中部整体可滚动（Issue 2）：AI 沟通固定高度，确认表单随内容滚动，创建/取消按钮始终可见 */}
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+            {/* Step 1：AI 沟通 */}
+            {hasUsableProvider ? (
+              <div className="flex h-[42vh] shrink-0 flex-col">
+                <AiRefineRequirement
+                  projectPath={projectPath}
+                  onApplied={(p) => {
+                    setTitle(p.title); setDesc(p.description); setAcceptance(p.acceptance); setPriority(p.priority);
+                    setAppliedHint(true);
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-2 py-6 text-center text-xs text-muted-foreground">
+                <span>{t('req.ai.noProvider')}</span>
+                <Button size="sm" variant="outline" onClick={() => requestClose(() => onNavigateSettings?.())}>{t('req.ai.goSettings')}</Button>
+              </div>
+            )}
+            {/* Step 2：确认需求（可编辑；草稿到达前为空但允许直接编辑） */}
+            <div className="flex flex-col gap-3 border-t border-border pt-3">
+              <div className="text-xs font-semibold text-muted-foreground">{t('req.ai.confirmTitle')}</div>
+              <div className="flex flex-col gap-1.5"><Label>{t('req.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+              <div className="flex flex-col gap-1.5"><Label>{t('req.description')}</Label><Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} /></div>
+              <div className="flex flex-col gap-1.5">
+                <Label>{t('ws.priority')}</Label>
+                <Select value={priority} onValueChange={(v) => setPriority(v as 'low' | 'medium' | 'high')}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="low">{t('ws.priority.low')}</SelectItem>
+                    <SelectItem value="medium">{t('ws.priority.medium')}</SelectItem>
+                    <SelectItem value="high">{t('ws.priority.high')}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-1.5"><Label>{t('req.acceptance')}</Label><Textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} rows={2} placeholder={t('req.acceptance.hint')} /></div>
             </div>
-          )}
-          {/* Step 2：确认需求（可编辑；草稿到达前为空但允许直接编辑） */}
-          <div className="mt-2 flex flex-col gap-3 border-t border-border pt-3">
-            <div className="text-xs font-semibold text-muted-foreground">{t('req.ai.confirmTitle')}</div>
-            <div className="flex flex-col gap-1.5"><Label>{t('req.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
-            <div className="flex flex-col gap-1.5"><Label>{t('req.description')}</Label><Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={2} /></div>
-            <div className="flex flex-col gap-1.5">
-              <Label>{t('ws.priority')}</Label>
-              <Select value={priority} onValueChange={(v) => setPriority(v as 'low' | 'medium' | 'high')}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="low">{t('ws.priority.low')}</SelectItem>
-                  <SelectItem value="medium">{t('ws.priority.medium')}</SelectItem>
-                  <SelectItem value="high">{t('ws.priority.high')}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex flex-col gap-1.5"><Label>{t('req.acceptance')}</Label><Textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} rows={2} placeholder={t('req.acceptance.hint')} /></div>
           </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => { setOpen(false); reset(); }}>{t('common.cancel')}</Button>
+          <DialogFooter className="shrink-0">
+            <Button variant="ghost" onClick={() => requestClose()}>{t('common.cancel')}</Button>
             <Button disabled={!title.trim() || !hasUsableProvider} onClick={submit}>{t('common.create')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* 关闭二次确认（Issue 4）：已编辑/已生成内容时提示丢失风险 */}
+      <Dialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>{t('common.discard.title')}</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">{t('common.discard.body')}</p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmDiscard(false)}>{t('common.discard.keep')}</Button>
+            <Button variant="destructive" onClick={discard}>{t('common.discard.confirm')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -486,9 +516,9 @@ function CreateReqButton({ iterationId, projectPath, onCreated, onNavigateSettin
   );
 }
 
-type AskCardState = { toolUseId: string; tabs: AskTabs; submitted: boolean };
+export type AskCardState = { toolUseId: string; tabs: AskTabs; submitted: boolean };
 
-function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (answers: AskAnswer) => void }): React.ReactElement {
+export function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (answers: AskAnswer) => void }): React.ReactElement {
   const t = useT();
   const [activeTab, setActiveTab] = useState(0);
   const [error, setError] = useState<string | undefined>();
@@ -519,7 +549,13 @@ function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (answers:
   };
 
   if (state.submitted) {
-    return <div className="rounded-md border border-border bg-secondary/40 p-2 text-xs text-muted-foreground">{t('chat.ask.submitted')}</div>;
+    // 提交后 AI 仍在继续处理（chat 流未结束）：展示 spinner + 提示，避免“提交后无任何反馈”的干等体验。
+    return (
+      <div className="flex items-center gap-1.5 rounded-md border border-border bg-secondary/40 p-2 text-xs text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        {t('chat.ask.submitted')}
+      </div>
+    );
   }
   const tab = state.tabs[activeTab];
   const lastTab = activeTab >= state.tabs.length - 1;
@@ -579,23 +615,42 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
   const [error, setError] = useState<string | undefined>();
   const [askCards, setAskCards] = useState<Record<string, AskCardState>>({});
   const sessionRef = useRef<string | undefined>(undefined);
+  // 当前对话段（两次问答之间）的累计正文/思考：问答卡片插入后重置，
+  // 使答复后的增量写入新助手气泡，避免与卡片前的正文重复。
+  const segRef = useRef({ text: '', thinking: '' });
+
+  // 把增量同步到末条普通助手消息；末条不是助手消息（如刚插入问答卡片）时追加新气泡。
+  const syncAssistant = (patch: { content?: string; thinking?: string }) => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && !('kind' in last)) {
+        const next = [...prev];
+        next[next.length - 1] = { ...last, ...patch };
+        return next;
+      }
+      return [...prev, { id: `a-${Date.now()}-${prev.length}`, role: 'assistant', content: patch.content ?? '', thinking: patch.thinking ?? '' }];
+    });
+  };
 
   const send = async (text: string) => {
     if (streaming) return;
     const userMsg: ChatPanelMessage = { id: `u-${Date.now()}`, role: 'user', content: text };
     const next = [...messages, userMsg];
+    segRef.current = { text: '', thinking: '' };
     setMessages(next); setStreaming(true); setError(undefined);
-    let assistant = '';
-    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '' }]);
+    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '', thinking: '' }]);
     try {
-      assistant = await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
-        assistant += delta;
-        setMessages((prev) => prev.map((m, i) =>
-          i === prev.length - 1 && m.role === 'assistant' ? { ...m, content: assistant } : m,
-        ));
+      await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
+        segRef.current.text += delta;
+        syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
       }, {
         mode: 'requirement',
         projectPath,
+        // 思考链增量（Issue 5）：实时展示思考细节，思考结束后折叠。
+        onThinking: (delta) => {
+          segRef.current.thinking += delta;
+          syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
+        },
         // AI 在需求足够清晰时调用 ai_devflow_propose_requirement 工具生成草稿；
         // 工具结果经事件流回传，直接填入表单，无需用户点“生成需求草稿”按钮。
         onRequirementProposal: (draft) => onApplied(draft),
@@ -603,14 +658,18 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
           sessionRef.current = sessionId;
           setAskCards((prev) => ({ ...prev, [toolUseId]: { toolUseId, tabs, submitted: false } }));
           setMessages((prev) => [...prev, { id: `q-${toolUseId}`, role: 'assistant', kind: 'question', content: '' }]);
+          // 问答卡片插入后重置段累计：答复后的增量写入新助手气泡。
+          segRef.current = { text: '', thinking: '' };
         },
       });
+      // 清理既无正文又无思考的空助手气泡（如仅产出草稿未输出文本的轮次）。
+      setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
     } catch (e) {
       setError((e as Error).message);
       // 流式后错误前已发 delta 会让 assistant 消息非空；标注中断而非删除，避免残留半截无标注文本。
-      setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+      setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
       setMessages((prev) => prev.map((m, i) =>
-        i === prev.length - 1 && m.role === 'assistant' && m.content
+        i === prev.length - 1 && m.role === 'assistant' && !('kind' in m) && m.content
           ? { ...m, content: `${m.content}\n\n${t('task.ai.interrupted')}` }
           : m,
       ));
@@ -618,7 +677,7 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
   };
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <ChatPanel
         messages={messages}
         onSend={send}
@@ -638,6 +697,9 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
                 if (!sessionRef.current) return;
                 await api.ai.answer(sessionRef.current, card.toolUseId, answers);
                 setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
+                // 提交后立即插入助手占位气泡（Issue 1）：展示“思考中” spinner，
+                // 避免答复后干等无反馈；后续增量经 syncAssistant 写入该气泡。
+                setMessages((prev) => [...prev, { id: `a-${Date.now()}-${prev.length}`, role: 'assistant', content: '', thinking: '' }]);
               }}
             />
           );
@@ -647,7 +709,7 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
   );
 }
 
-function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { requirementId: string; projectPath?: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
+export function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { requirementId: string; projectPath?: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [mode, setMode] = useState<'manual' | 'ai'>('ai');
   // 加载当前需求与已有兄弟任务：AI 生成带入需求上下文；手动创建可选择前置依赖。
@@ -655,74 +717,104 @@ function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { r
   const sibsQ = useAsync(() => api.tasks.listByRequirement(requirementId), [requirementId]);
   const requirement = reqQ.data;
   const siblings = sibsQ.data ?? [];
+  // 脏状态（Issue 4）：子组件上报是否已编辑/已生成内容；关闭时二次确认防丢失。
+  const [dirty, setDirty] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const requestClose = () => {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
+  };
   return (
-    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="max-w-[min(1100px,92vw)] w-[92vw] h-[88vh] max-h-[88vh] flex flex-col gap-4 overflow-hidden">
-        <DialogHeader><DialogTitle>{t('task.create')}</DialogTitle></DialogHeader>
-        <div className="flex gap-2">
-          <Button size="sm" variant={mode === 'manual' ? 'default' : 'outline'} onClick={() => setMode('manual')}>{t('task.create')}</Button>
-          <Button size="sm" variant={mode === 'ai' ? 'default' : 'outline'} onClick={() => setMode('ai')}><MessageSquarePlus className="h-4 w-4" /> {t('task.ai.create')}</Button>
-        </div>
-        {mode === 'manual'
-          ? <ManualCreateTask requirementId={requirementId} siblings={siblings} onCreated={onCreated} />
-          : <AiCreateTask requirementId={requirementId} requirement={requirement} projectPath={projectPath} onCreated={onCreated} />}
-      </DialogContent>
-    </Dialog>
+    <>
+      <Dialog open onOpenChange={(o) => { if (!o) requestClose(); }}>
+        <DialogContent className="max-w-[min(1100px,92vw)] w-[92vw] h-[88vh] max-h-[88vh] flex flex-col gap-4 overflow-hidden">
+          <DialogHeader className="shrink-0"><DialogTitle>{t('task.create')}</DialogTitle></DialogHeader>
+          <div className="flex shrink-0 gap-2">
+            <Button size="sm" variant={mode === 'manual' ? 'default' : 'outline'} onClick={() => setMode('manual')}>{t('task.create')}</Button>
+            <Button size="sm" variant={mode === 'ai' ? 'default' : 'outline'} onClick={() => setMode('ai')}><MessageSquarePlus className="h-4 w-4" /> {t('task.ai.create')}</Button>
+          </div>
+          {mode === 'manual'
+            ? <ManualCreateTask requirementId={requirementId} siblings={siblings} onCancel={requestClose} onDirtyChange={setDirty} onCreated={onCreated} />
+            : <AiCreateTask requirementId={requirementId} requirement={requirement} projectPath={projectPath} onDirtyChange={setDirty} onCreated={onCreated} />}
+        </DialogContent>
+      </Dialog>
+      {/* 关闭二次确认（Issue 4）：已编辑/已生成内容时提示丢失风险 */}
+      <Dialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>{t('common.discard.title')}</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">{t('common.discard.body')}</p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfirmDiscard(false)}>{t('common.discard.keep')}</Button>
+            <Button variant="destructive" onClick={() => { setConfirmDiscard(false); onClose(); }}>{t('common.discard.confirm')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
-function ManualCreateTask({ requirementId, siblings, onCreated }: { requirementId: string; siblings: Task[]; onCreated: (taskId: string) => void }): React.ReactElement {
+function ManualCreateTask({ requirementId, siblings, onCancel, onDirtyChange, onCreated }: { requirementId: string; siblings: Task[]; onCancel: () => void; onDirtyChange?: (dirty: boolean) => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [typeLabel, setTypeLabel] = useState<TaskTypeLabel | ''>('');
   const [dependsOn, setDependsOn] = useState<string[]>([]);
   const toggleDep = (id: string) => setDependsOn((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  // 脏状态上报（Issue 4）：任一字段已填写时关闭需二次确认。
+  const dirty = !!(title.trim() || description.trim() || typeLabel) || dependsOn.length > 0;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
   const submit = async () => {
     const task = await api.tasks.create({ requirementId, title, description, typeLabel: typeLabel || undefined, dependsOn: dependsOn.length ? dependsOn : undefined });
     onCreated(task.id);
   };
   return (
-    <div className="mt-3 flex flex-col gap-3">
-      <div className="flex flex-col gap-1.5"><Label>{t('task.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
-      <div className="flex flex-col gap-1.5"><Label>{t('task.description')}</Label><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} /></div>
-      <div className="flex flex-col gap-1.5">
-        <Label>{t('task.typeLabel')}</Label>
-        <Select value={typeLabel} onValueChange={(v) => setTypeLabel(v as TaskTypeLabel | '')}>
-          <SelectTrigger><SelectValue placeholder={t('task.typeLabel.none')} /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="">{t('task.typeLabel.none')}</SelectItem>
-            <SelectItem value="frontend">{t('task.typeLabel.frontend')}</SelectItem>
-            <SelectItem value="backend">{t('task.typeLabel.backend')}</SelectItem>
-            <SelectItem value="fullstack">{t('task.typeLabel.fullstack')}</SelectItem>
-            <SelectItem value="integration">{t('task.typeLabel.integration')}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-      {siblings.length > 0 && (
+    <div className="mt-3 flex min-h-0 flex-1 flex-col">
+      {/* 字段区可滚动（Issue 2）：依赖多/描述长时不遮挡底部创建/取消按钮 */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+        <div className="flex flex-col gap-1.5"><Label>{t('task.title')}</Label><Input value={title} onChange={(e) => setTitle(e.target.value)} /></div>
+        <div className="flex flex-col gap-1.5"><Label>{t('task.description')}</Label><Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} /></div>
         <div className="flex flex-col gap-1.5">
-          <Label>{t('task.dependsOn')}</Label>
-          <div className="flex flex-col gap-1.5 rounded-md border border-border p-2">
-            <span className="text-[11px] text-muted-foreground">{t('task.dependsOn.hint')}</span>
-            {siblings.map((s) => (
-              <label key={s.id} className="flex items-center gap-2 text-xs">
-                <Checkbox checked={dependsOn.includes(s.id)} onCheckedChange={() => toggleDep(s.id)} />
-                <span className="truncate">{s.title}</span>
-                <StatusBadge status={s.status} />
-              </label>
-            ))}
-          </div>
+          <Label>{t('task.typeLabel')}</Label>
+          <Select value={typeLabel} onValueChange={(v) => setTypeLabel(v as TaskTypeLabel | '')}>
+            <SelectTrigger><SelectValue placeholder={t('task.typeLabel.none')} /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">{t('task.typeLabel.none')}</SelectItem>
+              <SelectItem value="frontend">{t('task.typeLabel.frontend')}</SelectItem>
+              <SelectItem value="backend">{t('task.typeLabel.backend')}</SelectItem>
+              <SelectItem value="fullstack">{t('task.typeLabel.fullstack')}</SelectItem>
+              <SelectItem value="integration">{t('task.typeLabel.integration')}</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
-      )}
-      <DialogFooter>
-        <Button variant="ghost" onClick={() => onCreated('')}>{t('common.cancel')}</Button>
+        {siblings.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <Label>{t('task.dependsOn')}</Label>
+            <div className="flex flex-col gap-1.5 rounded-md border border-border p-2">
+              <span className="text-[11px] text-muted-foreground">{t('task.dependsOn.hint')}</span>
+              {siblings.map((s) => (
+                <label key={s.id} className="flex items-center gap-2 text-xs">
+                  <Checkbox checked={dependsOn.includes(s.id)} onCheckedChange={() => toggleDep(s.id)} />
+                  <span className="truncate">{s.title}</span>
+                  <StatusBadge status={s.status} />
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <DialogFooter className="mt-3 shrink-0">
+        <Button variant="ghost" onClick={onCancel}>{t('common.cancel')}</Button>
         <Button disabled={!title} onClick={submit}>{t('common.create')}</Button>
       </DialogFooter>
     </div>
   );
 }
 
-function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { requirementId: string; requirement?: Requirement; projectPath?: string; onCreated: (taskId: string) => void }): React.ReactElement {
+export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyChange, onCreated }: { requirementId: string; requirement?: Requirement; projectPath?: string; onDirtyChange?: (dirty: boolean) => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -731,12 +823,23 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   const [creating, setCreating] = useState(false);
   const [askCards, setAskCards] = useState<Record<string, AskCardState>>({});
   const sessionRef = useRef<string | undefined>(undefined);
+  // 当前对话段（两次问答之间）的累计正文/思考：问答卡片插入后重置，
+  // 使答复后的增量写入新助手气泡，避免与卡片前的正文重复。
+  const segRef = useRef({ text: '', thinking: '' });
   // 已有子任务：拼入上下文供 task_proposer 避免重复创建，并允许新任务跨批依赖这些 taskId。
   const [existingTasks, setExistingTasks] = useState<Task[]>([]);
   useEffect(() => {
     if (!requirementId) return;
     api.tasks.listByRequirement(requirementId).then(setExistingTasks).catch(() => {});
   }, [requirementId]);
+
+  // 脏状态上报（Issue 4）：已有对话或草稿时关闭需二次确认。
+  const dirty = messages.length > 0 || (proposals?.length ?? 0) > 0;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
 
   // 把当前需求内容作为上下文注入 AI，使拆解对齐需求与验收标准。
   const existingBlock = existingTasks.length > 0
@@ -746,45 +849,65 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
     ? `【当前需求】\n标题：${requirement.title}\n描述：${requirement.description || '(无)'}\n验收标准：${requirement.acceptance || '(无)'}${existingBlock}`
     : existingBlock || undefined;
 
+  // 把增量同步到末条普通助手消息；末条不是助手消息（如刚插入问答卡片）时追加新气泡。
+  const syncAssistant = (patch: { content?: string; thinking?: string }) => {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === 'assistant' && !('kind' in last)) {
+        const next = [...prev];
+        next[next.length - 1] = { ...last, ...patch };
+        return next;
+      }
+      return [...prev, { id: `a-${Date.now()}-${prev.length}`, role: 'assistant', content: patch.content ?? '', thinking: patch.thinking ?? '' }];
+    });
+  };
+
   // 多轮沟通：研发视角的 task_proposer 会先用 brainstorming 梳理、探索仓库代码、一次一问地澄清，
   // 方案确定后调用 ai_devflow_propose_task 工具产出任务草稿（经 onTaskProposal 回传）。
   const send = async (text: string) => {
     if (streaming) return;
     const userMsg: ChatPanelMessage = { id: `u-${Date.now()}`, role: 'user', content: text };
     const next = [...messages, userMsg];
+    segRef.current = { text: '', thinking: '' };
     setMessages(next); setStreaming(true); setError(undefined);
-    let assistant = '';
-    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '' }]);
+    setMessages([...next, { id: `a-${Date.now()}`, role: 'assistant', content: '', thinking: '' }]);
     try {
-      assistant = await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
-        assistant += delta;
-        setMessages((prev) => prev.map((m, i) =>
-          i === prev.length - 1 && m.role === 'assistant' ? { ...m, content: assistant } : m,
-        ));
+      await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
+        segRef.current.text += delta;
+        syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
       }, {
         mode: 'task_proposal',
         context,
         projectPath,
+        // 思考链增量（Issue 5）：实时展示思考细节，思考结束后折叠。
+        onThinking: (delta) => {
+          segRef.current.thinking += delta;
+          syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
+        },
         onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, typeLabel: x.typeLabel, dependsOn: x.dependsOn })) as AiTaskProposal[]),
         onQuestion: (sessionId, toolUseId, tabs) => {
           sessionRef.current = sessionId;
           setAskCards((prev) => ({ ...prev, [toolUseId]: { toolUseId, tabs, submitted: false } }));
           setMessages((prev) => [...prev, { id: `q-${toolUseId}`, role: 'assistant', kind: 'question', content: '' }]);
+          // 问答卡片插入后重置段累计：答复后的增量写入新助手气泡。
+          segRef.current = { text: '', thinking: '' };
         },
       });
-      if (!assistant.trim()) {
-        setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
-      }
+      // 清理既无正文又无思考的空助手气泡（如仅产出草稿未输出文本的轮次）。
+      setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
     } catch (e) {
       setError((e as Error).message);
-      setMessages((prev) => prev.filter((m) => !(m.role === 'assistant' && m.content === '')));
+      setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
       setMessages((prev) => prev.map((m, i) =>
-        i === prev.length - 1 && m.role === 'assistant' && m.content
+        i === prev.length - 1 && m.role === 'assistant' && !('kind' in m) && m.content
           ? { ...m, content: `${m.content}\n\n${t('task.ai.interrupted')}` }
           : m,
       ));
     } finally { setStreaming(false); }
   };
+
+  // 一键生成（Issue 3）：需求已足够清晰时无需补充描述，直接基于需求上下文生成任务草稿。
+  const quickGenerate = () => send(t('task.ai.quickGenerate.prompt'));
 
   // 逐条编辑草稿。
   const updateDraft = (draftId: string, patch: Partial<AiTaskProposal>) => {
@@ -816,7 +939,7 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
   return (
     <div className="flex flex-col gap-3 flex-1 min-h-0">
       {requirement && (
-        <div className="rounded-md border border-border bg-secondary/40 p-2 text-xs">
+        <div className="shrink-0 rounded-md border border-border bg-secondary/40 p-2 text-xs">
           <span className="text-muted-foreground">{t('detail.linkage.req')}：</span>{requirement.title}
         </div>
       )}
@@ -829,6 +952,14 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
           thinkingLabel={t('task.ai.thinking')}
           sendLabel={t('task.ai.send')}
           error={error}
+          emptyAction={requirement ? (
+            <div className="flex flex-col items-center gap-1.5">
+              <Button size="sm" onClick={quickGenerate} disabled={streaming} data-testid="quick-generate">
+                <Zap className="h-3.5 w-3.5" /> {t('task.ai.quickGenerate')}
+              </Button>
+              <span className="text-[11px]">{t('task.ai.quickGenerate.hint')}</span>
+            </div>
+          ) : undefined}
           renderMessage={(msg) => {
             if (!('kind' in msg) || msg.kind !== 'question') return null;
             const card = askCards[msg.id.replace(/^q-/, '')];
@@ -840,6 +971,9 @@ function AiCreateTask({ requirementId, requirement, projectPath, onCreated }: { 
                   if (!sessionRef.current) return;
                   await api.ai.answer(sessionRef.current, card.toolUseId, answers);
                   setAskCards((prev) => ({ ...prev, [card.toolUseId]: { ...card, submitted: true } }));
+                  // 提交后立即插入助手占位气泡（Issue 1）：展示“思考中” spinner，
+                  // 避免答复后干等无反馈；后续增量经 syncAssistant 写入该气泡。
+                  setMessages((prev) => [...prev, { id: `a-${Date.now()}-${prev.length}`, role: 'assistant', content: '', thinking: '' }]);
                 }}
               />
             );

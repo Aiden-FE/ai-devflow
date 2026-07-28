@@ -670,6 +670,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
         mode: payload.mode,
         context: [knowledgeContext, payload.context].filter(Boolean).join('\n\n') || undefined,
         projectPath: knowledgeProject?.path,
+        onThinking: (text) => sendAi({ type: 'thinking', sessionId: payload.sessionId, text }),
         onToolResult: (toolName, payloadDraft) => {
           if (toolName === 'ai_devflow_propose_requirement' && payloadDraft && typeof payloadDraft === 'object') {
             const d = payloadDraft as { title?: unknown; description?: unknown; acceptance?: unknown; priority?: unknown };

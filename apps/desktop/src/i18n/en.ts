@@ -15,13 +15,18 @@ export const en: Record<string, string> = {
   'common.no': 'No',
   'common.ok': 'OK',
   'common.fail': 'Failed',
+  'common.discard.title': 'Discard your edits?',
+  'common.discard.body': 'Closing will lose all content you have edited or generated, and it cannot be recovered.',
+  'common.discard.confirm': 'Discard and close',
+  'common.discard.keep': 'Keep editing',
 
   // ---- chat ----
   'chat.newMessages': '↓ {n} new',
   'chat.ask.submit': 'Submit',
   'chat.ask.required': 'Please answer required questions',
-  'chat.ask.submitted': 'Submitted',
+  'chat.ask.submitted': 'Submitted, AI is continuing…',
   'chat.ask.next': 'Next',
+  'chat.thinking.title': 'Thinking',
 
   // ---- nav ----
   'nav.projects': 'Projects',
@@ -184,6 +189,9 @@ export const en: Record<string, string> = {
   'task.ai.unconfigured': 'No AI provider configured. Set one under "Settings -> AI provider".',
   'task.ai.goSettings': 'Configure',
   'task.ai.thinking': 'AI is thinking…',
+  'task.ai.quickGenerate': 'Generate tasks now',
+  'task.ai.quickGenerate.hint': 'Requirement is clear enough — skip the chat and generate task drafts directly',
+  'task.ai.quickGenerate.prompt': 'The requirement is already clear enough; no need to ask me clarifying questions. Break it down into tasks directly and generate the task drafts.',
 
   // ---- task detail (sheet) ----
   'detail.start': 'Start',

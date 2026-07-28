@@ -16,7 +16,7 @@ import {
 
 /** 聊天项：统一的 discriminated union，覆盖消息/工具/状态/错误/自定义。 */
 export type ChatItem =
-  | { type: 'message'; id: string; role: 'user' | 'assistant' | 'system'; text: string; streaming?: boolean }
+  | { type: 'message'; id: string; role: 'user' | 'assistant' | 'system'; text: string; thinking?: string; streaming?: boolean }
   | { type: 'tool'; id: string; toolName?: string; title?: string; input?: string; output?: string; isError?: boolean; running?: boolean }
   | { type: 'error'; id: string; text: string }
   | { type: 'status'; id: string; text: string }
@@ -24,7 +24,7 @@ export type ChatItem =
 
 /** ChatPanel 消息类型：普通文本消息 + 可扩展的特殊消息（如问答卡片）。 */
 export type ChatPanelMessage =
-  | { id: string; role: 'user' | 'assistant'; content: string }
+  | { id: string; role: 'user' | 'assistant'; content: string; thinking?: string }
   | { id: string; role: 'assistant'; kind: 'question'; content: string };
 
 export interface ChatThreadProps {
@@ -42,11 +42,13 @@ export interface ChatThreadProps {
   error?: string;
   /** 自定义底部插槽（如待沟通的 Composer 按钮），与 onSend 互斥。 */
   footer?: React.ReactNode;
+  /** 空状态下的快捷操作（如“一键生成”按钮），渲染在占位文案下方。 */
+  emptyAction?: React.ReactNode;
   className?: string;
 }
 
 export function ChatThread({
-  items, placeholder, thinkingLabel, sendLabel, inputPlaceholder, onSend, loading, error, footer, className,
+  items, placeholder, thinkingLabel, sendLabel, inputPlaceholder, onSend, loading, error, footer, emptyAction, className,
 }: ChatThreadProps): React.ReactElement {
   const [input, setInput] = useState('');
 
@@ -173,7 +175,10 @@ export function ChatThread({
       <div ref={containerRef} className="relative flex-1 min-h-0 max-h-[60vh] overflow-y-auto rounded-md border border-border bg-background p-2 text-xs scrollbar-thin">
         <NewMessagesButton count={paused ? unreadCount : 0} onResume={resume} />
         {items.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-muted-foreground">{placeholder}</div>
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
+            <span>{placeholder}</span>
+            {emptyAction}
+          </div>
         ) : (
           <>
             {hasMore && <div className="py-1 text-center text-muted-foreground/70">…</div>}
@@ -199,7 +204,7 @@ export function ChatThread({
 function ChatItemView({ item, thinkingLabel }: { item: ChatItem; thinkingLabel: string }): React.ReactElement {
   switch (item.type) {
     case 'message':
-      return <MessageBubble role={item.role} text={item.text} streaming={item.streaming} thinkingLabel={thinkingLabel} />;
+      return <MessageBubble role={item.role} text={item.text} thinking={item.thinking} streaming={item.streaming} thinkingLabel={thinkingLabel} />;
     case 'tool':
       return <ToolCard {...item} />;
     case 'error':
@@ -226,14 +231,20 @@ function CenterPill({ icon, tone, text }: { icon: React.ReactNode; tone: 'error'
   );
 }
 
-/** 消息气泡：用户/Agent/系统，ChatGPT 风格头像 + 圆角气泡。 */
-function MessageBubble({ role, text, streaming, thinkingLabel }: { role: 'user' | 'assistant' | 'system'; text: string; streaming?: boolean; thinkingLabel: string }): React.ReactElement {
+/** 消息气泡：用户/Agent/系统，ChatGPT 风格头像 + 圆角气泡。
+ * 思考细节：thinking 存在时渲染可折叠“思考过程”区块——思考阶段（streaming 且无正文）默认展开并带 spinner，
+ * 正文到达或流结束后自动折叠，用户可手动展开/收起（手动状态优先于自动状态）。 */
+function MessageBubble({ role, text, thinking, streaming, thinkingLabel }: { role: 'user' | 'assistant' | 'system'; text: string; thinking?: string; streaming?: boolean; thinkingLabel: string }): React.ReactElement {
   const t = useT();
   const time = new Date().toLocaleTimeString();
   const isUser = role === 'user';
   const Icon = isUser ? User : Bot;
   const roleLabel = t(`detail.msg.${role}`);
-  const showThinking = streaming && !text;
+  const showThinkingSpinner = streaming && !text;
+  const hasThinking = !!thinking;
+  // 自动展开：思考阶段（流式中且尚无正文）展开思考细节；正文到达/结束后折叠。手动切换优先。
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? (streaming && !text);
   return (
     <div className={`my-1.5 flex items-start gap-2 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
       <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${isUser ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
@@ -244,8 +255,27 @@ function MessageBubble({ role, text, streaming, thinkingLabel }: { role: 'user' 
           <span className="font-medium">{roleLabel}</span>
           <span className="opacity-60">{time}</span>
         </div>
+        {hasThinking && (
+          <div className="mt-1">
+            <button
+              type="button"
+              data-testid="thinking-toggle"
+              className={`flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground ${isUser ? 'text-primary-foreground/80 hover:text-primary-foreground' : ''}`}
+              onClick={() => setManual(!open)}
+              aria-expanded={open}
+            >
+              {showThinkingSpinner
+                ? <Loader2 className="h-3 w-3 animate-spin" />
+                : open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              <span>{t('chat.thinking.title')}</span>
+            </button>
+            {open && (
+              <div data-testid="thinking-body" className={`mt-1 max-h-48 overflow-auto whitespace-pre-wrap border-l-2 pl-2 text-xs leading-relaxed ${isUser ? 'border-primary-foreground/30 text-primary-foreground/80' : 'border-border text-muted-foreground'}`}>{thinking}</div>
+            )}
+          </div>
+        )}
         <div className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-relaxed">
-          {showThinking ? (
+          {showThinkingSpinner && !hasThinking ? (
             <span className="inline-flex items-center gap-1 text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" />{thinkingLabel}</span>
           ) : text}
         </div>

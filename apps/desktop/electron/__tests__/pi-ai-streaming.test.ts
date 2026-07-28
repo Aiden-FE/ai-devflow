@@ -61,16 +61,20 @@ describe('executeTextOnRoute streaming', () => {
     expect(calls).toEqual(['你好', '世界']);
   });
 
-  it('不转发 thinking_delta（思维链抑制）', async () => {
-    const calls: string[] = [];
+  it('thinking_delta 经 onThinking 单独转发，不计入 onDelta（思考与正文分离）', async () => {
+    const deltas: string[] = [];
+    const thinkings: string[] = [];
     const executor = harness([
-      JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: '内部思考' } }),
+      JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: '内部' } }),
+      JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: '思考' } }),
       JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '正文' } }),
       JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '正文' }] } }),
       JSON.stringify({ type: 'agent_end', messages: [] }),
     ]);
-    await executor('task_chat', [{ role: 'user', content: 'hi' }], (d) => calls.push(d));
-    expect(calls).toEqual(['正文']);
+    await executor('task_chat', [{ role: 'user', content: 'hi' }], (d) => deltas.push(d), undefined, undefined, undefined, undefined, undefined, (th) => thinkings.push(th));
+    // 正文增量仅含 text_delta；思考增量经 onThinking 单独投递且保持顺序。
+    expect(deltas).toEqual(['正文']);
+    expect(thinkings).toEqual(['内部', '思考']);
   });
 
   it('错误前已发的 text_delta 已投递给 onDelta（立即转发的判据）', async () => {

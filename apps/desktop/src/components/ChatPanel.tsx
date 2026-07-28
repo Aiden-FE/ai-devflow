@@ -14,6 +14,8 @@ export interface ChatPanelProps {
   error?: string;
   /** 自定义消息渲染（如问答卡片）；返回 null 则用默认气泡。 */
   renderMessage?: (msg: ChatPanelMessage, index: number) => React.ReactNode | null;
+  /** 空状态快捷操作（如“一键生成”按钮）。 */
+  emptyAction?: React.ReactNode;
 }
 
 /**
@@ -23,15 +25,16 @@ export interface ChatPanelProps {
  * 实现为 ChatThread（统一 ChatGPT 风格组件）的适配层：把 ChatPanelMessage 映射为 ChatItem，
  * 保持既有 props 契约不变，让 AiRefineRequirement / AiCreateTask 无需改动即可获得统一的聊天 UX。
  */
-export function ChatPanel({ messages, onSend, loading, placeholder, thinkingLabel, sendLabel, error, renderMessage }: ChatPanelProps): React.ReactElement {
+export function ChatPanel({ messages, onSend, loading, placeholder, thinkingLabel, sendLabel, error, renderMessage, emptyAction }: ChatPanelProps): React.ReactElement {
   const items: ChatItem[] = messages.map((m, i) => {
     if ('kind' in m && m.kind === 'question') {
       const custom = renderMessage?.(m, i);
       if (custom !== undefined && custom !== null) return { type: 'custom', id: m.id, node: custom };
     }
-    // 助手空内容（流式未产生任何 delta 或刚插入占位）显示思考占位，与旧 ChatPanel 行为一致。
-    const streaming = m.role === 'assistant' && !m.content;
-    return { type: 'message', id: m.id, role: m.role, text: m.content, streaming };
+    // 助手空内容（流式未产生任何 delta 或刚插入占位）显示思考占位；仅末条助手消息视为流式中，
+    // 避免问答卡片后的历史空消息误显 spinner。
+    const streaming = m.role === 'assistant' && !m.content && i === messages.length - 1;
+    return { type: 'message', id: m.id, role: m.role, text: m.content, thinking: 'thinking' in m ? m.thinking : undefined, streaming };
   });
   return (
     <ChatThread
@@ -43,6 +46,7 @@ export function ChatPanel({ messages, onSend, loading, placeholder, thinkingLabe
       onSend={onSend}
       loading={loading}
       error={error}
+      emptyAction={emptyAction}
     />
   );
 }

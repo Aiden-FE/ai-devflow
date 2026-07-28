@@ -127,4 +127,46 @@ describe('ChatThread (统一聊天组件)', () => {
     expect(html).toContain('msg-9');
     expect(html).not.toContain('…');
   });
+
+  it('思考细节：流式思考阶段默认展开思考内容（带 spinner），正文到达后自动折叠', () => {
+    // 思考阶段：streaming 且无正文 -> 思考内容可见。
+    const thinkingHtml = renderToStaticMarkup(
+      withLocale(
+        <ChatThread
+          items={[{ type: 'message', id: 'a1', role: 'assistant', text: '', thinking: '正在分析代码结构', streaming: true }]}
+          placeholder="p"
+          thinkingLabel="思考中"
+        />,
+      ),
+    );
+    expect(thinkingHtml).toContain('思考过程');
+    expect(thinkingHtml).toContain('data-testid="thinking-body"');
+    expect(thinkingHtml).toContain('正在分析代码结构');
+    expect(thinkingHtml).toContain('animate-spin');
+
+    // 思考结束（正文到达、streaming=false）-> 思考内容自动折叠，正文可见。
+    const doneHtml = renderToStaticMarkup(
+      withLocale(
+        <ChatThread
+          items={[{ type: 'message', id: 'a1', role: 'assistant', text: '最终答复', thinking: '思考细节', streaming: false }]}
+          placeholder="p"
+          thinkingLabel="思考中"
+        />,
+      ),
+    );
+    expect(doneHtml).toContain('最终答复');
+    expect(doneHtml).toContain('data-testid="thinking-toggle"');
+    expect(doneHtml).not.toContain('data-testid="thinking-body"');
+    expect(doneHtml).not.toContain('思考细节');
+  });
+
+  it('空状态渲染 emptyAction 快捷操作', () => {
+    const html = renderToStaticMarkup(
+      withLocale(
+        <ChatThread items={[]} placeholder="p" thinkingLabel="t" emptyAction={<button data-testid="quick">一键生成</button>} />,
+      ),
+    );
+    expect(html).toContain('data-testid="quick"');
+    expect(html).toContain('一键生成');
+  });
 });
