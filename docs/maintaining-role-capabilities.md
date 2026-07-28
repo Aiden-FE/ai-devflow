@@ -53,3 +53,19 @@
 ## 安全
 
 扩展是 Pi 子进程内执行的 TypeScript 文件（隔离 env）。新增自定义扩展须保持同等级安全姿态：不外泄凭证、尊重 worktree 写入边界（`execution-policy`）、不绕过 `ai_devflow_interaction`/`ai_devflow_report_result` 协议。
+
+## 知识专家（project_lead）
+
+`project_lead` 是知识治理专家，注册于 `EXPERT_PROFILES`（资产目录 `packages/agents/assets/profiles/project_lead/`），默认 thinking `high`，工具 `read/grep/find/ls/write/edit`，排除 `bash`。
+
+- 技能：`knowledge-governance`（仅 project_lead）、`knowledge-retrieve`（product/ux/dev_lead/dev/test/project_lead 共享）。
+- 写入边界：`execution-policy` 读取 `AI_DEVFLOW_EXPERT`，对 `project_lead` 强制只允许 `docs/knowledge/**` 与 `docs/iterations/**`；宿主 Git diff 白名单是最终权威。
+- 运行时校验：`BundledPiLocator`（`requireProfiles`）要求 `profiles/project_lead` 目录与四角色目录齐全。
+- `inspect:roles` 现同时打印 `ROLE_PROFILES` 与 `EXPERT_PROFILES`（六执行专家）。
+
+### 新增/修改知识技能
+
+1. 在 `packages/agents/assets/profiles/shared/skills/<name>/SKILL.md` 创建技能。
+2. 在 `BUILTIN_SKILLS` 注册（`source: 'shared'`）。
+3. 在需要的 `EXPERT_PROFILES[<expert>].skills` 引用并 `version += 1`。
+4. `pnpm --filter @ai-devflow/agents test && pnpm test:scripts && pnpm --filter @ai-devflow/desktop stage:pi` 验证（staged runtime 需含新技能）。

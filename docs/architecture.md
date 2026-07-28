@@ -379,3 +379,35 @@ pnpm test:real:pi
 - 旧 `credentials.ai_provider` 自动迁移为新的有序 provider list 第一项。
 - 用户此前配置的“全局/项目 Agent 能力”不再生效；应用内置四角色 profile 接管所有 AI 运行行为。
 - 用户只需在设置页重新确认或补充一个 API Key 即可继续使用。
+
+## 渐进式知识库（Progressive Knowledge Base）
+
+### 包边界与依赖方向
+
+- `@ai-devflow/knowledge`：Markdown/YAML 解析、目录骨架、结构巡检、L1-L4 检索规划与 CHANGELOG 校验。依赖 `@ai-devflow/core` 与 `yaml`；不依赖 Electron 或 SQLite，不存正文。
+- `@ai-devflow/scheduler`：`KnowledgeCoordinator` 编排项目级初始化/巡检/修复/沉淀/归档，持有 worktree、迭代串行锁（`KeyedLock`）与 Agent 调用。依赖 `@ai-devflow/knowledge`。
+- `@ai-devflow/persistence`：schema v12 四张知识元数据表（`knowledge_runs/findings/retrievals/depositions`），仅存 ID/路径/计数器/问题/证据引用，不存 Markdown 正文或 prompt。
+- `apps/desktop`：通过类型化 IPC 暴露 `knowledge` 命名空间与知识页面。
+
+### 事实源与协议
+
+- `docs/knowledge/` 是长期知识正文唯一事实源，含六类索引（context/adr/feature/runbook/product/ux）；`docs/iterations/<version>/` 是迭代文档根。
+- `project_lead` 是知识治理专家，可独立配置模型（`AgentModelOverride`），只能写入 `docs/knowledge/**` 与 `docs/iterations/**`；Git 与状态转换由宿主执行。
+- 检索 manifest 由宿主统一生成并注入 Agent 初始消息（`HOST KNOWLEDGE MANIFEST`，仅 ID/路径/原因/预算），按 L1-L4 渐进披露。
+
+### 状态门禁
+
+- `testing -> in_review` 要求 `reviewPassed` 与 `knowledgeGatePassed` 同时为 true。
+- `valuable` 评估触发条件式强门禁：`finalizeTaskKnowledge` 在迭代锁内运行 `project_lead` 沉淀、校验路径白名单与分支合并成功后才放行；`none` 需非空理由与证据。
+- 合并失败保持 `testing`，任务分支/worktree 保留以供重试。
+
+### 迭代归档
+
+- `iterations:archive` 委托 `KnowledgeCoordinator.archiveIteration`：CHANGELOG 聚合校验 -> sprint 分支合并 -> 仅在全部成功后归档数据库行。任一步失败保持迭代 `active`。
+
+### 维护命令
+
+- `pnpm inspect:roles`：打印四角色与六执行专家的 tools/skills/extensions。
+- `pnpm --filter @ai-devflow/knowledge test` / `pnpm --filter @ai-devflow/scheduler test`：聚焦包测试。
+- `pnpm verify`：全工作区 typecheck/lint/test。
+- `pnpm test:real:pi`：真实 Pi fixture 验证（含知识 workflow 端到端）。

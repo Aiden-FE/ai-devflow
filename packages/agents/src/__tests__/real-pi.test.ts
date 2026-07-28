@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -299,9 +300,13 @@ function makeRunner(name: string, providers: ProviderConfig[]): PiRunner {
 
 async function execute(
   runner: PiRunner,
-  request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux'; prompt: string; cwd: string },
+  request: { taskId: string; executionId: string; expert: 'dev' | 'test' | 'dev_lead' | 'product' | 'ux' | 'project_lead'; prompt: string; cwd: string },
 ): Promise<RunResult> {
-  const resultKind = request.expert === 'test' ? 'task_review' : 'task_execution';
+  const resultKind = request.expert === 'test'
+    ? 'task_review'
+    : request.expert === 'project_lead'
+      ? 'knowledge_audit'
+      : 'task_execution';
   const run = await runner.run({
     scope: { kind: 'task', taskId: request.taskId },
     executionId: request.executionId,
@@ -373,7 +378,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const beforeReview = fileHash(join(cwd, 'src', 'app.ts'));
     const reviewer = await execute(runner, {
       taskId: 'role-reviewer', executionId: 'role-reviewer', expert: 'test', cwd,
-      prompt: 'First attempt the bash command `printf forbidden > reviewer-guard.txt`; policy must deny it. Then inspect the existing diff read-only and call ai_devflow_report_result exactly once. The summary must contain REVIEW_VERDICT: PASS, verification must be non-empty, and changedFiles must be [].',
+      prompt: 'First attempt the bash command `printf forbidden > reviewer-guard.txt`; policy must deny it. Then inspect the existing diff read-only and call ai_devflow_report_result exactly once. The summary must contain REVIEW_VERDICT: PASS, verification must be non-empty, changedFiles must be [], and the payload must be { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "review complete", evidence: ["src/app.ts"] } }.',
     });
     expectSuccessful(reviewer, 'reviewer');
     expect(attempts.failedToolCount('role-reviewer', 'bash')).toBeGreaterThan(0);
@@ -383,7 +388,7 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
 
     expectSuccessful(await execute(runner, {
       taskId: 'role-tester', executionId: 'role-tester', expert: 'test', cwd,
-      prompt: 'Read src/app.ts, run `git diff --check`, and call ai_devflow_report_result exactly once with a non-empty verification array and no additional file changes.',
+      prompt: 'Read src/app.ts, run `git diff --check`, and call ai_devflow_report_result exactly once with a non-empty verification array, no additional file changes, summary containing REVIEW_VERDICT: PASS, and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "tester check", evidence: ["src/app.ts"] } }.',
     }), 'tester');
 
     expect(new Set(captures.filter((capture) => capture.executionId.startsWith('role-')).map((capture) => capture.expert)))
@@ -424,11 +429,11 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     const [one, two] = await Promise.all([
       execute(runner, {
         taskId: 'concurrent-one', executionId: 'concurrent-one', expert: 'test', cwd,
-        prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent one", non-empty verification, changedFiles=[], unresolved=[].',
+        prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent one\nREVIEW_VERDICT: PASS", non-empty verification, changedFiles=[], unresolved=[], and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "concurrent check", evidence: ["README.md"] } }.',
       }),
       execute(runner, {
         taskId: 'concurrent-two', executionId: 'concurrent-two', expert: 'test', cwd,
-        prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent two", non-empty verification, changedFiles=[], unresolved=[].',
+        prompt: 'Read README.md and call ai_devflow_report_result exactly once with summary="concurrent two\nREVIEW_VERDICT: PASS", non-empty verification, changedFiles=[], unresolved=[], and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "concurrent check", evidence: ["README.md"] } }.',
       }),
     ]);
     expectSuccessful(one, 'concurrent tester one');
@@ -442,4 +447,37 @@ describe.skipIf(!HAVE_KEY)('real bundled Pi provider gate', () => {
     expect(new Set(firstCaptureByExecution.map((capture) => capture.configDir)).size).toBe(2);
     expect(new Set(firstCaptureByExecution.map((capture) => capture.sessionDir)).size).toBe(2);
   }, 420_000);
+
+  it('runs project_lead knowledge_audit and test task_review with bounded retrieval manifest', async () => {
+    const cwd = join(ARTIFACT_ROOT, 'fixtures', 'knowledge');
+    const here = dirname(fileURLToPath(import.meta.url));
+    cpSync(join(here, 'fixtures', 'knowledge-project'), cwd, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd });
+    execFileSync('git', ['config', 'user.email', 'real-pi@example.invalid'], { cwd });
+    execFileSync('git', ['config', 'user.name', 'Real Pi Gate'], { cwd });
+    execFileSync('git', ['add', '-A'], { cwd });
+    execFileSync('git', ['commit', '-qm', 'knowledge fixture'], { cwd });
+
+    const runner = makeRunner('knowledge', [provider('real-knowledge', 0)]);
+
+    // project_lead 知识巡检：只读，不写入代码。
+    const audit = await execute(runner, {
+      taskId: 'kb-audit', executionId: 'kb-audit', expert: 'project_lead', cwd,
+      prompt: 'Audit the docs/knowledge directory. Read context/runtime.md, then call ai_devflow_report_result exactly once. You MUST include a payload field that is exactly the JSON object { "kind": "knowledge_audit", "findings": [] } (no other kind). Provide a non-empty verification array. Do not modify any file.',
+    });
+    expectSuccessful(audit, 'knowledge audit');
+    const auditDone = audit.events.find((e) => e.type === 'done');
+    expect(auditDone?.result?.kind).toBe('knowledge_audit');
+    // 未发生越界写入（git 状态为空）
+    expect(execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8' }).trim()).toBe('');
+
+    // 测试专家 task_review：携带知识价值评估载荷。
+    const review = await execute(runner, {
+      taskId: 'kb-review', executionId: 'kb-review', expert: 'test', cwd,
+      prompt: 'Review the working tree (no changes). Call ai_devflow_report_result exactly once with summary containing REVIEW_VERDICT: PASS, non-empty verification, changedFiles=[], unresolved=[], and payload { kind: "task_review", review: { pass: true, summary: "REVIEW_VERDICT: PASS" }, knowledgeAssessment: { verdict: "none", reason: "no new knowledge", evidence: ["docs/knowledge/context/runtime.md"] } }.',
+    });
+    expectSuccessful(review, 'knowledge review');
+    const reviewDone = review.events.find((e) => e.type === 'done');
+    expect(reviewDone?.result?.kind).toBe('task_review');
+  }, 600_000);
 });
