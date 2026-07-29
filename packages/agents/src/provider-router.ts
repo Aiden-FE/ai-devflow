@@ -106,6 +106,27 @@ function providerNameFor(provider: ProviderConfig): string {
   return provider.kind;
 }
 
+function overrideRouteId(providerId: string, expert: AgentKey, model: string): string {
+  const digest = createHash('sha256').update(model).digest('hex').slice(0, 12);
+  return `${providerId}:${expert}:override:${digest}`;
+}
+
+interface RouteCandidate {
+  route: ProviderRoute;
+  cooling: boolean;
+  cooldownUntil?: number;
+  probeEligible: boolean;
+}
+
+function availableRoutes(candidates: RouteCandidate[]): ProviderRoute[] {
+  const active = candidates.filter((candidate) => !candidate.cooling).map((candidate) => candidate.route);
+  if (active.length > 0) return active;
+  const probes = candidates
+    .filter((candidate) => candidate.probeEligible)
+    .sort((a, b) => (a.cooldownUntil ?? 0) - (b.cooldownUntil ?? 0));
+  return probes.length > 0 ? [probes[0]!.route] : [];
+}
+
 const MAX_ATTEMPTS = 8;
 const MINUTE = 60_000;
 const PROVIDER_AUTH_ROUTE_ID = 'provider:authentication';
@@ -162,32 +183,35 @@ export class ProviderRouter {
 
   /** 生成某 workload 的候选路线。覆盖存在且可用时仅返回该 provider+model；不可用回退默认有序路由。 */
   routesFor(expert: AgentKey, now = this.deps.now()): ProviderRoute[] {
+    const defaultCandidates = this.collectCandidates(
+      this.deps.listProviders().filter((p) => p.enabled).sort((a, b) => a.priority - b.priority),
+      expert,
+      now,
+      undefined,
+    );
+    const defaultRoutes = availableRoutes(defaultCandidates);
     const override = this.deps.agentOverrideFor?.(expert);
     if (override) {
+      const matchingDefault = defaultCandidates.find((candidate) => (
+        candidate.route.providerId === override.providerId && candidate.route.model === override.model
+      ));
+      if (matchingDefault) {
+        const preferred = defaultRoutes.find((route) => route.routeId === matchingDefault.route.routeId);
+        return preferred
+          ? [preferred, ...defaultRoutes.filter((route) => route.routeId !== preferred.routeId)]
+          : defaultRoutes;
+      }
       const overrideCandidates = this.collectCandidates(
         this.deps.listProviders().filter((p) => p.enabled && p.id === override.providerId),
         expert,
         now,
         override,
       );
-      const overrideActive = overrideCandidates.filter((c) => !c.cooling).map((c) => c.route);
-      if (overrideActive.length > 0) return overrideActive;
+      const overrideRoutes = availableRoutes(overrideCandidates);
+      if (overrideRoutes.length > 0) return [overrideRoutes[0]!, ...defaultRoutes];
       // 覆盖 provider 不可用（禁用/无凭证/冷却中无 half-open）-> 回退默认路由。
     }
-    const candidates = this.collectCandidates(
-      this.deps.listProviders().filter((p) => p.enabled).sort((a, b) => a.priority - b.priority),
-      expert,
-      now,
-      undefined,
-    );
-    const active = candidates.filter((c) => !c.cooling).map((c) => c.route);
-    if (active.length > 0) return active;
-    // 全部冷却：仅选最早到期的一条 half-open 探测（无到期者如 auth 不可探测）。
-    const probes = candidates
-      .filter((c) => c.probeEligible)
-      .sort((a, b) => (a.cooldownUntil ?? 0) - (b.cooldownUntil ?? 0));
-    if (probes.length > 0) return [probes[0]!.route];
-    return [];
+    return defaultRoutes;
   }
 
   /** 收集候选：遍历 providers，按 override/seam/默认解析模型与 thinking，叠加健康/冷却状态。 */
@@ -196,14 +220,8 @@ export class ProviderRouter {
     expert: AgentKey,
     now: number,
     override: { providerId: string; model: string } | undefined,
-  ): { route: ProviderRoute; cooling: boolean; cooldownUntil?: number; probeEligible: boolean }[] {
-    interface Candidate {
-      route: ProviderRoute;
-      cooling: boolean;
-      cooldownUntil?: number;
-      probeEligible: boolean;
-    }
-    const candidates: Candidate[] = [];
+  ): RouteCandidate[] {
+    const candidates: RouteCandidate[] = [];
     for (const provider of providers) {
       const authHealth = this.deps.health.get(provider.id, PROVIDER_AUTH_ROUTE_ID);
       if (authHealth?.state === 'open' || authHealth?.state === 'half_open') continue;
@@ -224,7 +242,9 @@ export class ProviderRouter {
       }
       if (model === undefined) continue;
       const providerName = providerNameFor(provider);
-      const routeId = `${provider.id}:${expert}`;
+      const routeId = override
+        ? overrideRouteId(provider.id, expert, model)
+        : `${provider.id}:${expert}`;
       const h = this.deps.health.get(provider.id, routeId);
       const isOpen = h?.state === 'open';
       const isHalfOpen = h?.state === 'half_open';
@@ -272,10 +292,13 @@ export class ProviderRouter {
     const retriedSame = new Set<string>();
     const authenticationFailures = new Set<string>();
     for (const route of routes) {
-      if (authenticationFailures.has(route.providerId) || !this.claimRoute(route)) continue;
+      if (authenticationFailures.has(route.providerId)) continue;
+      const claim = this.claimRoute(route);
+      if (!claim) continue;
       // eslint-disable-next-line no-constant-condition
       while (true) {
         if (calls >= MAX_ATTEMPTS) {
+          this.releaseRouteClaim(route, claim);
           throw new ProviderExecutionError('所有已配置 AI 服务暂时不可用，请稍后重试', 'transient_provider', 0, undefined, lastDetail);
         }
         calls += 1;
@@ -295,9 +318,11 @@ export class ProviderRouter {
           const kind = err instanceof ProviderExecutionError ? err.kind : classifyProviderFailure(err);
           const retryAfterMs = err instanceof ProviderExecutionError ? err.retryAfterMs : undefined;
           if (kind === 'task_result' || kind === 'interaction') {
+            this.releaseRouteClaim(route, claim);
             throw err;
           }
           if (kind === 'authentication') {
+            this.releaseRouteClaim(route, claim);
             authenticationFailures.add(route.providerId);
             this.recordAuthenticationFailure(route.providerId);
             break;
@@ -316,16 +341,23 @@ export class ProviderRouter {
   }
 
   /** Synchronously claim an open route so concurrent executions cannot duplicate its half-open probe. */
-  private claimRoute(route: ProviderRoute): boolean {
+  private claimRoute(route: ProviderRoute): { previous?: ProviderHealth } | undefined {
     const existing = this.deps.health.get(route.providerId, route.routeId);
-    if (!existing || existing.state === 'closed') return true;
-    if (existing.state === 'half_open') return false;
+    if (!existing || existing.state === 'closed') return {};
+    if (existing.state === 'half_open') return undefined;
     this.deps.health.upsert({
       ...existing,
       state: 'half_open',
       updatedAt: this.deps.now(),
     });
-    return true;
+    return { previous: existing };
+  }
+
+  /** Restore only a half-open claim created by this execution; normal closed routes have no claim to release. */
+  private releaseRouteClaim(route: ProviderRoute, claim: { previous?: ProviderHealth }): void {
+    if (!claim.previous) return;
+    const current = this.deps.health.get(route.providerId, route.routeId);
+    if (current?.state === 'half_open') this.deps.health.upsert(claim.previous);
   }
 
   private recordSuccess(route: ProviderRoute): void {

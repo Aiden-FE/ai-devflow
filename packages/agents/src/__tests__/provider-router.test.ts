@@ -254,6 +254,22 @@ describe('ProviderRouter', () => {
     expect(firstVisited).toEqual(['p1:dev']);
   });
 
+  it.each(['interaction', 'task_result'] as const)('releases a half-open probe after a %s error', async (kind) => {
+    const harness = makeRouterHarness(['p1']);
+    const priorHealth: ProviderHealth = {
+      providerId: 'p1', routeId: 'p1:dev', state: 'open',
+      consecutiveFailures: 2, cooldownUntil: 900, lastFailureKind: 'transient_provider', updatedAt: 0,
+    };
+    harness.health.upsert(priorHealth);
+
+    await expect(harness.router.execute('dev', async () => {
+      throw new ProviderExecutionError('execution stopped', kind);
+    })).rejects.toThrow(/stopped/);
+
+    expect(harness.health.get('p1', 'p1:dev')).toEqual(priorHealth);
+    await expect(harness.router.execute('dev', async () => 'available')).resolves.toBe('available');
+  });
+
   it('half-open probes only the earliest-expiring route when all are cooling down', async () => {
     const harness = makeRouterHarness(['p1', 'p2']);
     // now() === 1000; both routes cooling, p2 expires earlier.
@@ -308,10 +324,9 @@ describe('ProviderRouter agent override', () => {
   const p1: ProviderConfig = { id: 'p1', kind: 'openai', displayName: 'P1', enabled: true, priority: 0, authType: 'api_key', credentialRef: 'provider:p1', defaultModel: 'gpt-4o', revision: 1 };
   const p2: ProviderConfig = { id: 'p2', kind: 'anthropic', displayName: 'P2', enabled: true, priority: 1, authType: 'api_key', credentialRef: 'provider:p2', defaultModel: 'claude-3-5-sonnet', revision: 1 };
 
-  it('覆盖存在时仅返回该 provider 并强制 model', () => {
+  it('覆盖存在时优先返回该 provider 并强制 model', () => {
     const { router } = overrideHarness([p1, p2], { agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }) });
     const routes = router.routesFor('product');
-    expect(routes).toHaveLength(1);
     expect(routes[0]!.providerId).toBe('p2');
     expect(routes[0]!.model).toBe('claude-opus');
   });
@@ -334,5 +349,84 @@ describe('ProviderRouter agent override', () => {
     const { router } = overrideHarness([p1, p2], {});
     const routes = router.routesFor('dev');
     expect(routes.map((r) => r.providerId)).toEqual(['p1', 'p2']);
+  });
+
+  it('专用路线优先且保留去重后的默认路线，并隔离健康标识', () => {
+    const { router } = overrideHarness([p1, p2], {
+      agentOverrideFor: () => ({ providerId: 'p1', model: 'gpt-special' }),
+    });
+
+    const routes = router.routesFor('project_lead');
+    expect(routes.map((route) => [route.providerId, route.model])).toEqual([
+      ['p1', 'gpt-special'],
+      ['p1', 'gpt-4o'],
+      ['p2', 'claude-3-5-sonnet'],
+    ]);
+    expect(routes[0]!.routeId).not.toBe(routes[1]!.routeId);
+  });
+
+  it('专用模型与默认模型相同时仅执行一次', () => {
+    const { router } = overrideHarness([p1, p2], {
+      agentOverrideFor: () => ({ providerId: 'p1', model: 'gpt-4o' }),
+    });
+
+    expect(router.routesFor('project_lead').filter((route) => (
+      route.providerId === 'p1' && route.model === 'gpt-4o'
+    ))).toHaveLength(1);
+  });
+
+  it('专用模型运行失败后回退同供应商默认模型，且默认成功不清除专用模型熔断', async () => {
+    const { router } = overrideHarness([p1, p2], {
+      agentOverrideFor: () => ({ providerId: 'p1', model: 'gpt-special' }),
+    });
+    const visited: Array<[string, string]> = [];
+
+    const result = await router.execute('project_lead', async (route) => {
+      visited.push([route.providerId, route.model]);
+      if (route.model === 'gpt-special') {
+        throw new ProviderExecutionError('missing pinned model', 'model_unavailable', 404);
+      }
+      return 'ok';
+    });
+
+    expect(result).toBe('ok');
+    expect(visited).toEqual([
+      ['p1', 'gpt-special'],
+      ['p1', 'gpt-4o'],
+    ]);
+    expect(router.routesFor('project_lead').map((route) => route.model)).not.toContain('gpt-special');
+  });
+
+  it('专用路线鉴权失败后跳过同供应商默认模型', async () => {
+    const { router } = overrideHarness([p1, p2], {
+      agentOverrideFor: () => ({ providerId: 'p1', model: 'gpt-special' }),
+    });
+    const visited: string[] = [];
+
+    const result = await router.execute('project_lead', async (route) => {
+      visited.push(route.providerId);
+      if (route.providerId === 'p1') {
+        throw new ProviderExecutionError('unauthorized', 'authentication', 401);
+      }
+      return 'ok';
+    });
+
+    expect(result).toBe('ok');
+    expect(visited).toEqual(['p1', 'p2']);
+  });
+
+  it('onlyProviderId 可测试未被 chat 专用配置选中的供应商且不跨供应商', async () => {
+    const { router } = overrideHarness([p1, p2], {
+      agentOverrideFor: () => ({ providerId: 'p2', model: 'claude-opus' }),
+    });
+    const visited: string[] = [];
+
+    const result = await router.execute('chat', async (route) => {
+      visited.push(route.providerId);
+      return 'ok';
+    }, { onlyProviderId: 'p1' });
+
+    expect(result).toBe('ok');
+    expect(visited).toEqual(['p1']);
   });
 });
