@@ -41,6 +41,7 @@ import {
   createKnowledgeDepositionsRepo,
   type KnowledgeDepositionsRepo,
 } from './knowledge-depositions.js';
+import { createProviderUsageRepo, type ProviderUsageRepo } from './provider-usage.js';
 
 // ---------- 行映射辅助 ----------
 
@@ -258,6 +259,7 @@ export interface Repositories {
   knowledgeFindings: KnowledgeFindingsRepo;
   knowledgeRetrievals: KnowledgeRetrievalsRepo;
   knowledgeDepositions: KnowledgeDepositionsRepo;
+  providerUsage: ProviderUsageRepo;
 }
 
 export function createRepositories(db: DatabaseSync): Repositories {
@@ -284,6 +286,7 @@ export function createRepositories(db: DatabaseSync): Repositories {
     knowledgeFindings: createKnowledgeFindingsRepo(db),
     knowledgeRetrievals: createKnowledgeRetrievalsRepo(db),
     knowledgeDepositions: createKnowledgeDepositionsRepo(db),
+    providerUsage: createProviderUsageRepo(db),
   };
 }
 
@@ -752,8 +755,34 @@ function credentialsRepo(db: DatabaseSync): CredentialsRepo {
 
 export interface TaskMessagesRepo {
   insert(m: TaskMessage): void;
+  updateText(id: string, text: string): void;
   listByTask(taskId: string, limit?: number): TaskMessage[];
 }
+
+export function coalesceLegacyTaskMessages(messages: TaskMessage[]): TaskMessage[] {
+  const result: TaskMessage[] = [];
+  for (const message of messages) {
+    const current = { ...message };
+    const previous = result[result.length - 1];
+    if (
+      previous &&
+      previous.executionId === current.executionId &&
+      previous.role === 'assistant' &&
+      current.role === 'assistant' &&
+      previous.kind === 'text' &&
+      current.kind === 'text'
+    ) {
+      result[result.length - 1] = {
+        ...previous,
+        text: `${previous.text ?? ''}${current.text ?? ''}`,
+      };
+    } else {
+      result.push(current);
+    }
+  }
+  return result;
+}
+
 function taskMessagesRepo(db: DatabaseSync): TaskMessagesRepo {
   return {
     insert(m) {
@@ -766,11 +795,19 @@ function taskMessagesRepo(db: DatabaseSync): TaskMessagesRepo {
         m.isError ? 1 : 0, m.t,
       );
     },
+    updateText(id, text) {
+      const result = db.prepare('UPDATE task_messages SET text=? WHERE id=?').run(text, id);
+      if (result.changes !== 1) throw new Error(`任务消息不存在：${id}`);
+    },
     listByTask(taskId, limit = 2000) {
       // 时间正序，截断最近 N 条（与 logs 一致策略：DESC 取最近 N 再反转为正序）。
-      return (db
-        .prepare('SELECT * FROM (SELECT * FROM task_messages WHERE task_id=? ORDER BY t DESC LIMIT ?) ORDER BY t ASC')
-        .all(taskId, limit) as Record<string, unknown>[]).map(mapTaskMessage);
+      const rows = db
+        .prepare(`SELECT * FROM (
+          SELECT rowid AS _rowid, * FROM task_messages
+          WHERE task_id=? ORDER BY t DESC, rowid DESC LIMIT ?
+        ) ORDER BY t ASC, _rowid ASC`)
+        .all(taskId, limit) as Record<string, unknown>[];
+      return coalesceLegacyTaskMessages(rows.map(mapTaskMessage));
     },
   };
 }

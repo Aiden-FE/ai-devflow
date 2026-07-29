@@ -17,6 +17,8 @@ import {
 import { Pencil, Pause, Play, ChevronDown, ChevronRight, CheckCircle2, ShieldQuestion, MessageCircleQuestion, AlertTriangle, Send, XCircle } from 'lucide-react';
 import type { Task, LogEntry, ExecutionRecord, PendingQuestion, Requirement, TaskTypeLabel, TaskMessage, PendingInteraction } from '@ai-devflow/core';
 import { Checkbox } from '../components/ui/checkbox.js';
+import { upsertTaskMessage } from '../task-messages.js';
+import { RejectTaskDialog } from '../components/RejectTaskDialog.js';
 
 export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => void }): React.ReactElement {
   const t = useT();
@@ -64,7 +66,7 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
     if (ev.kind === 'log') {
       setLogs((prev) => [...prev, ev.data as LogEntry]);
     } else if (ev.kind === 'task-message') {
-      setMessages((prev) => [...prev, ev.data as TaskMessage]);
+      setMessages((prev) => upsertTaskMessage(prev, ev.data as TaskMessage));
     } else if (ev.kind === 'task-interaction') {
       const ni = ev.data as PendingInteraction;
       setInteractions((prev) => [...prev.filter((x) => x.id !== ni.id), ni]);
@@ -250,13 +252,14 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
 
       {/* 验收不通过退回：原因必填，目标状态可选待开发/开发中（默认开发中） */}
       {rejectOpen && (
-        <RejectDialog
+        <RejectTaskDialog
           onClose={() => setRejectOpen(false)}
           onSubmit={(reason, target) => act(async () => {
             await api.tasks.reject({ taskId: task.id, reason, target });
             setRejectOpen(false);
           })}
           busy={busy}
+          error={error}
         />
       )}
     </div>
@@ -332,44 +335,6 @@ function Composer({ interaction, legacyPending, busy, onResolve, onResume }: {
         <Button size="sm" disabled={busy || !text.trim()} onClick={send}><Send className="h-3.5 w-3.5" /> {t('detail.composer.send')}</Button>
       </div>
     </div>
-  );
-}
-
-/** 验收不通过退回弹窗：原因必填；目标状态可选待开发/开发中（默认开发中）。 */
-function RejectDialog({ onClose, onSubmit, busy }: { onClose: () => void; onSubmit: (reason: string, target: 'ready' | 'in_progress') => void; busy: boolean }): React.ReactElement {
-  const t = useT();
-  const [reason, setReason] = useState('');
-  const [target, setTarget] = useState<'ready' | 'in_progress'>('in_progress');
-  const [touched, setTouched] = useState(false);
-  const reasonOk = reason.trim().length > 0;
-  return (
-    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle>{t('detail.reject.title')}</DialogTitle></DialogHeader>
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <Label>{t('detail.reject.reason')}</Label>
-            <Textarea value={reason} onChange={(e) => { setReason(e.target.value); setTouched(true); }} rows={4} placeholder={t('detail.reject.reason.placeholder')} autoFocus />
-            {touched && !reasonOk && <span className="text-xs text-destructive">{t('detail.reject.reasonRequired')}</span>}
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label>{t('detail.reject.target')}</Label>
-            <Select value={target} onValueChange={(v) => setTarget(v as 'ready' | 'in_progress')}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="in_progress">{t('detail.reject.target.in_progress')}</SelectItem>
-                <SelectItem value="ready">{t('detail.reject.target.ready')}</SelectItem>
-              </SelectContent>
-            </Select>
-            <span className="text-[11px] text-muted-foreground">{target === 'in_progress' ? t('detail.reject.target.in_progress.hint') : t('detail.reject.target.ready.hint')}</span>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
-          <Button variant="destructive" disabled={busy || !reasonOk} onClick={() => onSubmit(reason.trim(), target)}>{t('detail.reject.submit')}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

@@ -3,13 +3,14 @@ import { api } from './lib.js';
 import { ProjectsPage } from './pages/Projects.js';
 import { WorkspacePage } from './pages/Workspace.js';
 import { SettingsPage } from './pages/Settings.js';
+import { UsageStatsPage } from './pages/UsageStats.js';
 import { useT } from './i18n/index.js';
-import { FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot, Library } from 'lucide-react';
+import { BarChart3, FolderKanban, LayoutDashboard, Settings as SettingsIcon, CircleDot, Library } from 'lucide-react';
 import { BrandMark } from './components/brand-mark.js';
 import type { Project, TaskStatus } from '@ai-devflow/core';
 import { KnowledgePage } from './pages/Knowledge.js';
 
-type Route = 'projects' | 'workspace' | 'knowledge' | 'settings';
+type Route = 'projects' | 'workspace' | 'knowledge' | 'usage' | 'settings';
 
 export function App(): React.ReactElement {
   const t = useT();
@@ -86,6 +87,7 @@ export function App(): React.ReactElement {
           <Library className="h-4 w-4" />
           {t('nav.knowledge')}
         </button>
+        {navItem('usage', <BarChart3 className="h-4 w-4" />, t('nav.usage'))}
         {navItem('settings', <SettingsIcon className="h-4 w-4" />, t('nav.settings'))}
 
         <div className="flex-1" />
@@ -111,6 +113,7 @@ export function App(): React.ReactElement {
           />
         )}
         {route === 'knowledge' && project && <KnowledgePage project={project} />}
+        {route === 'usage' && <UsageStatsPage />}
         {route === 'settings' && <SettingsPage />}
       </main>
     </div>

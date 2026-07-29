@@ -170,7 +170,7 @@ describe('PiAiService', () => {
       return 'pong';
     });
     await expect(service.testConnection('selected-provider')).resolves.toMatchObject({ ok: true });
-    expect(options).toEqual([{ onlyProviderId: 'selected-provider' }]);
+    expect(options).toEqual([{ onlyProviderId: 'selected-provider', source: 'connection_test' }]);
   });
 });
 

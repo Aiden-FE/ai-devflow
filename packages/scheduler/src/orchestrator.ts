@@ -132,6 +132,7 @@ export class Orchestrator extends EventEmitter {
   private retryPolicy: RetryPolicy;
   private autoRetry: boolean;
   private hasProvider: () => boolean;
+  private activeTextMessages = new Map<string, TaskMessage>();
 
   constructor(
     private repos: Repositories,
@@ -644,38 +645,42 @@ export class Orchestrator extends EventEmitter {
     let failureKind: import('@ai-devflow/core').FailureKind | undefined;
     let result: import('@ai-devflow/core').KnowledgeAgentPayload | undefined;
     let knowledgeReads: import('@ai-devflow/core').KnowledgeReadEvidence[] | undefined;
-    for await (const ev of run.events) {
-      if (entry.stopReason) {
-        await run.cancel();
-        break;
+    try {
+      for await (const ev of run.events) {
+        if (entry.stopReason) {
+          await run.cancel();
+          break;
+        }
+        await this.handleEvent(task, execution, ev, entry);
+        if (ev.type === 'done') {
+          done = true;
+          output += `\n${ev.summary}`;
+          result = ev.result;
+          knowledgeReads = ev.knowledgeReads;
+        } else if (ev.type === 'log') {
+          output += `\n${ev.text}`;
+        } else if (ev.type === 'error') {
+          error = ev.message;
+          failureKind = ev.failureKind;
+        } else if (ev.type === 'ask_user' || ev.type === 'approval_request') {
+          interacted = true;
+          this.recordCheckpoint(task, stage, stageIndex, ev);
+          const pauseReason = ev.type === 'ask_user' ? '等待用户回答' : '等待工具授权';
+          this.markExecution(
+            execution,
+            'paused',
+            stage.id === REVIEW_STAGE_ID ? `审查已停止（${pauseReason}）` : pauseReason,
+          );
+          const pausedFrom = task.status;
+          this.transition(task, 'awaiting_input');
+          task.pausedFrom = pausedFrom;
+          this.repos.tasks.update(task);
+          await run.cancel();
+          break;
+        }
       }
-      await this.handleEvent(task, execution, ev, entry);
-      if (ev.type === 'done') {
-        done = true;
-        output += `\n${ev.summary}`;
-        result = ev.result;
-        knowledgeReads = ev.knowledgeReads;
-      } else if (ev.type === 'log') {
-        output += `\n${ev.text}`;
-      } else if (ev.type === 'error') {
-        error = ev.message;
-        failureKind = ev.failureKind;
-      } else if (ev.type === 'ask_user' || ev.type === 'approval_request') {
-        interacted = true;
-        this.recordCheckpoint(task, stage, stageIndex, ev);
-        const pauseReason = ev.type === 'ask_user' ? '等待用户回答' : '等待工具授权';
-        this.markExecution(
-          execution,
-          'paused',
-          stage.id === REVIEW_STAGE_ID ? `审查已停止（${pauseReason}）` : pauseReason,
-        );
-        const pausedFrom = task.status;
-        this.transition(task, 'awaiting_input');
-        task.pausedFrom = pausedFrom;
-        this.repos.tasks.update(task);
-        await run.cancel();
-        break;
-      }
+    } finally {
+      this.activeTextMessages.delete(execution.id);
     }
     return { done, interacted, output, error, failureKind, result, knowledgeReads };
   }
@@ -755,6 +760,8 @@ export class Orchestrator extends EventEmitter {
   private async handleEvent(task: Task, execution: ExecutionRecord, ev: AgentEvent, entry?: ActivePipeline): Promise<void> {
     // 旧运行的晚到事件（停止原因已设置）不落库、不转发。
     if (entry?.stopReason) return;
+    const continuesAssistantText = ev.type === 'log' && ev.level !== 'error';
+    if (!continuesAssistantText) this.activeTextMessages.delete(execution.id);
     this.emit('task-event', { taskId: task.id, event: ev } satisfies TaskEvent);
     const t = now();
     switch (ev.type) {
@@ -773,7 +780,22 @@ export class Orchestrator extends EventEmitter {
         this.emit('log', entry);
         // 同步落对话消息（旧 log_entries 保留兼容，对话窗口读 task_messages）。
         if (ev.type === 'log') {
-          this.recordMessage(task, execution, { role: level === 'error' ? 'system' : 'assistant', kind: level === 'error' ? 'error' : 'text', text: ev.text, t });
+          if (level === 'error') {
+            this.recordMessage(task, execution, { role: 'system', kind: 'error', text: ev.text, t });
+          } else {
+            const active = this.activeTextMessages.get(execution.id);
+            if (active) {
+              const updated = { ...active, text: `${active.text ?? ''}${ev.text}` };
+              this.repos.taskMessages.updateText(updated.id, updated.text ?? '');
+              this.activeTextMessages.set(execution.id, updated);
+              this.emit('task-message', { taskId: task.id, message: updated } satisfies TaskMessageEvent);
+            } else {
+              const created = this.recordMessage(task, execution, {
+                role: 'assistant', kind: 'text', text: ev.text, t,
+              });
+              this.activeTextMessages.set(execution.id, created);
+            }
+          }
         } else if (ev.type === 'file_change') {
           this.recordMessage(task, execution, { role: 'assistant', kind: 'tool_call', toolName: this.deriveToolName(text), text: `${ev.action} ${ev.path}`, t });
         } else {

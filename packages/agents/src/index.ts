@@ -51,6 +51,7 @@ export {
   type PiEventTranslatorOptions,
   type StructuredResult,
 } from './json-events.js';
+export { PiTokenUsageAccumulator } from './token-usage.js';
 export {
   type AttemptJournal,
   type AttemptJournalToolCall,
@@ -79,6 +80,7 @@ export {
   type RuntimeLocator,
   type ProfileMaterializerLike,
   type ProjectInstructionLoaderLike,
+  type ProviderUsageSink,
   validateExpertCompletion,
 } from './pi-runner.js';
 export { type AgentRunner, type AgentRun, type AgentRunRequest as RunnerAgentRunRequest } from './runner-types.js';

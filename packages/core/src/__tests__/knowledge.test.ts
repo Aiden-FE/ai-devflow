@@ -4,6 +4,7 @@ import {
   isKnowledgeFrontmatter,
   isKnowledgeAssessment,
   isKnowledgeAgentPayload,
+  validateKnowledgeAgentPayload,
   type KnowledgeAssessment,
   type KnowledgeAgentPayload,
   type KnowledgeFrontmatter,
@@ -166,6 +167,17 @@ describe('isKnowledgeAgentPayload', () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it('returns the exact invalid task-review field', () => {
+    expect(validateKnowledgeAgentPayload({
+      kind: 'task_review',
+      review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+      knowledgeAssessment: { verdict: 'none', reason: 'x', evidence: [] },
+    })).toEqual({
+      ok: false,
+      error: 'payload.knowledgeAssessment.evidence 必须至少包含一项',
+    });
   });
 });
 

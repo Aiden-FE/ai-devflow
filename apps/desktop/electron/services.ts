@@ -13,6 +13,7 @@ import { createUpdater, type Updater } from './updater.js';
 import { createPiRuntime, assetsRootFor, type PiRuntimeServices } from './pi-runtime.js';
 import type { ProviderStore } from './provider-store.js';
 import { createPiAiService, createProductionTextExecutor, type PiAiService } from './pi-ai.js';
+import { RetentionService } from './retention.js';
 
 export interface Services {
   repos: Repositories;
@@ -30,6 +31,7 @@ export interface Services {
   decryptSecret: (s: string) => string;
   updater: Updater;
   initializationStatus?: ServiceInitializationStatus;
+  retention?: RetentionService;
 }
 
 export interface ServiceInitializationStatus {
@@ -75,6 +77,8 @@ export function hasUsableProvider(
 }
 
 interface InitializableServices {
+  repos?: Pick<Repositories, 'providerUsage'>;
+  retention?: Pick<RetentionService, 'runIfDue'>;
   knowledge?: Pick<KnowledgeCoordinator, 'recoverInterrupted'>;
   piRuntime?: {
     cleanupOrphans?(): Promise<void>;
@@ -95,6 +99,13 @@ interface InitializableServices {
 export async function initializeServices(
   services: InitializableServices,
 ): Promise<ServiceInitializationStatus> {
+  try {
+    services.repos?.providerUsage.recoverInterrupted(Date.now());
+  } catch {
+    // Usage recovery is best effort; startup continues with existing analytics rows.
+  }
+  void services.retention?.runIfDue().catch(() => undefined);
+
   let credentialMigration: ServiceInitializationStatus['credentialMigration'] = 'not_needed';
   try {
     credentialMigration = services.piRuntime?.providerStore.migrateLegacy() ?? 'not_needed';
@@ -139,6 +150,14 @@ export function createServices(notifier: Notifier): Services {
       sessionsBaseDir: join(userData, 'pi-runtime', 'sessions'),
       projectToolPath: buildControlledPath(),
       assetsRoot: assetsRootFor(),
+      usage: {
+        start: (input) => {
+          const providerName = piRuntime.providerStore.listConfigs()
+            .find((provider) => provider.id === input.providerId)?.displayName ?? input.providerName;
+          return repos.providerUsage.start({ ...input, providerName }).id;
+        },
+        finish: (id, input) => repos.providerUsage.finish(id, input),
+      },
     }),
   );
   let services: Services | undefined;
@@ -157,6 +176,7 @@ export function createServices(notifier: Notifier): Services {
   const webhooks = new WebhookSender(repos, { maxAttempts: 3, timeoutMs: 10_000, baseDelayMs: 1000 });
   const timeoutEngine = new TimeoutEngine(repos, notifier, webhooks, { intervalMs: 30_000 });
   const updater = createUpdater();
+  const retention = new RetentionService(db, repos);
 
   services = {
     repos,
@@ -173,6 +193,7 @@ export function createServices(notifier: Notifier): Services {
     encryptSecret,
     decryptSecret,
     updater,
+    retention,
   };
   // 专家化重构（§6.2）：启动一次性迁移旧 AgentModelOverride 键到 6 专家键。
   const overrideMigration = piRuntime.providerStore.migrateAgentOverridesToExperts();

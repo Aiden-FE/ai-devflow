@@ -35,7 +35,19 @@ import type {
   KnowledgeRunView,
   TaskKnowledgeEvidence,
   IterationChangelogVerification,
+  UsageAnalytics,
+  UsageFilters,
+  RetentionPolicy,
 } from '@ai-devflow/core';
+
+export interface RetentionRunView {
+  skipped: boolean;
+  ranAt: number;
+  logsDeleted: number;
+  attemptsDeleted: number;
+  messagesDeleted: number;
+  providerRowsRolledUp: number;
+}
 
 export interface CreateProjectInput {
   name: string;
@@ -152,6 +164,10 @@ export interface StreamEvent {
 }
 
 export interface DesktopApi {
+  // ---- 供应商使用统计 ----
+  analytics: {
+    query(filters: UsageFilters): Promise<UsageAnalytics>;
+  };
   // ---- 项目 ----
   projects: {
     list(): Promise<Project[]>;
@@ -260,6 +276,10 @@ export interface DesktopApi {
     getResolvedThemeSync(): 'light' | 'dark';
     getProjectSettings(projectId: string): Promise<ProjectSettings>;
     updateProjectSettings(projectId: string, settings: ProjectSettings): Promise<void>;
+    getRetention(): Promise<{ policy: RetentionPolicy; lastRunAt?: number }>;
+    setRetention(policy: RetentionPolicy): Promise<RetentionPolicy>;
+    runRetention(): Promise<RetentionRunView>;
+    compactDatabase(confirmed: boolean): Promise<void>;
   };
   // ---- AI 服务商（有序提供商列表，Pi-only） ----
   providers: {
@@ -313,13 +333,18 @@ export interface DesktopApi {
         mode?: 'task' | 'requirement' | 'task_proposal';
         context?: string;
         projectPath?: string;
+        projectId?: string;
         onRequirementProposal?: (draft: AiRequirementProposalDraft) => void;
         onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void;
         onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void;
+        /** 会话创建后、请求发送前回传 sessionId，供调用方精确取消。 */
+        onSession?: (sessionId: string) => void;
         /** AI 思维链增量（thinking_delta）：供 UI 展示思考细节，与正文增量分离。 */
         onThinking?: (text: string) => void;
       },
     ): Promise<string>;
+    /** 取消指定 AI 对话会话；已结束或未知会话为幂等 no-op。 */
+    cancel(sessionId: string): Promise<void>;
     /** 提交问答工具的答案（统一提交所有 tab）。 */
     answer(sessionId: string, toolUseId: string, answers: AskAnswer): Promise<void>;
     /** 基于对话生成结构化需求草稿（标题/描述/验收标准/优先级）。 */

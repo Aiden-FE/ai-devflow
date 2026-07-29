@@ -4,6 +4,7 @@ import { AGENT_ROLE_MIGRATION_V11 } from './migrations/agent-role-migration-v11.
 import { KNOWLEDGE_AUDIT_MIGRATION_V12 } from './migrations/knowledge-audit-migration-v12.js';
 import { ITERATION_VERSION_UNIQUE_V13 } from './migrations/iteration-version-unique-v13.js';
 import { KNOWLEDGE_DEPOSITION_PROGRESS_V14 } from './migrations/knowledge-deposition-progress-v14.js';
+import { PROVIDER_USAGE_MIGRATION_V15 } from './migrations/provider-usage-migration-v15.js';
 import type { DatabaseSync } from './db.js';
 
 export interface Migration {
@@ -276,4 +277,5 @@ export const MIGRATIONS: Migration[] = [
   KNOWLEDGE_AUDIT_MIGRATION_V12,
   ITERATION_VERSION_UNIQUE_V13,
   KNOWLEDGE_DEPOSITION_PROGRESS_V14,
+  PROVIDER_USAGE_MIGRATION_V15,
 ];

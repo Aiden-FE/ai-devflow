@@ -117,6 +117,7 @@ app.whenReady().then(async () => {
   const notifier = new ElectronNotifier(() => mainWindow, (taskId) => handleDeepLink(taskId));
   services = createServices(notifier);
   services.initializationStatus = await initializeServices(services);
+  services.retention?.start();
 
   // 主题：在创建窗口前应用 nativeTheme.themeSource 与窗口背景，避免亮色启动闪黑。
   const mode = readThemeMode(services);
@@ -174,6 +175,7 @@ app.on('open-url', (event, url) => {
 app.on('before-quit', (event) => {
   if (isQuitting || !services) return;
   isQuitting = true;
+  services.retention?.stop();
   event.preventDefault();
   void services.orchestrator.shutdown().catch(() => undefined).finally(() => {
     app.quit();

@@ -156,6 +156,7 @@ describe('ChatThread (统一聊天组件)', () => {
     );
     expect(doneHtml).toContain('最终答复');
     expect(doneHtml).toContain('data-testid="thinking-toggle"');
+    expect(doneHtml).toContain('aria-expanded="false"');
     expect(doneHtml).not.toContain('data-testid="thinking-body"');
     expect(doneHtml).not.toContain('思考细节');
   });

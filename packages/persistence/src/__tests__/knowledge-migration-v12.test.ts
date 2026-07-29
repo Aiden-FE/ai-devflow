@@ -19,9 +19,9 @@ function columnNames(db: DatabaseSync, table: string): string[] {
 }
 
 describe('schema v12 migration', () => {
-  it('migrates a fresh db through v14 with four knowledge tables and deposition progress', () => {
+  it('migrates a fresh db through v15 with knowledge tables and provider usage analytics', () => {
     const db = openDatabase(freshPath());
-    expect(getCurrentVersion(db)).toBe(14);
+    expect(getCurrentVersion(db)).toBe(15);
     expect(tableNames(db)).toEqual(
       expect.arrayContaining([
         'knowledge_runs',
@@ -40,7 +40,7 @@ describe('schema v12 migration', () => {
     }
   });
 
-  it('upgrades an existing v11 db through v14 preserving rows', () => {
+  it('upgrades an existing v11 db through v15 preserving rows', () => {
     const path = freshPath();
     const v11 = openDatabase(path, { maxVersion: 11 });
     v11.exec(`
@@ -49,7 +49,7 @@ describe('schema v12 migration', () => {
     `);
     v11.close();
     const db = openDatabase(path);
-    expect(getCurrentVersion(db)).toBe(14);
+    expect(getCurrentVersion(db)).toBe(15);
     expect(db.prepare("SELECT COUNT(*) AS n FROM projects WHERE id='p'").get()).toMatchObject({ n: 1 });
     expect(tableNames(db)).toContain('knowledge_runs');
   });

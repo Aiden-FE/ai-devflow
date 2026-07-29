@@ -155,6 +155,16 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
     projectToolPath: buildControlledPath(),
     instructionLoader: new ProjectInstructionLoader(),
     attempts: repos.executionAttempts,
+    usage: {
+      start: (input) => {
+        const providerName = providerStore.listConfigs()
+          .find((provider) => provider.id === input.providerId)?.displayName ?? input.providerName;
+        const projectId = input.projectId
+          ?? (input.taskId ? repos.tasks.get(input.taskId)?.projectId : undefined);
+        return repos.providerUsage.start({ ...input, providerName, projectId }).id;
+      },
+      finish: (id, input) => repos.providerUsage.finish(id, input),
+    },
   });
 
   return {

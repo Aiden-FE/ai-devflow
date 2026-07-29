@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
+import type { ProviderCallFinish, ProviderCallStart, ProviderConfig, ProviderHealth } from '@ai-devflow/core';
 import { PiRunner } from '../../pi-runner.js';
 import { ProjectInstructionLoader } from '../../project-instructions.js';
 import type { ExpertMaterializeInput } from '../../profiles.js';
@@ -63,7 +63,13 @@ export interface PiRunnerHarness {
   materializedProfiles: ExpertMaterializeInput[];
 }
 
-export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunnerHarness {
+export function createPiRunnerHarness(input: {
+  scenario: FakeScenario;
+  usage?: {
+    start(value: ProviderCallStart): string | undefined;
+    finish(id: string, value: ProviderCallFinish): void;
+  };
+}): PiRunnerHarness {
   const cwd = mkdtempSync(join(tmpdir(), 'pi-runner-cwd-'));
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
   const spawnedCommands: PiRunnerHarness['spawnedCommands'] = [];
@@ -157,6 +163,7 @@ export function createPiRunnerHarness(input: { scenario: FakeScenario }): PiRunn
     projectToolPath: '/usr/bin:/bin',
     instructionLoader: new ProjectInstructionLoader(),
     attempts,
+    usage: input.usage,
   });
 
   return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, spawnExits, sleeps, attemptIds, attemptCollisions, materializedProfiles };

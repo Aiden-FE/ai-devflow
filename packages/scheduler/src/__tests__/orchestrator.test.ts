@@ -126,6 +126,45 @@ describe('orchestrator pipeline', () => {
   });
 });
 
+describe('orchestrator task-message text assembly', () => {
+  beforeEach(() => setup(() => [
+    { type: 'log', level: 'info', text: 'files that ', t: 0 },
+    { type: 'log', level: 'info', text: 'need to ', t: 0 },
+    { type: 'log', level: 'info', text: 'be changed', t: 0 },
+    { type: 'status', stage: 'tool', detail: 'tool finished', t: 0 },
+    { type: 'log', level: 'info', text: 'final answer', t: 0 },
+    { type: 'done', summary: 'finished', t: 0 },
+  ]));
+
+  it('reuses one message id for a contiguous assistant text segment', async () => {
+    const streamed: import('@ai-devflow/core').TaskMessage[] = [];
+    orch.on('task-message', (event) => streamed.push(event.message));
+    const task = makeTask();
+    repos.tasks.insert(task);
+
+    await orch.start(task.id);
+
+    const development = repos.executions.listByTask(task.id).find((execution) => !isReviewExecution(execution.summary))!;
+    const messages = repos.taskMessages.listByTask(task.id)
+      .filter((message) => message.executionId === development.id && message.role === 'assistant' && message.kind === 'text');
+    expect(messages.map((message) => message.text)).toEqual([
+      'files that need to be changed',
+      'final answer',
+    ]);
+    const firstSegmentEvents = streamed.filter((message) =>
+      message.executionId === development.id &&
+      message.role === 'assistant' &&
+      message.kind === 'text' &&
+      message.text !== 'final answer');
+    expect(firstSegmentEvents.map((message) => message.text)).toEqual([
+      'files that ',
+      'files that need to ',
+      'files that need to be changed',
+    ]);
+    expect(new Set(firstSegmentEvents.map((message) => message.id))).toEqual(new Set([firstSegmentEvents[0]!.id]));
+  });
+});
+
 describe('orchestrator ask_user + resume', () => {
   beforeEach(() => setup((req) => {
     if (!req.userInput) {

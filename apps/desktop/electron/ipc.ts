@@ -9,7 +9,7 @@ import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput,
 import { hasModelConfig } from './provider-store.js';
 import { mergeWorktreeBranch, sprintBranchName, branchExists, requireCanonicalBranchSegment, resolveProjectDefaultBranch } from '@ai-devflow/scheduler';
 import { materializeKnowledgeContext } from '@ai-devflow/knowledge';
-import type { AiChatMessage, AiTaskProposal, Task, TaskStatus, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey, KnowledgeReadEvidence, KnowledgeRetrievalManifest } from '@ai-devflow/core';
+import type { AiChatMessage, AiTaskProposal, Task, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey, KnowledgeReadEvidence, KnowledgeRetrievalManifest, ProviderCallSource, ProviderCallStatus, UsageFilters } from '@ai-devflow/core';
 import {
   randomId,
   now,
@@ -25,6 +25,46 @@ const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
 
 // 问答待答：sessionId -> { toolUseId, send }。ai:answer 回灌答案到对应子进程。
 const pendingAsks = new Map<string, { toolUseId: string; send: (msg: unknown) => boolean }>();
+
+const USAGE_STATUSES = new Set<ProviderCallStatus>(['running', 'succeeded', 'failed', 'canceled', 'interrupted']);
+const USAGE_SOURCES = new Set<ProviderCallSource>([
+  'task_agent', 'review_agent', 'knowledge_agent', 'requirement_chat', 'task_chat',
+  'requirement_proposal', 'task_proposal', 'ux_consultation', 'connection_test',
+]);
+const MAX_USAGE_RANGE_MS = 5 * 366 * 24 * 60 * 60 * 1000;
+
+function validateUsageFilters(value: unknown): UsageFilters {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('统计过滤条件无效');
+  const input = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(input.startAt) || !Number.isSafeInteger(input.endAt)) {
+    throw new Error('统计时间必须是整数时间戳');
+  }
+  const startAt = input.startAt as number;
+  const endAt = input.endAt as number;
+  if (startAt < 0 || endAt <= startAt) throw new Error('统计时间范围无效');
+  if (endAt - startAt > MAX_USAGE_RANGE_MS) throw new Error('统计时间范围不能超过五年');
+  const output: UsageFilters = { startAt, endAt };
+  for (const key of ['projectId', 'providerId', 'model', 'workload'] as const) {
+    const item = input[key];
+    if (item !== undefined) {
+      if (typeof item !== 'string' || item.length === 0 || item.length > 256) throw new Error(`统计过滤字段 ${key} 无效`);
+      output[key] = item;
+    }
+  }
+  if (input.source !== undefined) {
+    if (typeof input.source !== 'string' || !USAGE_SOURCES.has(input.source as ProviderCallSource)) {
+      throw new Error('统计来源无效');
+    }
+    output.source = input.source as ProviderCallSource;
+  }
+  if (input.status !== undefined) {
+    if (typeof input.status !== 'string' || !USAGE_STATUSES.has(input.status as ProviderCallStatus)) {
+      throw new Error('统计状态无效');
+    }
+    output.status = input.status as ProviderCallStatus;
+  }
+  return output;
+}
 
 function chatKnowledgeExpert(mode: 'task' | 'requirement' | 'task_proposal' | undefined): AgentKey {
   if (mode === 'requirement') return 'product';
@@ -74,6 +114,7 @@ export function deriveProjectName(input: string): string {
 export function registerIpc(services: Services, send: (e: StreamEvent) => void, sendAi: (e: AiStreamEvent) => void): void {
   servicesRef = services;
   const { repos, orchestrator, timeoutEngine, webhooks, encryptSecret, decryptSecret, updater } = services;
+  const activeAiChats = new Map<string, AbortController>();
 
   // ---- 主题：启动时应用持久化模式 ----
   nativeTheme.themeSource = readThemeMode();
@@ -98,6 +139,28 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- 自动更新：状态变化转发 ----
   updater.start((s) => send({ kind: 'update-status', taskId: '', data: s }));
+
+  // ---- 供应商使用统计 ----
+  ipcMain.handle(channel('analytics', 'query'), (_event, filters: unknown) =>
+    repos.providerUsage.query(validateUsageFilters(filters)));
+
+  ipcMain.handle(channel('settings', 'getRetention'), () => {
+    if (!services.retention) throw new Error('数据保留服务未就绪');
+    return { policy: services.retention.getPolicy(), lastRunAt: services.retention.getLastRunAt() };
+  });
+  ipcMain.handle(channel('settings', 'setRetention'), (_event, policy) => {
+    if (!services.retention) throw new Error('数据保留服务未就绪');
+    return services.retention.setPolicy(policy);
+  });
+  ipcMain.handle(channel('settings', 'runRetention'), () => {
+    if (!services.retention) throw new Error('数据保留服务未就绪');
+    return services.retention.runIfDue(true);
+  });
+  ipcMain.handle(channel('settings', 'compactDatabase'), (_event, confirmed: boolean) => {
+    if (confirmed !== true) throw new Error('整理数据库需要单独确认');
+    if (!services.retention) throw new Error('数据保留服务未就绪');
+    services.retention.compact();
+  });
 
   // ---- 项目 ----
   ipcMain.handle(channel('projects', 'list'), () => repos.projects.list());
@@ -418,27 +481,8 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     repos.tasks.update(t);
     return t;
   });
-  ipcMain.handle(channel('tasks', 'updateStatus'), (_e, id, target: TaskStatus) => {
-    const t = repos.tasks.get(id);
-    if (!t) throw new Error('任务不存在');
-    // 归档必须经人工验收入口（tasks.accept），看板拖拽不得绕过。
-    if (target === 'archived') {
-      throw new Error('归档需经“验收通过并归档”，不支持直接拖拽归档');
-    }
-    const req = repos.requirements.get(t.requirementId);
-    const hasExec = repos.executions.listByTask(id).length > 0;
-    const hasCp = !!repos.checkpoints.getLatest(id);
-    // 状态迁移门禁的 hasAgentAssigned 仅判定「是否配置过提供商」（任意 provider 存在），
-    // 语义不同于编排器的 hasUsableProvider（启用+有凭证+runtime ready，用于禁止开始新 AI 操作）。
-    // 此处为状态迁移（非启动 AI），仅需确认曾配置提供商；真正启动 AI 时由 orchestrator.start 再做 hasUsableProvider 校验。
-    const gate = canTransition(t, target, {
-      hasAcceptance: !!req?.acceptance,
-      hasAgentAssigned: services.providerStore ? services.providerStore.list().length > 0 : true,
-      hasArtifacts: hasExec || hasCp,
-      hasUserAnswer: !!repos.pendingQuestions.get(id)?.answer,
-    });
-    if (!gate.ok) throw new Error(`状态迁移被门禁拒绝：${gate.reasons.join('; ')}`);
-    repos.tasks.updateStatus(id, target, now());
+  ipcMain.handle(channel('tasks', 'updateStatus'), () => {
+    throw new Error('任务状态只能通过启动、验收或驳回操作变更');
   });
   // 验收通过并归档：唯一进入 archived 的入口。需 in_review + 有执行产物 + 显式人工验收。
   ipcMain.handle(channel('tasks', 'accept'), async (_e, id) => {
@@ -625,7 +669,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('updates', 'status'), () => updater.status());
 
   // ---- AI 沟通：流式对话 + 结构化草稿（任务 / 需求） ----
-  ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string }) => {
+  ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; projectId?: string }) => {
     if (!services.piAi) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: '应用运行组件未就绪' });
       return;
@@ -634,11 +678,21 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       sendAi({ type: 'error', sessionId: payload.sessionId, error: '尚未配置 AI 服务商，请在“设置 -> AI 服务商”中填写。' });
       return;
     }
+    if (activeAiChats.has(payload.sessionId)) {
+      sendAi({ type: 'error', sessionId: payload.sessionId, error: 'AI 会话标识重复' });
+      return;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+    const emitAi = (event: AiStreamEvent): void => {
+      if (!signal.aborted) sendAi(event);
+    };
+    activeAiChats.set(payload.sessionId, controller);
     let knowledgeManifest: KnowledgeRetrievalManifest | undefined;
     let knowledgeReads: KnowledgeReadEvidence[] = [];
     try {
-      const knowledgeProject = payload.projectPath
-        ? repos.projects.list().find((project) => project.path === payload.projectPath)
+      const knowledgeProject = payload.projectId
+        ? repos.projects.get(payload.projectId)
         : undefined;
       if ((payload.mode === 'requirement' || payload.mode === 'task_proposal') && !knowledgeProject) {
         throw new Error('创建需求或任务时必须选择已注册项目');
@@ -666,16 +720,19 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       const knowledgeContext = knowledgeManifest
         ? serializeChatKnowledgeManifest(knowledgeManifest, materializedKnowledge?.content)
         : undefined;
-      const fullText = await services.piAi.chat(payload.messages, (delta) => sendAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
+      const fullText = await services.piAi.chat(payload.messages, (delta) => emitAi({ type: 'delta', sessionId: payload.sessionId, text: delta }), {
         mode: payload.mode,
         context: [knowledgeContext, payload.context].filter(Boolean).join('\n\n') || undefined,
         projectPath: knowledgeProject?.path,
-        onThinking: (text) => sendAi({ type: 'thinking', sessionId: payload.sessionId, text }),
+        projectId: knowledgeProject?.id,
+        logicalRequestId: payload.sessionId,
+        signal,
+        onThinking: (text) => emitAi({ type: 'thinking', sessionId: payload.sessionId, text }),
         onToolResult: (toolName, payloadDraft) => {
           if (toolName === 'ai_devflow_propose_requirement' && payloadDraft && typeof payloadDraft === 'object') {
             const d = payloadDraft as { title?: unknown; description?: unknown; acceptance?: unknown; priority?: unknown };
             if (typeof d.title === 'string' && typeof d.description === 'string' && typeof d.acceptance === 'string' && (d.priority === 'low' || d.priority === 'medium' || d.priority === 'high')) {
-              sendAi({ type: 'requirement_proposal', sessionId: payload.sessionId, draft: { title: d.title, description: d.description, acceptance: d.acceptance, priority: d.priority } });
+              emitAi({ type: 'requirement_proposal', sessionId: payload.sessionId, draft: { title: d.title, description: d.description, acceptance: d.acceptance, priority: d.priority } });
             }
           } else if (toolName === 'ai_devflow_propose_task' && payloadDraft && typeof payloadDraft === 'object') {
             // task_proposer 在方案确定后调用工具产出任务草稿：校验 tasks 形态后经 task_proposal 事件回传 UI 填草稿区。
@@ -693,13 +750,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
               })
               .filter((x): x is { draftId: string; title: string; description: string; typeLabel: import('@ai-devflow/core').TaskTypeLabel | undefined; dependsOn: string[] } => !!x);
             if (tasks.length > 0) {
-              sendAi({ type: 'task_proposal', sessionId: payload.sessionId, tasks });
+              emitAi({ type: 'task_proposal', sessionId: payload.sessionId, tasks });
             }
           }
         },
         onAsk: (toolUseId, tabs, send) => {
+          if (signal.aborted) return;
           // 问答工具请求：推 question 事件给 renderer，保存 send 供 ai:answer 回灌。
-          sendAi({ type: 'question', sessionId: payload.sessionId, toolUseId, tabs: tabs as AskTabs });
+          emitAi({ type: 'question', sessionId: payload.sessionId, toolUseId, tabs: tabs as AskTabs });
           pendingAsks.set(payload.sessionId, { toolUseId, send });
         },
         onConsultUx: async (requirementContext) => {
@@ -730,7 +788,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
             const result = await services.piAi.consultUx([
               uxManifest ? serializeChatKnowledgeManifest(uxManifest, uxMaterialized?.content) : undefined,
               requirementContext,
-            ].filter(Boolean).join('\n\n'));
+            ].filter(Boolean).join('\n\n'), knowledgeProject?.id);
             services.knowledge?.completeRetrieval(uxManifest, uxReads, 'completed');
             return result;
           } catch (error) {
@@ -741,12 +799,18 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
       });
       services.knowledge?.completeRetrieval(knowledgeManifest, knowledgeReads, 'completed');
       pendingAsks.delete(payload.sessionId);
-      sendAi({ type: 'done', sessionId: payload.sessionId, fullText });
+      emitAi({ type: 'done', sessionId: payload.sessionId, fullText });
     } catch (e) {
       services.knowledge?.completeRetrieval(knowledgeManifest, knowledgeReads, 'failed');
       pendingAsks.delete(payload.sessionId);
-      sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
+      if (!signal.aborted) sendAi({ type: 'error', sessionId: payload.sessionId, error: (e as Error).message });
+    } finally {
+      if (activeAiChats.get(payload.sessionId) === controller) activeAiChats.delete(payload.sessionId);
     }
+  });
+  ipcMain.on('ai-devflow:ai:cancel', (_e, payload: { sessionId: string }) => {
+    activeAiChats.get(payload.sessionId)?.abort();
+    pendingAsks.delete(payload.sessionId);
   });
   // 问答工具答案回灌：renderer 提交后经 IPC send 到 main，转成 ask_answer 发回子进程。
   ipcMain.on('ai-devflow:ai:answer', (_e, payload: { sessionId: string; toolUseId: string; answers: AskAnswer }) => {

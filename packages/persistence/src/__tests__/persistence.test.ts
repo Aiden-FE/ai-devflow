@@ -428,6 +428,51 @@ describe('task messages & pending interactions', () => {
     expect(list[2]!.isError).toBe(false);
   });
 
+  it('coalesces only adjacent legacy assistant text within one execution', () => {
+    repos.executions.insert({ id: 'e1', taskId: 't', attempt: 1, startedAt: 1, status: 'running' });
+    repos.executions.insert({ id: 'e2', taskId: 't', attempt: 2, startedAt: 2, status: 'running' });
+    repos.taskMessages.insert({ id: 'm1', taskId: 't', executionId: 'e1', role: 'assistant', kind: 'text', text: 'files that ', t: 1 });
+    repos.taskMessages.insert({ id: 'm2', taskId: 't', executionId: 'e1', role: 'assistant', kind: 'text', text: 'need to be changed', t: 2 });
+    repos.taskMessages.insert({ id: 'm3', taskId: 't', executionId: 'e1', role: 'system', kind: 'status', text: 'tool finished', t: 3 });
+    repos.taskMessages.insert({ id: 'm4', taskId: 't', executionId: 'e1', role: 'assistant', kind: 'text', text: 'final answer', t: 4 });
+    repos.taskMessages.insert({ id: 'm5', taskId: 't', executionId: 'e2', role: 'assistant', kind: 'text', text: 'next execution', t: 5 });
+    repos.taskMessages.insert({ id: 'm6', taskId: 't', executionId: 'e2', role: 'user', kind: 'text', text: 'user boundary', t: 6 });
+
+    const list = repos.taskMessages.listByTask('t');
+
+    expect(list.map((message) => message.id)).toEqual(['m1', 'm3', 'm4', 'm5', 'm6']);
+    expect(list.map((message) => message.text)).toEqual([
+      'files that need to be changed',
+      'tool finished',
+      'final answer',
+      'next execution',
+      'user boundary',
+    ]);
+  });
+
+  it('updates an existing task message without inserting a fragment', () => {
+    repos.taskMessages.insert({ id: 'm1', taskId: 't', role: 'assistant', kind: 'text', text: 'partial', t: 1 });
+
+    repos.taskMessages.updateText('m1', 'complete sentence');
+
+    expect(repos.taskMessages.listByTask('t')).toMatchObject([
+      { id: 'm1', text: 'complete sentence' },
+    ]);
+    expect(() => repos.taskMessages.updateText('missing', 'x')).toThrow('任务消息不存在：missing');
+  });
+
+  it('keeps insertion order when messages share the same timestamp', () => {
+    repos.taskMessages.insert({ id: 'same-1', taskId: 't', role: 'user', kind: 'text', text: 'first', t: 1 });
+    repos.taskMessages.insert({ id: 'same-2', taskId: 't', role: 'system', kind: 'status', text: 'second', t: 1 });
+    repos.taskMessages.insert({ id: 'same-3', taskId: 't', role: 'tool', kind: 'tool_result', text: 'third', t: 1 });
+
+    expect(repos.taskMessages.listByTask('t').map((message) => message.id)).toEqual([
+      'same-1',
+      'same-2',
+      'same-3',
+    ]);
+  });
+
   it('pending interactions insert/getPending/resolve', () => {
     repos.pendingInteractions.insert({
       id: 'pi1', taskId: 't', kind: 'approval', title: 'Bash: rm -rf', toolName: 'Bash', toolUseId: 'tu1',

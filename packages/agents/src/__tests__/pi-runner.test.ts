@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { validateExpertCompletion } from '../pi-runner.js';
 import type { StructuredResult } from '../json-events.js';
@@ -35,6 +35,42 @@ it('rejects task_review results missing the assessment payload', () => {
     },
   };
   expect(validateExpertCompletion({ expert: 'test', resultKind: 'task_review' }, withPayload)).toBeUndefined();
+});
+
+it('surfaces malformed task_review payload diagnostics before the missing-payload fallback', () => {
+  const result: StructuredResult = {
+    summary: 'reviewed\nREVIEW_VERDICT: PASS',
+    verification: ['ok'],
+    changedFiles: [],
+    unresolved: [],
+    knowledgeReads: [],
+    payloadError: 'payload.knowledgeAssessment.evidence 必须至少包含一项',
+  };
+
+  expect(validateExpertCompletion({ expert: 'test', resultKind: 'task_review' }, result)).toBe(
+    'payload.knowledgeAssessment.evidence 必须至少包含一项',
+  );
+});
+
+it.each([
+  ['REVIEW_VERDICT: PASS', 'REVIEW_VERDICT: PASS', false],
+  ['REVIEW_VERDICT: PASS', 'REVIEW_VERDICT: FAIL', true],
+  ['REVIEW_VERDICT: FAIL', 'reviewed', false],
+] as const)('requires summary, review summary, and review.pass to agree', (summary, reviewSummary, pass) => {
+  const result: StructuredResult = {
+    summary,
+    verification: ['ok'],
+    changedFiles: [],
+    unresolved: [],
+    knowledgeReads: [],
+    payload: {
+      kind: 'task_review',
+      review: { pass, summary: reviewSummary },
+      knowledgeAssessment: { verdict: 'none', reason: 'x', evidence: ['x.ts'] },
+    },
+  };
+
+  expect(validateExpertCompletion({ expert: 'test', resultKind: 'task_review' }, result)).toMatch(/不一致|缺少 REVIEW_VERDICT/);
 });
 
 it('rejects task_execution results that carry a payload', () => {
@@ -337,4 +373,53 @@ it('gives concurrent attempts distinct writable config and session roots', async
   }));
   expect(new Set(harness.spawnedCommands.map((command) => command.configDir)).size).toBe(2);
   expect(new Set(harness.spawnedCommands.map((command) => command.sessionDir)).size).toBe(2);
+});
+
+it('records every provider route attempt with shared logical request and deduplicated usage', async () => {
+  const starts: Array<import('@ai-devflow/core').ProviderCallStart> = [];
+  const finishes: Array<{ id: string; value: import('@ai-devflow/core').ProviderCallFinish }> = [];
+  const harness = createPiRunnerHarness({
+    scenario: 'mutate-then-provider-error',
+    usage: {
+      start: (value) => {
+        starts.push(value);
+        return `usage-${starts.length}`;
+      },
+      finish: (id, value) => finishes.push({ id, value }),
+    },
+  });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'usage-execution', expert: 'dev',
+    resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
+  });
+  await collect(run.events);
+  expect((await run.done()).ok).toBe(true);
+
+  expect(starts).toHaveLength(2);
+  expect(starts.map((value) => value.logicalRequestId)).toEqual(['usage-execution', 'usage-execution']);
+  expect(starts.map((value) => value.providerId)).toEqual(['p1', 'p1']);
+  expect(starts[0]).toMatchObject({ source: 'task_agent', taskId: 't1', attemptOrdinal: 1, model: 'gpt-default' });
+  expect(finishes).toEqual([
+    expect.objectContaining({ id: 'usage-1', value: expect.objectContaining({ status: 'failed', failureKind: 'transient_provider' }) }),
+    expect.objectContaining({
+      id: 'usage-2',
+      value: expect.objectContaining({
+        status: 'succeeded',
+        usage: { input: 100, output: 40, cacheRead: 20, cacheWrite: 5, total: 165 },
+      }),
+    }),
+  ]);
+});
+
+it('keeps task execution successful when usage persistence throws', async () => {
+  const harness = createPiRunnerHarness({
+    scenario: 'success',
+    usage: { start: vi.fn(() => { throw new Error('analytics unavailable'); }), finish: vi.fn() },
+  });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'usage-best-effort', expert: 'dev',
+    resultKind: 'task_execution', prompt: 'p', cwd: harness.cwd,
+  });
+  await collect(run.events);
+  expect((await run.done()).ok).toBe(true);
 });

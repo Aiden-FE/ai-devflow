@@ -4,18 +4,30 @@
 import { randomUUID } from 'node:crypto';
 import { cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AiChatMessage, AiRequirementProposal, AgentKey, ProviderConfig, ProviderKind, ProviderTestResult } from '@ai-devflow/core';
+import type {
+  AiChatMessage,
+  AiRequirementProposal,
+  AgentKey,
+  FailureKind,
+  ProviderCallSource,
+  ProviderConfig,
+  ProviderKind,
+  ProviderTestResult,
+  TerminalProviderCallStatus,
+} from '@ai-devflow/core';
 import { redactText } from '@ai-devflow/core';
 import { z } from 'zod';
 import { runUxConsultation } from './ux-consult.js';
 import type {
   PiProcessSupervisor,
+  ProviderUsageSink,
   ProviderRoute,
   ProviderRouter,
   RuntimeLocator,
 } from '@ai-devflow/agents';
 import {
   ACTIVE_API_KEY_ENV,
+  PiTokenUsageAccumulator,
   ProviderExecutionError,
   buildCompatibleModelsJson,
   classifyProviderFailure,
@@ -58,7 +70,7 @@ export interface PiTextExecutor {
     workload: ChatWorkload,
     messages: AiChatMessage[],
     onDelta?: (text: string) => void,
-    options?: { onlyProviderId?: string; cwd?: string },
+    options?: TextExecutionOptions,
     onToolResult?: (toolName: string, payload: unknown) => void,
     onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void,
     onConsultUx?: (requirementContext: string) => Promise<string>,
@@ -67,14 +79,23 @@ export interface PiTextExecutor {
   ): Promise<string>;
 }
 
+export interface TextExecutionOptions {
+  onlyProviderId?: string;
+  cwd?: string;
+  signal?: AbortSignal;
+  projectId?: string;
+  logicalRequestId?: string;
+  source?: ProviderCallSource;
+}
+
 export interface PiAiService {
-  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void; onConsultUx?: (requirementContext: string) => Promise<string>; onThinking?: (text: string) => void }): Promise<string>;
+  chat(messages: AiChatMessage[], onDelta: (text: string) => void, opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; projectId?: string; logicalRequestId?: string; signal?: AbortSignal; onToolResult?: (toolName: string, payload: unknown) => void; onAsk?: (toolUseId: string, tabs: unknown, send: (msg: unknown) => boolean) => void; onConsultUx?: (requirementContext: string) => Promise<string>; onThinking?: (text: string) => void }): Promise<string>;
   proposeRequirement(messages: AiChatMessage[]): Promise<AiRequirementProposal>;
   testConnection(providerId: string): Promise<ProviderTestResult>;
   /**
    * UX 子咨询：产品专家经 ai_devflow_consult_ux 调用时，启动一次 UX专家 run 返回结构化建议。
    */
-  consultUx(requirementContext: string): Promise<string>;
+  consultUx(requirementContext: string, projectId?: string): Promise<string>;
   /**
    * 列出兼容网关可用模型；标准提供商返回空数组（不发起网络请求）。
    * `provider` / `secret` 由调用方（IPC 层）从 ProviderStore 解析；密钥不进入 Renderer。
@@ -90,6 +111,14 @@ export interface ProductionExecutorDeps {
   projectToolPath: string;
   /** 步骤 Agent 资源根（dev: packages/agents/assets/profiles；packaged: resources/pi-runtime/profiles）。 */
   assetsRoot: string;
+  usage?: ProviderUsageSink;
+}
+
+interface TextUsageContext {
+  logicalRequestId: string;
+  projectId?: string;
+  source: ProviderCallSource;
+  attemptOrdinal: number;
 }
 
 const CHAT_SETTINGS_JSON = JSON.stringify({
@@ -304,6 +333,8 @@ export async function executeTextOnRoute(
   onConsultUx?: (requirementContext: string) => Promise<string>,
   systemPromptOverride?: string,
   onThinking?: (text: string) => void,
+  signal?: AbortSignal,
+  usageContext?: TextUsageContext,
 ): Promise<string> {
   const { entry } = await deps.locator.verify();
   const sessionDir = join(deps.sessionsBaseDir, 'chat', randomUUID());
@@ -320,11 +351,54 @@ export async function executeTextOnRoute(
 
   // 需求/任务创建需探索真实仓库：传入 cwdOverride 时 spawn 指向项目根，令只读工具看到实际工程。
   // 未绑定项目的 workload 保持 cwd=sessionDir（隔离临时目录）。
-  const spawned = deps.supervisor.spawn(plan, {
-    cwd: cwdOverride ?? sessionDir,
-    timeoutMs: 120_000,
-    secrets: [route.secret],
-  });
+  const tokenUsage = new PiTokenUsageAccumulator();
+  let usageId: string | undefined;
+  try {
+    usageId = usageContext && deps.usage?.start({
+      logicalRequestId: usageContext.logicalRequestId,
+      providerId: route.providerId,
+      providerName: route.providerName,
+      routeId: route.routeId,
+      model: route.model,
+      workload,
+      source: usageContext.source,
+      attemptOrdinal: usageContext.attemptOrdinal,
+      startedAt: Date.now(),
+      projectId: usageContext.projectId,
+    });
+  } catch {
+    usageId = undefined;
+  }
+  let usageFinished = false;
+  const finishUsage = (status: TerminalProviderCallStatus, failureKind?: FailureKind): void => {
+    if (!usageId || usageFinished) return;
+    usageFinished = true;
+    try {
+      deps.usage?.finish(usageId, {
+        status,
+        endedAt: Date.now(),
+        failureKind,
+        usage: tokenUsage.snapshot(),
+      });
+    } catch {
+      // Usage analytics is best effort and cannot alter AI behavior.
+    }
+  };
+  let spawned: ReturnType<PiProcessSupervisor['spawn']>;
+  try {
+    spawned = deps.supervisor.spawn(plan, {
+      cwd: cwdOverride ?? sessionDir,
+      timeoutMs: step?.timeoutMs ?? 120_000,
+      secrets: [route.secret],
+    });
+  } catch (error) {
+    finishUsage('failed', 'runtime');
+    rmSync(sessionDir, { recursive: true, force: true });
+    throw error;
+  }
+  const cancelSpawned = () => { void spawned.cancel(); };
+  if (signal?.aborted) cancelSpawned();
+  else signal?.addEventListener('abort', cancelSpawned, { once: true });
   // 问答工具桥接：子进程 ai_devflow_ask.execute 经 IPC 发 { kind:'ask', toolUseId, payload }，
   // onMessage 捕获后经 onAsk 上报（携带 send 回调，供 answer 回灌 { kind:'ask_answer', ... }）。
   spawned.onMessage((msg) => {
@@ -383,6 +457,7 @@ export async function executeTextOnRoute(
           malformedStdout = true;
           continue;
         }
+        tokenUsage.add(event);
         if (event.type === 'message_update') {
           // 流式输出：text_delta（正文增量）经 onDelta 立即转发；thinking_delta（思维链增量）经
           // onThinking 单独转发，供 UI 展示“思考中”细节（思考与正文分离，不计入 full 正文）。
@@ -441,13 +516,20 @@ export async function executeTextOnRoute(
       doneError = error;
     }
   } finally {
+    signal?.removeEventListener('abort', cancelSpawned);
     rmSync(sessionDir, { recursive: true, force: true });
   }
 
+  if (signal?.aborted) {
+    finishUsage('canceled');
+    throw new ProviderExecutionError('AI 生成已取消', 'interaction');
+  }
   if (providerError) {
+    const failureKind = classifyProviderFailure({ status: providerError.status, message: providerError.message });
+    finishUsage('failed', failureKind);
     throw new ProviderExecutionError(
       `AI 服务请求失败：${providerError.message}`,
-      classifyProviderFailure({ status: providerError.status, message: providerError.message }),
+      failureKind,
       providerError.status,
     );
   }
@@ -456,6 +538,7 @@ export async function executeTextOnRoute(
     const reason = doneError
       ? `进程异常：${(doneError as Error).message ?? String(doneError)}`
       : `exit=${exitCode}`;
+    finishUsage('failed', 'runtime');
     throw new ProviderExecutionError(
       'Pi 运行进程异常退出',
       'runtime',
@@ -470,6 +553,7 @@ export async function executeTextOnRoute(
     if (malformedStdout) reasons.push('stdout 含非法 JSON');
     if (!sawAgentEnd) reasons.push('缺少 agent_end 终态事件');
     if (full.length === 0 && !capturedProposal) reasons.push('未收到任何文本输出且未生成草稿');
+    finishUsage('failed', 'protocol');
     throw new ProviderExecutionError(
       'Pi 返回的终止协议无效',
       'protocol',
@@ -478,6 +562,7 @@ export async function executeTextOnRoute(
       buildPiFailureDetail(reasons, stderrLines, unknownEventTypes),
     );
   }
+  finishUsage('succeeded');
   return full;
 }
 
@@ -503,13 +588,29 @@ function buildPiFailureDetail(
 
 export function createProductionTextExecutor(deps: ProductionExecutorDeps): PiTextExecutor {
   return async (workload, messages, onDelta, options, onToolResult, onAsk, onConsultUx, systemPromptOverride, onThinking) => {
-    // cwd 仅用于 task_proposal spawn 的工作目录，不属于路由选项；从 options 中取出后不透传给 router。
-    const { cwd, ...routerOptions } = options ?? {};
+    // cwd/signal 只控制本次 Pi 进程，不属于 ProviderRouter 选项。
+    const { cwd, signal, projectId, logicalRequestId: providedRequestId, source, ...routerOptions } = options ?? {};
+    const logicalRequestId = providedRequestId ?? randomUUID();
     const result = await deps.router.execute(
       chatWorkloadToExpert(workload),
-      async (route) => {
+      async (route, ordinal) => {
+        if (signal?.aborted) throw new ProviderExecutionError('AI 生成已取消', 'interaction');
         try {
-          return await executeTextOnRoute(route, messages, onDelta, deps, workload, onToolResult, cwd, onAsk, onConsultUx, systemPromptOverride, onThinking);
+          return await executeTextOnRoute(
+            route,
+            messages,
+            onDelta,
+            deps,
+            workload,
+            onToolResult,
+            cwd,
+            onAsk,
+            onConsultUx,
+            systemPromptOverride,
+            onThinking,
+            signal,
+            { logicalRequestId, projectId, source: source ?? workload, attemptOrdinal: ordinal },
+          );
         } catch (err) {
           // 把非 ProviderExecutionError 包装成 runtime 错误，让路由决定是否降级。
           if ((err as Error).message?.includes('应用运行组件损坏')) {
@@ -585,7 +686,15 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
           ? [{ role: 'user', content: `【上下文】\n${opts.context}` }, ...messages]
           : messages;
       // 绑定项目的需求/任务创建以项目根作为 spawn cwd，令步骤 Agent 的只读工具能探索实际工程。
-      return executeText(workload, promptMessages, onDelta, opts?.projectPath ? { cwd: opts.projectPath } : undefined, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx, undefined, opts?.onThinking);
+      const executionOptions = opts?.projectPath || opts?.signal || opts?.projectId || opts?.logicalRequestId
+        ? {
+            cwd: opts?.projectPath,
+            signal: opts?.signal,
+            projectId: opts?.projectId,
+            logicalRequestId: opts?.logicalRequestId,
+          }
+        : undefined;
+      return executeText(workload, promptMessages, onDelta, executionOptions, opts?.onToolResult, opts?.onAsk, opts?.onConsultUx, undefined, opts?.onThinking);
     },
 
     proposeRequirement(messages) {
@@ -596,8 +705,8 @@ export function createPiAiService(executeText: PiTextExecutor): PiAiService {
       return testConnectionWithRouter(executeText, providerId);
     },
 
-    consultUx(requirementContext) {
-      return runUxConsultation(requirementContext, { executeText });
+    consultUx(requirementContext, projectId) {
+      return runUxConsultation(requirementContext, { executeText }, projectId);
     },
 
     async listModels(provider, secret) {
@@ -613,7 +722,10 @@ async function testConnectionWithRouter(
 ): Promise<ProviderTestResult> {
   try {
     // 用一次极短对话探测路线；成功即认为可用。
-    await executeText('task_chat', [{ role: 'user', content: 'ping' }], undefined, { onlyProviderId: providerId });
+    await executeText('task_chat', [{ role: 'user', content: 'ping' }], undefined, {
+      onlyProviderId: providerId,
+      source: 'connection_test',
+    });
     return { ok: true, providerId, status: 200 };
   } catch (err) {
     // §8.2：保存、测试、运行和错误记录都使用统一脱敏函数；错误消息可能含 URL/状态/密钥形态片段。

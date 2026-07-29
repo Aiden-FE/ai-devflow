@@ -3,7 +3,7 @@ import { NewMessagesButton } from './NewMessagesButton.js';
 import { Button } from './ui/button.js';
 import { Input } from './ui/input.js';
 import { useT } from '../i18n/index.js';
-import { isAtBottom } from '../hooks/useStickToBottom.js';
+import { isAtBottom, nextStickToBottomState, useStickToBottom } from '../hooks/useStickToBottom.js';
 import {
   ChevronDown, ChevronRight, CheckCircle2, XCircle, User, Bot, Info, AlertCircle, Loader2,
 } from 'lucide-react';
@@ -64,6 +64,7 @@ export function ChatThread({
   const [paused, setPaused] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const programmaticRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
   // 预加载更多前的滚动高度，用于追加历史后保持视觉位置（scrollTop += 增量）。
   const preLoadHeightRef = useRef(0);
   const loadingMoreRef = useRef(false);
@@ -105,6 +106,7 @@ export function ChatThread({
       stickToBottomRef.current = true;
       programmaticRef.current = true;
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
       requestAnimationFrame(() => { programmaticRef.current = false; });
       return;
     }
@@ -116,14 +118,20 @@ export function ChatThread({
       if (delta > 0) {
         programmaticRef.current = true;
         el.scrollTop += delta;
+        lastScrollTopRef.current = el.scrollTop;
         requestAnimationFrame(() => { programmaticRef.current = false; });
       }
       return;
     }
-    // 粘底：新消息到达且用户在底部 -> 滚到底。
-    if (grew && stickToBottomRef.current) {
+    // 粘底：思考/正文更新同一消息也会改变高度，因此不能只在消息条数增长时滚动。
+    const contentState = nextStickToBottomState(
+      { pinned: stickToBottomRef.current, paused: pausedRef.current },
+      { type: 'content' },
+    );
+    if (contentState.scroll) {
       programmaticRef.current = true;
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
       requestAnimationFrame(() => { programmaticRef.current = false; });
     } else if (grew && pausedRef.current) {
       // 用户上滚暂停期间新消息到达 -> 累计未读。
@@ -138,12 +146,18 @@ export function ChatThread({
     const onScroll = () => {
       if (programmaticRef.current) return;
       const atBottom = isAtBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
-      stickToBottomRef.current = atBottom;
-      if (!atBottom && !pausedRef.current) {
-        pausedRef.current = true;
+      const direction = el.scrollTop < lastScrollTopRef.current ? 'up' : 'down';
+      lastScrollTopRef.current = el.scrollTop;
+      const scrollState = nextStickToBottomState(
+        { pinned: stickToBottomRef.current, paused: pausedRef.current },
+        { type: 'user-scroll', atBottom, direction },
+      );
+      stickToBottomRef.current = scrollState.pinned;
+      if (scrollState.paused && !pausedRef.current) {
+        pausedRef.current = scrollState.paused;
         setPaused(true);
-      } else if (atBottom && pausedRef.current) {
-        pausedRef.current = false;
+      } else if (!scrollState.paused && pausedRef.current) {
+        pausedRef.current = scrollState.paused;
         setPaused(false);
         setUnreadCount(0);
       }
@@ -163,6 +177,7 @@ export function ChatThread({
     if (el) {
       programmaticRef.current = true;
       el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
       requestAnimationFrame(() => { programmaticRef.current = false; });
     }
     pausedRef.current = false;
@@ -270,7 +285,10 @@ function MessageBubble({ role, text, thinking, streaming, thinkingLabel }: { rol
               <span>{t('chat.thinking.title')}</span>
             </button>
             {open && (
-              <div data-testid="thinking-body" className={`mt-1 max-h-48 overflow-auto whitespace-pre-wrap border-l-2 pl-2 text-xs leading-relaxed ${isUser ? 'border-primary-foreground/30 text-primary-foreground/80' : 'border-border text-muted-foreground'}`}>{thinking}</div>
+              <ThinkingBody
+                text={thinking ?? ''}
+                className={`mt-1 max-h-48 overflow-auto whitespace-pre-wrap border-l-2 pl-2 text-xs leading-relaxed ${isUser ? 'border-primary-foreground/30 text-primary-foreground/80' : 'border-border text-muted-foreground'}`}
+              />
             )}
           </div>
         )}
@@ -282,6 +300,11 @@ function MessageBubble({ role, text, thinking, streaming, thinkingLabel }: { rol
       </div>
     </div>
   );
+}
+
+function ThinkingBody({ text, className }: { text: string; className: string }): React.ReactElement {
+  const { containerRef } = useStickToBottom([text], 16);
+  return <div ref={containerRef} data-testid="thinking-body" className={className}>{text}</div>;
 }
 
 /** 工具调用/结果卡片：图标 + 工具名 + 摘要，可展开查看入参与输出。 */

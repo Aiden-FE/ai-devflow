@@ -19,8 +19,20 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle,
 } from '../components/ui/sheet.js';
 import { ScrollArea } from '../components/ui/scroll-area.js';
+import { RejectTaskDialog } from '../components/RejectTaskDialog.js';
 import { Plus, MessageSquarePlus, Archive, AlertCircle, Info, Maximize2, Minimize2, ChevronDown, ChevronRight, FolderOpen, Trash2, Loader2, Zap } from 'lucide-react';
-import type { Project, Iteration, Requirement, Task, TaskStatus, TaskTypeLabel, AiTaskProposal } from '@ai-devflow/core';
+import {
+  boardDropAction,
+  isBoardDraggable,
+  type AiTaskProposal,
+  type BoardDropAction,
+  type Iteration,
+  type Project,
+  type Requirement,
+  type Task,
+  type TaskStatus,
+  type TaskTypeLabel,
+} from '@ai-devflow/core';
 import type { AskTabs, AskAnswer } from '../../electron/api.js';
 
 export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSettings }: {
@@ -138,18 +150,22 @@ export function WorkspacePage({ project, projects, onSwitchProject, onNavigateSe
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {activeIter ? <WorkspaceBody iterationId={activeIter} projectPath={activeProject.path} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
+      {activeIter ? <WorkspaceBody iterationId={activeIter} projectId={activeProject.id} projectPath={activeProject.path} onNavigateSettings={onNavigateSettings} /> : <EmptyState title={t('ws.emptyIteration')} hint={t('ws.emptyIteration.hint')} />}
     </div>
   );
 }
 
-function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { iterationId: string; projectPath?: string; onNavigateSettings?: () => void }): React.ReactElement {
+function WorkspaceBody({ iterationId, projectId, projectPath, onNavigateSettings }: { iterationId: string; projectId: string; projectPath?: string; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const reqsQ = useAsync(() => api.requirements.list(iterationId), [iterationId]);
   const tasksQ = useAsync(() => api.tasks.listByIteration(iterationId), [iterationId]);
   const [selectedTask, setSelectedTask] = useState<string | undefined>(undefined);
   const [createTaskFor, setCreateTaskFor] = useState<string | undefined>(undefined);
   const [dragError, setDragError] = useState<string | undefined>();
+  const [draggedTaskId, setDraggedTaskId] = useState<string | undefined>();
+  const [pendingDropReject, setPendingDropReject] = useState<{ taskId: string; target: 'ready' | 'in_progress' } | undefined>();
+  const [rejectBusy, setRejectBusy] = useState(false);
+  const [rejectError, setRejectError] = useState<string | undefined>();
   const [showArchived, setShowArchived] = useState(false);
   // 侧滑窗放大/还原（item 10）：默认约 640px；放大后覆盖除左侧 220px 菜单栏外的工作台。
   const [zoomed, setZoomed] = useState(false);
@@ -164,13 +180,18 @@ function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { itera
 
   const onDrop = async (status: TaskStatus, taskId: string) => {
     setDragError(undefined);
+    setDraggedTaskId(undefined);
+    const action = dropActionFor(tasksQ.data ?? [], taskId, status);
+    if (!action) return;
     try {
-      if (status === 'in_progress') {
-        // 拖入"开发中"= 启动任务（分派 Agent、创建 worktree、运行流水线）。
-        // 仅 updateStatus 只会改状态而不会真正执行，故走 start；串行依赖由 orchestrator 校验。
+      if (action.kind === 'start') {
         await api.tasks.start(taskId);
+      } else if (action.kind === 'accept') {
+        await api.tasks.accept(taskId);
       } else {
-        await api.tasks.updateStatus(taskId, status);
+        setRejectError(undefined);
+        setPendingDropReject({ taskId, target: action.target });
+        return;
       }
       tasksQ.reload();
     } catch (e) { setDragError((e as Error).message); }
@@ -189,7 +210,7 @@ function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { itera
             <Checkbox checked={showArchived} onCheckedChange={(v) => setShowArchived(v === true)} />
             {showArchived ? t('ws.hideArchived') : t('ws.showArchived')}
           </label>
-          <CreateReqButton iterationId={iterationId} projectPath={projectPath} onCreated={reqsQ.reload} onNavigateSettings={onNavigateSettings} />
+          <CreateReqButton iterationId={iterationId} projectId={projectId} projectPath={projectPath} onCreated={reqsQ.reload} onNavigateSettings={onNavigateSettings} />
         </div>
         <LoadingOrError loading={reqsQ.loading} error={reqsQ.error} data={visibleReqs} reload={reqsQ.reload}>
           {(rs) => (
@@ -218,7 +239,8 @@ function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { itera
               {LANES.map((lane) => (
                 <Lane key={lane.status} status={lane.status} label={t(lane.labelKey)}
                   tasks={tasksByLane[lane.status]} selectedId={selectedTask}
-                  onSelect={setSelectedTask} onDrop={onDrop} />
+                  draggedTask={(tasksQ.data ?? []).find((task) => task.id === draggedTaskId)}
+                  onSelect={setSelectedTask} onDrop={onDrop} onDragState={setDraggedTaskId} />
               ))}
             </div>
           )}
@@ -250,25 +272,64 @@ function WorkspaceBody({ iterationId, projectPath, onNavigateSettings }: { itera
       </Sheet>
 
       {createTaskFor && (
-        <CreateTaskModal requirementId={createTaskFor} projectPath={projectPath} onClose={() => setCreateTaskFor(undefined)}
+        <CreateTaskModal requirementId={createTaskFor} projectId={projectId} projectPath={projectPath} onClose={() => setCreateTaskFor(undefined)}
           onCreated={() => { setCreateTaskFor(undefined); tasksQ.reload(); }} />
+      )}
+
+      {pendingDropReject && (
+        <RejectTaskDialog
+          initialTarget={pendingDropReject.target}
+          lockedTarget={pendingDropReject.target}
+          busy={rejectBusy}
+          error={rejectError}
+          onClose={() => { setPendingDropReject(undefined); setRejectError(undefined); }}
+          onSubmit={async (reason, target) => {
+            setRejectBusy(true);
+            setRejectError(undefined);
+            try {
+              await api.tasks.reject({ taskId: pendingDropReject.taskId, reason, target });
+              setPendingDropReject(undefined);
+              tasksQ.reload();
+            } catch (error) {
+              setRejectError((error as Error).message);
+            } finally {
+              setRejectBusy(false);
+            }
+          }}
+        />
       )}
     </div>
   );
 }
 
-function Lane({ status, label, tasks, selectedId, onSelect, onDrop }: {
+export function dropActionFor(tasks: Task[], taskId: string, target: TaskStatus): BoardDropAction | undefined {
+  const task = tasks.find((candidate) => candidate.id === taskId);
+  return task ? boardDropAction(task.status, target) : undefined;
+}
+
+function Lane({ status, label, tasks, selectedId, draggedTask, onSelect, onDrop, onDragState }: {
   status: TaskStatus; label: string; tasks: Task[]; selectedId?: string;
-  onSelect: (id: string) => void; onDrop: (status: TaskStatus, taskId: string) => void;
+  draggedTask?: Task;
+  onSelect: (id: string) => void;
+  onDrop: (status: TaskStatus, taskId: string) => void;
+  onDragState: (id?: string) => void;
 }): React.ReactElement {
   const [over, setOver] = useState(false);
+  const canDrop = !!draggedTask && boardDropAction(draggedTask.status, status) !== undefined;
+  useEffect(() => { if (!canDrop) setOver(false); }, [canDrop]);
   return (
     <div
       data-lane={status}
       className={`min-h-[120px] rounded-md border p-2 ${over ? 'border-primary bg-secondary' : 'border-border bg-secondary/30'}`}
-      onDragOver={(e) => { e.preventDefault(); setOver(true); }}
+      onDragOver={(e) => { if (canDrop) { e.preventDefault(); setOver(true); } }}
       onDragLeave={() => setOver(false)}
-      onDrop={(e) => { e.preventDefault(); setOver(false); const id = e.dataTransfer.getData('text/plain'); if (id) onDrop(status, id); }}
+      onDrop={(e) => {
+        const id = e.dataTransfer.getData('text/plain');
+        if (!canDrop || !draggedTask || id !== draggedTask.id) return;
+        e.preventDefault();
+        setOver(false);
+        onDrop(status, id);
+      }}
     >
       <h3 className="mb-2 flex items-center gap-1.5 text-xs font-medium" style={{ color: `var(--color-lane-${status})` }}>
         <span className="h-2 w-2 rounded-full" style={{ background: 'currentColor' }} />
@@ -276,23 +337,34 @@ function Lane({ status, label, tasks, selectedId, onSelect, onDrop }: {
       </h3>
       <div className="flex flex-col gap-1.5">
         {tasks.map((task) => (
-          <TaskCard key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} />
+          <TaskCard key={task.id} task={task} selected={selectedId === task.id} onSelect={onSelect} onDragState={onDragState} />
         ))}
       </div>
     </div>
   );
 }
 
-function TaskCard({ task, selected, onSelect }: { task: Task; selected: boolean; onSelect: (id: string) => void }): React.ReactElement {
+export function TaskCard({ task, selected, onSelect, onDragState }: {
+  task: Task;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  onDragState: (id?: string) => void;
+}): React.ReactElement {
   const t = useT();
   const paused = task.status === 'awaiting_input';
+  const draggable = isBoardDraggable(task.status);
   return (
     <div
       data-task-card={task.id}
-      draggable
-      onDragStart={(e) => e.dataTransfer.setData('text/plain', task.id)}
+      draggable={draggable}
+      onDragStart={(e) => {
+        if (!draggable) return;
+        e.dataTransfer.setData('text/plain', task.id);
+        onDragState(task.id);
+      }}
+      onDragEnd={() => onDragState(undefined)}
       onClick={() => onSelect(task.id)}
-      className={`cursor-grab rounded-md border bg-secondary p-2 text-xs transition-colors hover:border-primary/60 ${selected ? 'border-primary' : 'border-border'} ${paused ? 'ring-1 ring-[var(--color-lane-awaiting)]' : ''}`}
+      className={`${draggable ? 'cursor-grab' : 'cursor-pointer'} rounded-md border bg-secondary p-2 text-xs transition-colors hover:border-primary/60 ${selected ? 'border-primary' : 'border-border'} ${paused ? 'ring-1 ring-[var(--color-lane-awaiting)]' : ''}`}
     >
       <div className="break-words font-medium">{task.title}</div>
       <div className="mt-1 flex items-center gap-1.5">
@@ -417,7 +489,7 @@ function CreateIterationButton({ projectId, onCreated }: { projectId: string; on
   );
 }
 
-function CreateReqButton({ iterationId, projectPath, onCreated, onNavigateSettings }: { iterationId: string; projectPath?: string; onCreated: () => void; onNavigateSettings?: () => void }): React.ReactElement {
+function CreateReqButton({ iterationId, projectId, projectPath, onCreated, onNavigateSettings }: { iterationId: string; projectId: string; projectPath?: string; onCreated: () => void; onNavigateSettings?: () => void }): React.ReactElement {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
@@ -464,6 +536,7 @@ function CreateReqButton({ iterationId, projectPath, onCreated, onNavigateSettin
               <div className="flex h-[42vh] shrink-0 flex-col">
                 <AiRefineRequirement
                   projectPath={projectPath}
+                  projectId={projectId}
                   onApplied={(p) => {
                     setTitle(p.title); setDesc(p.description); setAcceptance(p.acceptance); setPriority(p.priority);
                     setAppliedHint(true);
@@ -608,7 +681,7 @@ export function AskCard({ state, onSubmit }: { state: AskCardState; onSubmit: (a
   );
 }
 
-function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string; onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
+function AiRefineRequirement({ projectId, projectPath, onApplied }: { projectId: string; projectPath?: string; onApplied: (p: { title: string; description: string; acceptance: string; priority: 'low' | 'medium' | 'high' }) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -646,6 +719,7 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
       }, {
         mode: 'requirement',
         projectPath,
+        projectId,
         // 思考链增量（Issue 5）：实时展示思考细节，思考结束后折叠。
         onThinking: (delta) => {
           segRef.current.thinking += delta;
@@ -709,7 +783,7 @@ function AiRefineRequirement({ projectPath, onApplied }: { projectPath?: string;
   );
 }
 
-export function CreateTaskModal({ requirementId, projectPath, onClose, onCreated }: { requirementId: string; projectPath?: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
+export function CreateTaskModal({ requirementId, projectId, projectPath, onClose, onCreated }: { requirementId: string; projectId: string; projectPath?: string; onClose: () => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [mode, setMode] = useState<'manual' | 'ai'>('ai');
   // 加载当前需求与已有兄弟任务：AI 生成带入需求上下文；手动创建可选择前置依赖。
@@ -735,7 +809,7 @@ export function CreateTaskModal({ requirementId, projectPath, onClose, onCreated
           </div>
           {mode === 'manual'
             ? <ManualCreateTask requirementId={requirementId} siblings={siblings} onCancel={requestClose} onDirtyChange={setDirty} onCreated={onCreated} />
-            : <AiCreateTask requirementId={requirementId} requirement={requirement} projectPath={projectPath} onDirtyChange={setDirty} onCreated={onCreated} />}
+            : <AiCreateTask requirementId={requirementId} requirement={requirement} projectId={projectId} projectPath={projectPath} onDirtyChange={setDirty} onCreated={onCreated} />}
         </DialogContent>
       </Dialog>
       {/* 关闭二次确认（Issue 4）：已编辑/已生成内容时提示丢失风险 */}
@@ -814,7 +888,16 @@ function ManualCreateTask({ requirementId, siblings, onCancel, onDirtyChange, on
   );
 }
 
-export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyChange, onCreated }: { requirementId: string; requirement?: Requirement; projectPath?: string; onDirtyChange?: (dirty: boolean) => void; onCreated: (taskId: string) => void }): React.ReactElement {
+export const normalizeAssistantStreamText = (text: string): string => text.trimStart();
+
+export async function cancelActiveAiSession(ref: { current: string | undefined }): Promise<void> {
+  const sessionId = ref.current;
+  if (!sessionId) return;
+  ref.current = undefined;
+  await api.ai.cancel(sessionId);
+}
+
+export function AiCreateTask({ requirementId, requirement, projectId, projectPath, onDirtyChange, onCreated }: { requirementId: string; requirement?: Requirement; projectId: string; projectPath?: string; onDirtyChange?: (dirty: boolean) => void; onCreated: (taskId: string) => void }): React.ReactElement {
   const t = useT();
   const [messages, setMessages] = useState<ChatPanelMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -823,6 +906,7 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
   const [creating, setCreating] = useState(false);
   const [askCards, setAskCards] = useState<Record<string, AskCardState>>({});
   const sessionRef = useRef<string | undefined>(undefined);
+  const activeSessionRef = useRef<string | undefined>(undefined);
   // 当前对话段（两次问答之间）的累计正文/思考：问答卡片插入后重置，
   // 使答复后的增量写入新助手气泡，避免与卡片前的正文重复。
   const segRef = useRef({ text: '', thinking: '' });
@@ -832,6 +916,7 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
     if (!requirementId) return;
     api.tasks.listByRequirement(requirementId).then(setExistingTasks).catch(() => {});
   }, [requirementId]);
+  useEffect(() => () => { void cancelActiveAiSession(activeSessionRef); }, []);
 
   // 脏状态上报（Issue 4）：已有对话或草稿时关闭需二次确认。
   const dirty = messages.length > 0 || (proposals?.length ?? 0) > 0;
@@ -866,6 +951,7 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
   // 方案确定后调用 ai_devflow_propose_task 工具产出任务草稿（经 onTaskProposal 回传）。
   const send = async (text: string) => {
     if (streaming) return;
+    let requestSessionId: string | undefined;
     const userMsg: ChatPanelMessage = { id: `u-${Date.now()}`, role: 'user', content: text };
     const next = [...messages, userMsg];
     segRef.current = { text: '', thinking: '' };
@@ -874,15 +960,20 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
     try {
       await api.ai.chat(next.map((m) => ({ role: m.role, content: m.content })), (delta) => {
         segRef.current.text += delta;
-        syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
+        syncAssistant({ content: normalizeAssistantStreamText(segRef.current.text), thinking: segRef.current.thinking });
       }, {
         mode: 'task_proposal',
         context,
         projectPath,
+        projectId,
+        onSession: (sessionId) => {
+          requestSessionId = sessionId;
+          activeSessionRef.current = sessionId;
+        },
         // 思考链增量（Issue 5）：实时展示思考细节，思考结束后折叠。
         onThinking: (delta) => {
           segRef.current.thinking += delta;
-          syncAssistant({ content: segRef.current.text, thinking: segRef.current.thinking });
+          syncAssistant({ content: normalizeAssistantStreamText(segRef.current.text), thinking: segRef.current.thinking });
         },
         onTaskProposal: (tasks) => setProposals(tasks.map((x) => ({ draftId: x.draftId, title: x.title, description: x.description, typeLabel: x.typeLabel, dependsOn: x.dependsOn })) as AiTaskProposal[]),
         onQuestion: (sessionId, toolUseId, tabs) => {
@@ -896,6 +987,7 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
       // 清理既无正文又无思考的空助手气泡（如仅产出草稿未输出文本的轮次）。
       setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
     } catch (e) {
+      if ((e as Error).name === 'AbortError') return;
       setError((e as Error).message);
       setMessages((prev) => prev.filter((m) => !('kind' in m) && m.role === 'assistant' ? !!(m.content || m.thinking) : true));
       setMessages((prev) => prev.map((m, i) =>
@@ -903,7 +995,10 @@ export function AiCreateTask({ requirementId, requirement, projectPath, onDirtyC
           ? { ...m, content: `${m.content}\n\n${t('task.ai.interrupted')}` }
           : m,
       ));
-    } finally { setStreaming(false); }
+    } finally {
+      if (activeSessionRef.current === requestSessionId) activeSessionRef.current = undefined;
+      setStreaming(false);
+    }
   };
 
   // 一键生成（Issue 3）：需求已足够清晰时无需补充描述，直接基于需求上下文生成任务草稿。

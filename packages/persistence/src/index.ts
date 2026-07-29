@@ -6,6 +6,7 @@ export { PI_ONLY_MIGRATION_V9, applyPiOnlyMigrationV9, backupBeforeMigration, as
 export { tx } from './tx.js';
 export { createProviderHealthRepo, type ProviderHealthRepo } from './provider-health.js';
 export { createExecutionAttemptsRepo, type ExecutionAttemptsRepo, type ExecutionAttemptRecord } from './execution-attempts.js';
+export { createProviderUsageRepo, type ProviderUsageRepo } from './provider-usage.js';
 export {
   createKnowledgeRunsRepo,
   type KnowledgeRunsRepo,

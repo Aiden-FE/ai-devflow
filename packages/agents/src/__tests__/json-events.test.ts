@@ -92,7 +92,7 @@ describe('createPiEventTranslator', () => {
     expect(() => translator.finish()).not.toThrow();
   });
 
-  it('rejects a malformed payload (dropped, not stored) without failing the base fields', () => {
+  it('preserves the field diagnostic for a malformed payload', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     translator.push(JSON.stringify({
       type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', args: {},
@@ -103,7 +103,11 @@ describe('createPiEventTranslator', () => {
         details: {
           aiDevflowResult: {
             summary: 'done', verification: ['ok'], changedFiles: [], unresolved: [],
-            payload: { kind: 'task_review', review: { pass: true } }, // missing knowledgeAssessment
+            payload: {
+              kind: 'task_review',
+              review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+              knowledgeAssessment: { verdict: 'none', reason: 'x', evidence: [] },
+            },
             knowledgeReads: [{ knowledgeId: 'x', path: 'p', reason: 'r', chars: 1 }],
           },
         },
@@ -112,6 +116,7 @@ describe('createPiEventTranslator', () => {
     translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
     const result = translator.structuredResult()!;
     expect(result.payload).toBeUndefined();
+    expect(result.payloadError).toBe('payload.knowledgeAssessment.evidence 必须至少包含一项');
     expect(result.knowledgeReads).toHaveLength(1);
     expect(() => translator.finish()).not.toThrow();
   });

@@ -258,18 +258,6 @@ export function isKnowledgeAssessment(value: unknown): value is KnowledgeAssessm
   return false;
 }
 
-function isReviewVerdict(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.pass === 'boolean' &&
-    typeof v.summary === 'string' &&
-    (v.summary as string).trim().length > 0 &&
-    (v.feedback === undefined || typeof v.feedback === 'string') &&
-    (v.checks === undefined || isStringArray(v.checks))
-  );
-}
-
 function isKnowledgeFinding(value: unknown): value is KnowledgeFinding {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -298,37 +286,94 @@ function isCandidateKnowledge(value: unknown): boolean {
   );
 }
 
-/** 校验跨边界的领域载荷：字段必须与判别值匹配。 */
-export function isKnowledgeAgentPayload(value: unknown): value is KnowledgeAgentPayload {
-  if (typeof value !== 'object' || value === null) return false;
+export type KnowledgeAgentPayloadValidation =
+  | { ok: true; value: KnowledgeAgentPayload }
+  | { ok: false; error: string };
+
+function validateAssessment(value: unknown, path: string): string | undefined {
+  if (typeof value !== 'object' || value === null) return `${path} 必须是对象`;
+  const assessment = value as Record<string, unknown>;
+  if (assessment.verdict === 'none') {
+    if (typeof assessment.reason !== 'string' || assessment.reason.trim().length === 0) {
+      return `${path}.reason 必须是非空字符串`;
+    }
+    if (!Array.isArray(assessment.evidence)) return `${path}.evidence 必须是数组`;
+    if (assessment.evidence.length === 0) return `${path}.evidence 必须至少包含一项`;
+    if (!assessment.evidence.every((item) => typeof item === 'string' && item.trim().length > 0)) {
+      return `${path}.evidence 每一项必须是非空字符串`;
+    }
+    return undefined;
+  }
+  if (assessment.verdict === 'valuable') {
+    if (!Array.isArray(assessment.candidates)) return `${path}.candidates 必须是数组`;
+    if (assessment.candidates.length === 0) return `${path}.candidates 必须至少包含一项`;
+    for (let index = 0; index < assessment.candidates.length; index += 1) {
+      const candidate = assessment.candidates[index];
+      const candidatePath = `${path}.candidates[${index}]`;
+      if (typeof candidate !== 'object' || candidate === null) return `${candidatePath} 必须是对象`;
+      const fields = candidate as Record<string, unknown>;
+      if (typeof fields.type !== 'string' || !KNOWLEDGE_TYPE_SET.has(fields.type)) return `${candidatePath}.type 无效`;
+      if (typeof fields.summary !== 'string' || fields.summary.trim().length === 0) return `${candidatePath}.summary 必须是非空字符串`;
+      if (!Array.isArray(fields.evidence) || fields.evidence.length === 0) return `${candidatePath}.evidence 必须至少包含一项`;
+      if (!fields.evidence.every((item) => typeof item === 'string' && item.trim().length > 0)) return `${candidatePath}.evidence 每一项必须是非空字符串`;
+      if (fields.suggestedTarget !== undefined && typeof fields.suggestedTarget !== 'string') return `${candidatePath}.suggestedTarget 必须是字符串`;
+      if (typeof fields.reuseScenario !== 'string' || fields.reuseScenario.trim().length === 0) return `${candidatePath}.reuseScenario 必须是非空字符串`;
+    }
+    return undefined;
+  }
+  return `${path}.verdict 必须是 none 或 valuable`;
+}
+
+/** 校验跨边界的领域载荷并保留确定性的字段诊断。 */
+export function validateKnowledgeAgentPayload(value: unknown): KnowledgeAgentPayloadValidation {
+  if (typeof value !== 'object' || value === null) return { ok: false, error: 'payload 必须是对象' };
   const v = value as Record<string, unknown>;
   switch (v.kind) {
-    case 'task_review':
-      return (
-        isReviewVerdict(v.review) &&
-        isKnowledgeAssessment(v.knowledgeAssessment)
-      );
+    case 'task_review': {
+      if (typeof v.review !== 'object' || v.review === null) return { ok: false, error: 'payload.review 必须是对象' };
+      const review = v.review as Record<string, unknown>;
+      if (typeof review.pass !== 'boolean') return { ok: false, error: 'payload.review.pass 必须是布尔值' };
+      if (typeof review.summary !== 'string' || review.summary.trim().length === 0) return { ok: false, error: 'payload.review.summary 必须是非空字符串' };
+      if (review.feedback !== undefined && typeof review.feedback !== 'string') return { ok: false, error: 'payload.review.feedback 必须是字符串' };
+      if (review.checks !== undefined && !isStringArray(review.checks)) return { ok: false, error: 'payload.review.checks 必须是字符串数组' };
+      const assessmentError = validateAssessment(v.knowledgeAssessment, 'payload.knowledgeAssessment');
+      if (assessmentError) return { ok: false, error: assessmentError };
+      return { ok: true, value: value as KnowledgeAgentPayload };
+    }
     case 'knowledge_initialization':
-      return isStringArray(v.changedPaths) && isStringArray(v.knowledgeIds);
+      if (!isStringArray(v.changedPaths)) return { ok: false, error: 'payload.changedPaths 必须是字符串数组' };
+      if (!isStringArray(v.knowledgeIds)) return { ok: false, error: 'payload.knowledgeIds 必须是字符串数组' };
+      return { ok: true, value: value as KnowledgeAgentPayload };
     case 'knowledge_audit':
-      return Array.isArray(v.findings) && v.findings.every((f) => isKnowledgeFinding(f));
+      if (!Array.isArray(v.findings) || !v.findings.every((finding) => isKnowledgeFinding(finding))) {
+        return { ok: false, error: 'payload.findings 必须是有效的知识问题数组' };
+      }
+      return { ok: true, value: value as KnowledgeAgentPayload };
     case 'knowledge_repair':
-      return (
-        isStringArray(v.changedPaths) &&
-        isStringArray(v.knowledgeIds) &&
-        isStringArray(v.resolvedFindingIds)
-      );
-    case 'knowledge_deposition':
-      return (
-        isStringArray(v.changedPaths) &&
-        isStringArray(v.knowledgeIds) &&
-        Array.isArray(v.candidateKnowledge) &&
-        v.candidateKnowledge.every((mapping) => isCandidateKnowledge(mapping)) &&
-        isKnowledgeAssessment(v.assessment)
-      );
+      if (!isStringArray(v.changedPaths)) return { ok: false, error: 'payload.changedPaths 必须是字符串数组' };
+      if (!isStringArray(v.knowledgeIds)) return { ok: false, error: 'payload.knowledgeIds 必须是字符串数组' };
+      if (!isStringArray(v.resolvedFindingIds)) return { ok: false, error: 'payload.resolvedFindingIds 必须是字符串数组' };
+      return { ok: true, value: value as KnowledgeAgentPayload };
+    case 'knowledge_deposition': {
+      if (!isStringArray(v.changedPaths)) return { ok: false, error: 'payload.changedPaths 必须是字符串数组' };
+      if (!isStringArray(v.knowledgeIds)) return { ok: false, error: 'payload.knowledgeIds 必须是字符串数组' };
+      if (!Array.isArray(v.candidateKnowledge) || !v.candidateKnowledge.every((mapping) => isCandidateKnowledge(mapping))) {
+        return { ok: false, error: 'payload.candidateKnowledge 必须是有效的候选知识映射数组' };
+      }
+      const assessmentError = validateAssessment(v.assessment, 'payload.assessment');
+      if (assessmentError) return { ok: false, error: assessmentError };
+      return { ok: true, value: value as KnowledgeAgentPayload };
+    }
     case 'iteration_changelog':
-      return isStringArray(v.changedPaths) && isStringArray(v.coveredTaskIds);
+      if (!isStringArray(v.changedPaths)) return { ok: false, error: 'payload.changedPaths 必须是字符串数组' };
+      if (!isStringArray(v.coveredTaskIds)) return { ok: false, error: 'payload.coveredTaskIds 必须是字符串数组' };
+      return { ok: true, value: value as KnowledgeAgentPayload };
     default:
-      return false;
+      return { ok: false, error: 'payload.kind 无效' };
   }
+}
+
+/** 向后兼容的布尔类型守卫。 */
+export function isKnowledgeAgentPayload(value: unknown): value is KnowledgeAgentPayload {
+  return validateKnowledgeAgentPayload(value).ok;
 }

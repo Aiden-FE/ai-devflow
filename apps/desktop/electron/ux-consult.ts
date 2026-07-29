@@ -31,6 +31,7 @@ export interface UxConsultDeps {
 export async function runUxConsultation(
   requirementContext: string,
   deps: UxConsultDeps,
+  projectId?: string,
 ): Promise<string> {
   const messages: AiChatMessage[] = [
     {
@@ -44,5 +45,14 @@ export async function runUxConsultation(
     },
   ];
   // 用 'task_chat' workload（无步骤 agent、无工具），以 UX_CONSULT_SYSTEM 覆盖系统提示。
-  return deps.executeText('task_chat', messages, undefined, undefined, undefined, undefined, undefined, UX_CONSULT_SYSTEM);
+  return deps.executeText(
+    'task_chat',
+    messages,
+    undefined,
+    { source: 'ux_consultation', projectId },
+    undefined,
+    undefined,
+    undefined,
+    UX_CONSULT_SYSTEM,
+  );
 }

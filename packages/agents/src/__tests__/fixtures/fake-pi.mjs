@@ -43,8 +43,21 @@ function succeed(summary = 'done') {
     if (!summary.includes('REVIEW_VERDICT:')) summary += '\nREVIEW_VERDICT: PASS';
   }
   const payload = payloadFor(resultKind, summary);
+  emit({
+    type: 'message_end',
+    message: {
+      id: `${attemptId}-assistant`, role: 'assistant',
+      usage: { input: 100, output: 40, cacheRead: 20, cacheWrite: 5, totalTokens: 165 },
+    },
+  });
   reportResult(summary, payload ? { payload } : {});
-  emit({ type: 'agent_end', messages: [] });
+  emit({
+    type: 'agent_end',
+    messages: [{
+      id: `${attemptId}-assistant`, role: 'assistant',
+      usage: { input: 100, output: 40, cacheRead: 20, cacheWrite: 5, totalTokens: 165 },
+    }],
+  });
   process.exit(0);
 }
 

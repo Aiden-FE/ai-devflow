@@ -4,8 +4,10 @@
 // 未知事件按向前兼容原则记为诊断，不崩溃；缺少必需事件或 schema 非法属 protocol failure。
 // 完成条件：Pi 正常结束（agent_end）∧ 收到合法 ai_devflow_report_result。出口前 redact 活跃路线密钥。
 import type { AgentEvent, KnowledgeAgentPayload, KnowledgeReadEvidence } from '@ai-devflow/core';
-import { isKnowledgeAgentPayload, now, redactText } from '@ai-devflow/core';
+import { now, redactText, validateKnowledgeAgentPayload } from '@ai-devflow/core';
 import type { AttemptJournal } from './attempt-journal.js';
+import { PiTokenUsageAccumulator } from './token-usage.js';
+import type { TokenUsage } from '@ai-devflow/core';
 
 export interface PiEventTranslatorOptions {
   executionId: string;
@@ -24,6 +26,8 @@ export interface StructuredResult {
   unresolved: string[];
   /** 跨边界的领域载荷（非 task_execution 结果必须携带对应判别值）。 */
   payload?: KnowledgeAgentPayload;
+  /** 无效领域载荷的字段级诊断；与 payload 互斥。 */
+  payloadError?: string;
   /** 本次运行实际读取的知识证据（仅 ID/路径/原因/字符数，不含正文）。 */
   knowledgeReads: KnowledgeReadEvidence[];
 }
@@ -45,6 +49,8 @@ export interface PiEventTranslator {
   hadInteraction(): boolean;
   /** 向前兼容诊断（设计 §11）：未知事件与 auto_retry_*（配置违例）的有上限脱敏缓冲。 */
   diagnostics(): readonly string[];
+  /** 当前尝试中去重后的 Token 使用量；未报告的字段保持 null。 */
+  usage(): TokenUsage;
 }
 
 const FILE_TOOLS = new Set(['write', 'edit']);
@@ -80,21 +86,23 @@ function extractStructuredResult(result: unknown): StructuredResult | undefined 
 }
 
 function normalize(r: StructuredResult): StructuredResult {
+  const normalizedPayload = normalizePayload(r.payload);
   return {
     summary: r.summary,
     verification: Array.isArray(r.verification) ? r.verification : [],
     changedFiles: Array.isArray(r.changedFiles) ? r.changedFiles : [],
     unresolved: Array.isArray(r.unresolved) ? r.unresolved : [],
-    payload: normalizePayload(r.payload),
+    ...normalizedPayload,
     knowledgeReads: Array.isArray(r.knowledgeReads)
       ? r.knowledgeReads.filter(isReadEvidence)
       : [],
   };
 }
 
-function normalizePayload(payload: unknown): KnowledgeAgentPayload | undefined {
-  if (payload === undefined || payload === null) return undefined;
-  return isKnowledgeAgentPayload(payload) ? payload : undefined;
+function normalizePayload(payload: unknown): Pick<StructuredResult, 'payload' | 'payloadError'> {
+  if (payload === undefined || payload === null) return {};
+  const validation = validateKnowledgeAgentPayload(payload);
+  return validation.ok ? { payload: validation.value } : { payloadError: validation.error };
 }
 
 function isReadEvidence(value: unknown): value is KnowledgeReadEvidence {
@@ -157,6 +165,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
   let providerError: { status: number; message: string } | undefined;
   let interactionOccurred = false;
   let protocolFailure: string | undefined;
+  const usage = new PiTokenUsageAccumulator();
 
   const t = () => now();
 
@@ -170,6 +179,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
         protocolFailure ??= 'Pi stdout 包含非法 JSON';
         return events;
       }
+      usage.add(ev);
       const type = ev.type as string | undefined;
       switch (type) {
         case 'session':
@@ -209,6 +219,7 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
                 changedFiles: structured.changedFiles.map(redact),
                 unresolved: structured.unresolved.map(redact),
                 payload: structured.payload,
+                payloadError: structured.payloadError ? redact(structured.payloadError) : undefined,
                 knowledgeReads: structured.knowledgeReads.map((r) => ({
                   knowledgeId: r.knowledgeId,
                   path: r.path,
@@ -325,6 +336,9 @@ export function createPiEventTranslator(opts: PiEventTranslatorOptions): PiEvent
     },
     diagnostics(): readonly string[] {
       return diagnostics;
+    },
+    usage(): TokenUsage {
+      return usage.snapshot();
     },
   };
 }

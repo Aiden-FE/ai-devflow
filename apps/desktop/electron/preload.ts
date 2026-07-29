@@ -6,6 +6,11 @@ import type { AiChatMessage, ThemeMode } from '@ai-devflow/core';
 const invoke = (ns: string, method: string) => (...args: unknown[]) =>
   ipcRenderer.invoke(`ai-devflow:${ns}:${method}`, ...args);
 
+const activeAiSessions = new Map<string, {
+  listener: (_e: unknown, ev: AiStreamEvent) => void;
+  reject: (reason?: unknown) => void;
+}>();
+
 // 首绘前同步设置 <html> class 与 color-scheme，避免亮色启动闪黑。
 // 仅在主进程已注册同步处理器时生效；失败则忽略（不影响渲染）。
 try {
@@ -18,6 +23,9 @@ try {
 } catch { /* 主进程未就绪时忽略 */ }
 
 const api: DesktopApi = {
+  analytics: {
+    query: (filters) => invoke('analytics', 'query')(filters),
+  },
   projects: {
     list: () => invoke('projects', 'list')(),
     create: (input) => invoke('projects', 'create')(input),
@@ -104,6 +112,10 @@ const api: DesktopApi = {
     },
     getProjectSettings: (projectId) => invoke('settings', 'getProjectSettings')(projectId),
     updateProjectSettings: (projectId, settings) => invoke('settings', 'updateProjectSettings')(projectId, settings),
+    getRetention: () => invoke('settings', 'getRetention')(),
+    setRetention: (policy) => invoke('settings', 'setRetention')(policy),
+    runRetention: () => invoke('settings', 'runRetention')(),
+    compactDatabase: (confirmed) => invoke('settings', 'compactDatabase')(confirmed),
   },
   providers: {
     list: () => invoke('providers', 'list')(),
@@ -131,7 +143,7 @@ const api: DesktopApi = {
     chat(
       messages: AiChatMessage[],
       onChunk: (delta: string) => void,
-      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void; onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void; onThinking?: (text: string) => void },
+      opts?: { mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; projectId?: string; onRequirementProposal?: (draft: AiRequirementProposalDraft) => void; onTaskProposal?: (tasks: AiTaskProposalDraft[]) => void; onQuestion?: (sessionId: string, toolUseId: string, tabs: AskTabs) => void; onSession?: (sessionId: string) => void; onThinking?: (text: string) => void },
     ): Promise<string> {
       return new Promise((resolve, reject) => {
         const sessionId = globalThis.crypto.randomUUID();
@@ -149,15 +161,47 @@ const api: DesktopApi = {
             opts?.onTaskProposal?.(ev.tasks);
           } else if (ev.type === 'done') {
             ipcRenderer.removeListener('ai-devflow:ai-stream', listener);
+            activeAiSessions.delete(sessionId);
             resolve(ev.fullText);
           } else if (ev.type === 'error') {
             ipcRenderer.removeListener('ai-devflow:ai-stream', listener);
+            activeAiSessions.delete(sessionId);
             reject(new Error(ev.error));
           }
         };
         ipcRenderer.on('ai-devflow:ai-stream', listener);
-        ipcRenderer.send('ai-devflow:ai:chat', { sessionId, messages, mode: opts?.mode, context: opts?.context, projectPath: opts?.projectPath });
+        activeAiSessions.set(sessionId, { listener, reject });
+        try {
+          opts?.onSession?.(sessionId);
+        } catch (error) {
+          ipcRenderer.removeListener('ai-devflow:ai-stream', listener);
+          activeAiSessions.delete(sessionId);
+          reject(error);
+          return;
+        }
+        // onSession may synchronously cancel this session before the main process starts it.
+        if (!activeAiSessions.has(sessionId)) return;
+        ipcRenderer.send('ai-devflow:ai:chat', {
+          sessionId,
+          messages,
+          mode: opts?.mode,
+          context: opts?.context,
+          projectPath: opts?.projectPath,
+          projectId: opts?.projectId,
+        });
       });
+    },
+    cancel: (sessionId: string) => {
+      const active = activeAiSessions.get(sessionId);
+      if (active) {
+        ipcRenderer.removeListener('ai-devflow:ai-stream', active.listener);
+        activeAiSessions.delete(sessionId);
+        const error = new Error('AI chat canceled');
+        error.name = 'AbortError';
+        active.reject(error);
+      }
+      ipcRenderer.send('ai-devflow:ai:cancel', { sessionId });
+      return Promise.resolve();
     },
     proposeRequirement: (messages) => invoke('ai', 'proposeRequirement')(messages),
     answer: (sessionId: string, toolUseId: string, answers: AskAnswer) => { ipcRenderer.send('ai-devflow:ai:answer', { sessionId, toolUseId, answers }); return Promise.resolve(); },

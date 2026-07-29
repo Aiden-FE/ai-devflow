@@ -39,10 +39,11 @@ import type { Services } from '../services.js';
 import type { Updater } from '../updater.js';
 import type { StreamEvent, AiStreamEvent } from '../api.js';
 import type { DatabaseSync } from '@ai-devflow/persistence';
-import { now } from '@ai-devflow/core';
+import { now, VISIBLE_LANES, type TaskStatus } from '@ai-devflow/core';
 import { ProviderStore } from '../provider-store.js';
 import { createPiAiService } from '../pi-ai.js';
 import type { PiTextExecutor } from '../pi-ai.js';
+import { RetentionService } from '../retention.js';
 
 // no-op 更新器（dev 下 createUpdater 也返回 no-op，这里显式构造供测试装配）。
 const noopUpdater: Updater = {
@@ -148,6 +149,7 @@ beforeEach(() => {
     encryptSecret,
     decryptSecret,
     updater: noopUpdater,
+    retention: new RetentionService(db, repos, { now: () => 1_000_000 }),
   };
   registerIpc(services, (e) => sent.push(e), (e) => sentAi.push(e));
 });
@@ -211,16 +213,26 @@ describe('typed IPC wiring', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('tasks.updateStatus enforces gate (rejects backlog->archived)', async () => {
+  it('tasks.updateStatus cannot bypass dedicated workflow actions', async () => {
     repos.projects.insert({ id: 'p', name: 'P', path: '/x', defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
     repos.iterations.insert({ id: 'i', projectId: 'p', name: 'I', version: 'v1', status: 'active', createdAt: 1 });
     repos.requirements.insert({ id: 'r', iterationId: 'i', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
-    repos.tasks.insert({
-      id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'backlog',
-      role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0,
-    });
-    // 归档必须经 tasks.accept，updateStatus 直接拒绝（看板拖拽不得绕过）。
-    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/归档|门禁|非法/);
+    const statuses: TaskStatus[] = ['ready', 'in_review', 'testing', 'archived'];
+    for (const status of statuses) {
+      repos.tasks.insert({
+        id: `t-${status}`, requirementId: 'r', iterationId: 'i', projectId: 'p', title: status, description: '', status,
+        role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0,
+      });
+    }
+
+    for (const status of statuses) {
+      for (const target of VISIBLE_LANES) {
+        await expect(call('tasks', 'updateStatus', `t-${status}`, target)).rejects.toThrow(
+          '任务状态只能通过启动、验收或驳回操作变更',
+        );
+        expect(repos.tasks.get(`t-${status}`)?.status).toBe(status);
+      }
+    }
   });
 
   it('end-to-end: create -> start -> in_review via IPC', async () => {
@@ -530,13 +542,51 @@ describe('typed IPC wiring', () => {
       priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
       defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
     } as never);
-    sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement', projectPath: workdir });
+    sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement', projectId: 'chat-project', projectPath: workdir });
     // fakeExecutor 返回 'hello'；等微任务让 async 处理器完成
     await new Promise((r) => setTimeout(r, 10));
     const types = sentAi.map((e) => e.type);
     expect(types).toContain('done');
     const done = sentAi.find((e) => e.type === 'done') as { fullText: string } | undefined;
     expect(done?.fullText).toBe('hello');
+  });
+
+  it('ai.cancel aborts only the active chat and suppresses later stream events', async () => {
+    repos.projects.insert({ id: 'cancel-project', name: 'P', path: workdir, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    await call('providers', 'save', {
+      id: 'p1', kind: 'openai', displayName: 'P1', enabled: true,
+      priority: 0, authType: 'api_key', apiKey: 'sk-test', revision: 1,
+      defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
+    } as never);
+    let capturedSignal: AbortSignal | undefined;
+    let capturedAsk: Parameters<PiTextExecutor>[5];
+    let resolveChat = (_value: string) => {};
+    const deferredExecutor: PiTextExecutor = async (_workload, _messages, _onDelta, options, _onToolResult, onAsk) => {
+      capturedSignal = options?.signal;
+      capturedAsk = onAsk;
+      return new Promise<string>((resolve) => { resolveChat = resolve; });
+    };
+    services.piAi = createPiAiService(deferredExecutor);
+    registerIpc(services, (e) => sent.push(e), (e) => sentAi.push(e));
+
+    sendEvent('ai', 'chat', {
+      sessionId: 'cancel-session',
+      messages: [{ role: 'user', content: '拆解任务' }],
+      mode: 'task_proposal',
+      projectId: 'cancel-project',
+      projectPath: workdir,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    sendEvent('ai', 'cancel', { sessionId: 'cancel-session' });
+    const lateAnswerSend = vi.fn(() => true);
+    capturedAsk?.('late-tool', [], lateAnswerSend);
+    sendEvent('ai', 'answer', { sessionId: 'cancel-session', toolUseId: 'late-tool', answers: [] });
+    resolveChat('late result');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(lateAnswerSend).not.toHaveBeenCalled();
+    expect(sentAi.filter((event) => event.sessionId === 'cancel-session')).toEqual([]);
   });
 
   it('rejects an unregistered project path before starting a creation agent', async () => {
@@ -550,6 +600,7 @@ describe('typed IPC wiring', () => {
       sessionId: 'unregistered-project',
       messages: [{ role: 'user', content: '设计登录需求' }],
       mode: 'requirement',
+      projectId: 'not-registered',
       projectPath: join(workdir, 'not-registered'),
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -591,6 +642,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       sessionId: 'knowledge-requirement-chat',
       messages: [{ role: 'user', content: '设计登录需求' }],
       mode: 'requirement',
+      projectId: 'p',
       projectPath: workdir,
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -598,6 +650,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       sessionId: 'knowledge-task-chat',
       messages: [{ role: 'user', content: '拆解登录任务' }],
       mode: 'task_proposal',
+      projectId: 'p',
       projectPath: workdir,
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -648,6 +701,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       sessionId: 'ux-materialization-failure',
       messages: [{ role: 'user', content: '设计登录需求' }],
       mode: 'requirement',
+      projectId: 'ux-project',
       projectPath: workdir,
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -668,6 +722,44 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
     expect(all.length).toBe(1);
   });
 
+  it('analytics.query validates filters and returns provider usage aggregates', async () => {
+    const usage = repos.providerUsage.start({
+      logicalRequestId: 'analytics-request',
+      providerId: 'provider-1',
+      providerName: 'Provider One',
+      routeId: 'provider-1:chat',
+      model: 'model-a',
+      workload: 'chat',
+      source: 'task_chat',
+      attemptOrdinal: 1,
+      startedAt: 100,
+      projectId: 'project-1',
+    });
+    repos.providerUsage.finish(usage.id, {
+      status: 'succeeded',
+      endedAt: 150,
+      usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, total: 18 },
+    });
+
+    const result = await call('analytics', 'query', { startAt: 0, endAt: 1000 }) as import('@ai-devflow/core').UsageAnalytics;
+    expect(result.summary).toMatchObject({ providerCalls: 1, logicalRequests: 1, tokens: { total: 18 } });
+    await expect(call('analytics', 'query', { startAt: 1000, endAt: 1000 })).rejects.toThrow(/时间/);
+    await expect(call('analytics', 'query', { startAt: 0, endAt: 6 * 366 * 24 * 60 * 60 * 1000 })).rejects.toThrow(/五年/);
+    await expect(call('analytics', 'query', { startAt: 0.5, endAt: 1000 })).rejects.toThrow(/整数/);
+    await expect(call('analytics', 'query', { startAt: 0, endAt: 1000, status: 'mystery' })).rejects.toThrow(/状态/);
+  });
+
+  it('settings retention round-trips and compaction requires explicit confirmation', async () => {
+    expect(await call('settings', 'getRetention')).toMatchObject({
+      policy: { executionDetailDays: 90, archivedConversationDays: 180, providerRawDays: 365 },
+    });
+    const policy = { executionDetailDays: 30, archivedConversationDays: 60, providerRawDays: 90 };
+    await expect(call('settings', 'setRetention', policy)).resolves.toEqual(policy);
+    await expect(call('settings', 'runRetention')).resolves.toMatchObject({ skipped: false, ranAt: 1_000_000 });
+    await expect(call('settings', 'compactDatabase', false)).rejects.toThrow(/确认/);
+    await expect(call('settings', 'compactDatabase', true)).resolves.toBeUndefined();
+  });
+
   it('notificationRules.create persists rule', async () => {
     const r = (await call('notificationRules', 'create', { id: '', status: 'in_progress', minutes: 5, channels: ['desktop'], enabled: true })) as { id: string };
     expect(repos.notificationRules.list().length).toBe(1);
@@ -682,7 +774,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
     repos.tasks.insert({ id: 't', requirementId: 'r', iterationId: 'i', projectId: 'p', title: 'T', description: '', status: 'in_review', role: 'coder', stages: [], currentStage: 0, statusChangedAt: now(), createdAt: now(), updatedAt: now(), retryCount: 0 });
     await expect(call('tasks', 'accept', 't')).rejects.toThrow(/产物/); // 无执行产物 -> 拒绝
     // 拖拽归档被拒
-    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/归档/);
+    await expect(call('tasks', 'updateStatus', 't', 'archived')).rejects.toThrow(/启动、验收或驳回/);
     // 补一条执行记录（产物）
     repos.executions.insert({ id: 'e1', taskId: 't', attempt: 1, startedAt: now(), status: 'succeeded' });
     await call('tasks', 'accept', 't');

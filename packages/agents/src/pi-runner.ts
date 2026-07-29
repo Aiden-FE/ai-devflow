@@ -8,7 +8,17 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { redactText } from '@ai-devflow/core';
-import type { AgentEvent, Checkpoint, ExpertKey, KnowledgeAgentPayload } from '@ai-devflow/core';
+import type {
+  AgentEvent,
+  Checkpoint,
+  ExpertKey,
+  FailureKind,
+  KnowledgeAgentPayload,
+  ProviderCallFinish,
+  ProviderCallStart,
+  ProviderCallSource,
+  TerminalProviderCallStatus,
+} from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
 import { createPiEventTranslator, type StructuredResult } from './json-events.js';
 import type { ExpertMaterializeInput } from './profiles.js';
@@ -55,6 +65,12 @@ export interface PiRunnerDeps {
   projectToolPath: string;
   instructionLoader: ProjectInstructionLoaderLike;
   attempts?: ExecutionAttemptStore;
+  usage?: ProviderUsageSink;
+}
+
+export interface ProviderUsageSink {
+  start(input: ProviderCallStart): string | undefined;
+  finish(id: string, input: ProviderCallFinish): void;
 }
 
 class AsyncQueue<T> implements AsyncIterable<T> {
@@ -212,10 +228,6 @@ export class PiRunner implements AgentRunner {
       checkpointPath,
     });
 
-    const timeoutMs = EXPERT_PROFILES[request.expert as Exclude<ExpertKey, 'chat'>].timeoutMs;
-    const spawned = this.deps.supervisor.spawn(plan, { cwd: request.cwd, timeoutMs, secrets: [route.secret] });
-    state.spawned = spawned;
-
     const translator = createPiEventTranslator({
       executionId: request.executionId,
       attemptId,
@@ -223,6 +235,52 @@ export class PiRunner implements AgentRunner {
       secrets: [route.secret],
       lastCheckpointId: resumeCheckpoint?.id,
     });
+
+    const startedAt = Date.now();
+    let usageId: string | undefined;
+    try {
+      usageId = this.deps.usage?.start({
+        logicalRequestId: request.executionId,
+        providerId: route.providerId,
+        providerName: route.providerName,
+        routeId: route.routeId,
+        model: route.model,
+        workload: request.expert,
+        source: usageSource(request.resultKind),
+        attemptOrdinal: ordinal,
+        startedAt,
+        executionId: request.executionId,
+        taskId: request.scope.kind === 'task' ? request.scope.taskId : undefined,
+        projectId: request.scope.kind === 'project' || request.scope.kind === 'iteration'
+          ? request.scope.projectId
+          : undefined,
+      });
+    } catch {
+      usageId = undefined;
+    }
+    const finishUsage = (status: TerminalProviderCallStatus, failureKind?: FailureKind): void => {
+      if (!usageId) return;
+      try {
+        this.deps.usage?.finish(usageId, {
+          status,
+          endedAt: Date.now(),
+          failureKind,
+          usage: translator.usage(),
+        });
+      } catch {
+        // Analytics is best effort and must never change task execution semantics.
+      }
+    };
+
+    const timeoutMs = EXPERT_PROFILES[request.expert as Exclude<ExpertKey, 'chat'>].timeoutMs;
+    let spawned: SpawnedPi;
+    try {
+      spawned = this.deps.supervisor.spawn(plan, { cwd: request.cwd, timeoutMs, secrets: [route.secret] });
+    } catch (error) {
+      finishUsage('failed', 'runtime');
+      throw error;
+    }
+    state.spawned = spawned;
 
     this.deps.attempts?.create({
       id: attemptId,
@@ -287,6 +345,7 @@ export class PiRunner implements AgentRunner {
       const invalid = validateExpertCompletion(request, structured);
       if (invalid) {
         this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+        finishUsage('failed', 'task_result');
         return {
           ok: false,
           journal,
@@ -294,6 +353,7 @@ export class PiRunner implements AgentRunner {
         };
       }
       this.deps.attempts?.finish(attemptId, 'succeeded', Date.now());
+      finishUsage('succeeded');
       queue.push({
         type: 'done',
         summary: structured.summary,
@@ -310,9 +370,11 @@ export class PiRunner implements AgentRunner {
       // §7.4 主动终止进程组后退出码不再为 0，故此处不依赖 exitCode，只校验无 protocol 失败/结果/提供商错误。
       if (!finishError && !translator.hasStructuredResult() && !pe) {
         this.deps.attempts?.finish(attemptId, 'canceled', Date.now());
+        finishUsage('canceled');
         return { ok: true, journal };
       }
       this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+      finishUsage('failed', 'interaction');
       return {
         ok: false,
         journal,
@@ -335,8 +397,15 @@ export class PiRunner implements AgentRunner {
         'protocol',
       );
     }
+    finishUsage('failed', error.kind);
     return { ok: false, journal, error };
   }
+}
+
+function usageSource(resultKind: AgentResultKind): ProviderCallSource {
+  if (resultKind === 'task_execution') return 'task_agent';
+  if (resultKind === 'task_review') return 'review_agent';
+  return 'knowledge_agent';
 }
 
 /** Narrow enforceable completion evidence required by the built-in expert contracts. */
@@ -352,6 +421,7 @@ export function validateExpertCompletion(
       return '测试专家结果缺少 REVIEW_VERDICT: PASS|FAIL';
     }
   }
+  if (result.payloadError) return result.payloadError;
   const payloadError = validateResultPayload(request.resultKind, result.payload, result.summary);
   if (payloadError) return payloadError;
   return undefined;
@@ -383,16 +453,21 @@ function validateResultPayload(
   if (payload.kind !== expected) return `${resultKind} 结果载荷判别值应为 ${expected}（实际 ${payload.kind}）`;
   // 过渡期：task_review 载荷与 REVIEW_VERDICT 必须一致。
   if (resultKind === 'task_review' && payload.kind === 'task_review') {
-    const reviewSummary = payload.review.summary;
-    const passVerdict = /REVIEW_VERDICT:\s*PASS\b/i.test(reviewSummary);
-    const failVerdict = /REVIEW_VERDICT:\s*FAIL\b/i.test(reviewSummary);
-    const verdictPass = /REVIEW_VERDICT:\s*PASS\b/i.test(summary);
-    const verdictFail = /REVIEW_VERDICT:\s*FAIL\b/i.test(summary);
-    if (verdictPass && failVerdict) return 'task_review 载荷 REVIEW_VERDICT 与结论不一致（PASS vs FAIL）';
-    if (verdictFail && passVerdict) return 'task_review 载荷 REVIEW_VERDICT 与结论不一致（FAIL vs PASS）';
-    if (!verdictPass && !verdictFail) return undefined; // 宽松：未给出明确结论时仅依赖既有校验
+    const verdict = reviewVerdictMarker(summary);
+    const payloadVerdict = reviewVerdictMarker(payload.review.summary);
+    if (payloadVerdict === undefined) return 'task_review review.summary 缺少 REVIEW_VERDICT: PASS|FAIL';
+    if (verdict === undefined) return 'task_review summary 缺少 REVIEW_VERDICT: PASS|FAIL';
+    if (verdict !== payloadVerdict) return 'task_review 载荷 REVIEW_VERDICT 与结论不一致';
+    if (payload.review.pass !== verdict) return 'task_review review.pass 与 REVIEW_VERDICT 不一致';
   }
   return undefined;
+}
+
+function reviewVerdictMarker(value: string): boolean | undefined {
+  const pass = /REVIEW_VERDICT:\s*PASS\b/i.test(value);
+  const fail = /REVIEW_VERDICT:\s*FAIL\b/i.test(value);
+  if (pass === fail) return undefined;
+  return pass;
 }
 
 /** 是否需要把前一尝试作为接管上下文传给下一路线（产生副作用或存在不确定工具）。 */

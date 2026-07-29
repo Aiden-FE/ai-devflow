@@ -249,7 +249,7 @@ async function startFakeProvider(fakeKey) {
       try { body = JSON.parse(raw); } catch { body = {}; }
       const hasToolResult = Array.isArray(body.messages) && body.messages.some((message) => message?.role === 'tool');
       const isTaskReview = Array.isArray(body.messages) && body.messages.some((message) =>
-        contentIncludesText(message?.content, '你是一名严格的代码审查 Agent'),
+        contentIncludesText(message?.content, 'resultKind=task_review'),
       );
       const model = typeof body.model === 'string' ? body.model : 'packaged-fake-model';
       let chunk;
@@ -632,7 +632,19 @@ try {
   await win.getByText('任务对话').waitFor({ timeout: 5000 });
   check('启动任务并查看任务对话（侧滑窗）', await win.getByText('任务对话').isVisible());
   // 任务执行后推进到待验收/归档（待验收=人工验收入口，不自动归档）
-  await win.locator('[data-lane="in_review"] [data-task-card], [data-lane="archived"] [data-task-card]').first().waitFor({ timeout: 15000 });
+  try {
+    await win.locator('[data-lane="in_review"] [data-task-card], [data-lane="archived"] [data-task-card]').first().waitFor({ timeout: 15000 });
+  } catch (error) {
+    const diagnostics = await win.evaluate(() => ({
+      lanes: [...document.querySelectorAll('[data-lane]')].map((lane) => ({
+        lane: lane.getAttribute('data-lane'),
+        tasks: [...lane.querySelectorAll('[data-task-card]')].map((card) => card.textContent?.trim()),
+      })),
+      dialog: document.querySelector('[role="dialog"]')?.textContent?.trim(),
+    }));
+    console.error(`[e2e] task transition diagnostics: ${JSON.stringify(diagnostics)}`);
+    throw error;
+  }
   check('任务执行后推进到待验收/归档', true);
 
   // 7. 待沟通/恢复流程：暂停 -> 输入区可达 -> 回复 -> 待验收（lane-aware 恢复，待验收暂停不重跑）

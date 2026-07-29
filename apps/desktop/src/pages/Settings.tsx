@@ -13,7 +13,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '../components/ui/dialog.js';
-import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ProviderMigrationStatus, AgentKey } from '@ai-devflow/core';
+import type { NotificationRule, WebhookConfig, WebhookDelivery, TaskStatus, ThemeMode, Locale, UpdateStatus, ProviderSummary, ProviderInput, ProviderKind, ProviderMigrationStatus, AgentKey, RetentionPolicy } from '@ai-devflow/core';
 
 const PROVIDER_KINDS: ProviderKind[] = ['anthropic', 'openai', 'google', 'deepseek', 'openrouter', 'openai_compatible', 'anthropic_compatible'];
 const COMPATIBLE_PROVIDER_KINDS: ProviderKind[] = ['openai_compatible', 'anthropic_compatible'];
@@ -32,11 +32,177 @@ export function SettingsPage(): React.ReactElement {
         <ThemeSection />
         <LanguageSection />
         <UpdateSection />
+        <RetentionSection />
         <ProviderSection />
         <AgentModelSection />
         <NotificationRulesSection />
         <WebhooksSection />
       </div>
+    </div>
+  );
+}
+
+type RetentionInputValues = Record<keyof RetentionPolicy, string>;
+
+export function validateRetentionInputs(values: RetentionInputValues): RetentionPolicy {
+  const policy: RetentionPolicy = {
+    executionDetailDays: Number(values.executionDetailDays),
+    archivedConversationDays: Number(values.archivedConversationDays),
+    providerRawDays: Number(values.providerRawDays),
+  };
+  const limits: Array<[keyof RetentionPolicy, number]> = [
+    ['executionDetailDays', 7],
+    ['archivedConversationDays', 30],
+    ['providerRawDays', 30],
+  ];
+  for (const [key, minimum] of limits) {
+    if (!Number.isSafeInteger(policy[key]) || policy[key] < minimum) {
+      throw new Error(`${key} 必须是不小于 ${minimum} 的整数天数`);
+    }
+  }
+  return policy;
+}
+
+function policyValues(policy: RetentionPolicy): RetentionInputValues {
+  return {
+    executionDetailDays: String(policy.executionDetailDays),
+    archivedConversationDays: String(policy.archivedConversationDays),
+    providerRawDays: String(policy.providerRawDays),
+  };
+}
+
+function RetentionSection(): React.ReactElement {
+  const t = useT();
+  const [values, setValues] = useState<RetentionInputValues>({
+    executionDetailDays: '90', archivedConversationDays: '180', providerRawDays: '365',
+  });
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const [message, setMessage] = useState<string | undefined>();
+  const [lastRunAt, setLastRunAt] = useState<number | undefined>();
+  const [confirmCompact, setConfirmCompact] = useState(false);
+
+  useEffect(() => {
+    api.settings.getRetention()
+      .then((result) => {
+        setValues(policyValues(result.policy));
+        setLastRunAt(result.lastRunAt);
+      })
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true); setError(undefined); setMessage(undefined);
+    try { await action(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  return (
+    <RetentionSettingsView
+      values={values}
+      loading={loading}
+      busy={busy}
+      error={error}
+      message={message}
+      lastRunAt={lastRunAt}
+      confirmCompact={confirmCompact}
+      onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
+      onSave={() => run(async () => {
+        const saved = await api.settings.setRetention(validateRetentionInputs(values));
+        setValues(policyValues(saved));
+        setMessage(t('settings.retention.saved'));
+      })}
+      onClean={() => run(async () => {
+        const result = await api.settings.runRetention();
+        setLastRunAt(result.ranAt);
+        setMessage(t('settings.retention.cleaned', {
+          n: result.logsDeleted + result.attemptsDeleted + result.messagesDeleted + result.providerRowsRolledUp,
+        }));
+      })}
+      onCompactRequest={() => setConfirmCompact(true)}
+      onCompactCancel={() => setConfirmCompact(false)}
+      onCompactConfirm={() => {
+        setConfirmCompact(false);
+        void run(async () => {
+          await api.settings.compactDatabase(true);
+          setMessage(t('settings.retention.compacted'));
+        });
+      }}
+    />
+  );
+}
+
+export interface RetentionSettingsViewProps {
+  values: RetentionInputValues;
+  loading: boolean;
+  busy: boolean;
+  error?: string;
+  message?: string;
+  lastRunAt?: number;
+  confirmCompact: boolean;
+  onChange: (key: keyof RetentionPolicy, value: string) => void;
+  onSave: () => void;
+  onClean: () => void;
+  onCompactRequest: () => void;
+  onCompactConfirm: () => void;
+  onCompactCancel: () => void;
+}
+
+export function RetentionSettingsView(props: RetentionSettingsViewProps): React.ReactElement {
+  const t = useT();
+  const fields: Array<[keyof RetentionPolicy, string, number]> = [
+    ['executionDetailDays', t('settings.retention.execution'), 7],
+    ['archivedConversationDays', t('settings.retention.conversation'), 30],
+    ['providerRawDays', t('settings.retention.provider'), 30],
+  ];
+  return (
+    <div data-compact-confirm={props.confirmCompact} className="rounded-lg border border-border bg-card p-4">
+      <h3 className="m-0 text-sm font-semibold">{t('settings.retention.title')}</h3>
+      <p className="mt-1 text-xs text-muted-foreground">{t('settings.retention.hint')}</p>
+      {props.loading ? <div className="mt-3 text-xs text-muted-foreground">{t('common.loading')}</div> : (
+        <>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            {fields.map(([key, label, minimum]) => (
+              <div key={key} className="flex min-w-0 flex-col gap-1.5">
+                <Label htmlFor={`retention-${key}`}>{label}</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id={`retention-${key}`}
+                    type="number"
+                    min={minimum}
+                    step={1}
+                    value={props.values[key]}
+                    onChange={(event) => props.onChange(key, event.target.value)}
+                  />
+                  <span className="shrink-0 text-xs text-muted-foreground">{t('settings.retention.days')}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 text-xs text-muted-foreground">
+            {t('settings.retention.lastRun')}: {props.lastRunAt ? fmtTime(props.lastRunAt) : t('settings.retention.never')}
+          </div>
+          {(props.error || props.message) && (
+            <div className={`mt-2 text-xs ${props.error ? 'text-destructive' : 'text-muted-foreground'}`}>{props.error ?? props.message}</div>
+          )}
+          <div className="mt-3 flex flex-wrap justify-end gap-2">
+            <Button variant="outline" disabled={props.busy} onClick={props.onClean}>{t('settings.retention.clean')}</Button>
+            <Button variant="outline" disabled={props.busy} onClick={props.onCompactRequest}>{t('settings.retention.compact')}</Button>
+            <Button disabled={props.busy} onClick={props.onSave}>{t('common.save')}</Button>
+          </div>
+        </>
+      )}
+      <Dialog open={props.confirmCompact} onOpenChange={(open) => { if (!open) props.onCompactCancel(); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>{t('settings.retention.compactConfirm')}</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">{t('settings.retention.compactBody')}</p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={props.onCompactCancel}>{t('common.cancel')}</Button>
+            <Button variant="destructive" onClick={props.onCompactConfirm}>{t('settings.retention.compact')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
