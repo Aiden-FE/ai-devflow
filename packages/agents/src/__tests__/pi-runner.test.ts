@@ -132,6 +132,29 @@ it('fails over after an authentication error on the first attempt', async () => 
   expect(harness.spawnedCommands.length).toBeGreaterThanOrEqual(2);
 });
 
+it('surfaces a bounded redacted final provider detail', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'always-provider-error' });
+  const run = await harness.runner.run({
+    scope: { kind: 'project', projectId: 'p1' },
+    executionId: 'knowledge-init-failure',
+    expert: 'project_lead',
+    resultKind: 'knowledge_initialization',
+    prompt: 'initialize knowledge',
+    cwd: harness.cwd,
+  });
+
+  const events = await collect(run.events);
+  const error = events.find((event) => event.type === 'error');
+  expect(error).toEqual(expect.objectContaining({
+    type: 'error',
+    message: expect.stringContaining('model unavailable'),
+  }));
+  const message = error && error.type === 'error' ? error.message : '';
+  expect(message).not.toContain('fake-secret');
+  expect(message.length).toBeLessThan(2_050);
+  expect((await run.done()).ok).toBe(false);
+});
+
 it('retries a runtime crash once then recovers', async () => {
   const harness = createPiRunnerHarness({ scenario: 'runtime-crash' });
   const run = await harness.runner.run({

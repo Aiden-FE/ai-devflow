@@ -7,6 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { redactText } from '@ai-devflow/core';
 import type { AgentEvent, Checkpoint, ExpertKey, KnowledgeAgentPayload } from '@ai-devflow/core';
 import type { ExecutionAttemptStore, AttemptJournal } from './attempt-journal.js';
 import { createPiEventTranslator, type StructuredResult } from './json-events.js';
@@ -19,6 +20,20 @@ import type { AgentRun, AgentRunRequest, AgentResultKind, AgentRunner } from './
 import type { LoadedInstructions } from './project-instructions.js';
 
 const AGENT_END_EXIT_GRACE_MS = 100;
+const MAX_PROVIDER_ERROR_DETAIL = 2_000;
+
+function providerErrorMessage(error: unknown): string {
+  if (!(error instanceof ProviderExecutionError) || !error.detail?.trim()) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  const detail = redactText(error.detail).trim();
+  if (!detail || detail === error.message) return error.message;
+  const bounded = detail.length > MAX_PROVIDER_ERROR_DETAIL
+    ? `...${detail.slice(-MAX_PROVIDER_ERROR_DETAIL)}`
+    : detail;
+  return `${error.message}: ${bounded}`;
+}
 
 /** 结构化依赖端口（便于测试注入桩；生产由 BundledPiLocator/ProfileMaterializer 满足）。 */
 export interface RuntimeLocator {
@@ -113,7 +128,7 @@ export class PiRunner implements AgentRunner {
         });
         finalExit = { exitCode: 0, ok: true };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = providerErrorMessage(err);
         const failureKind = err instanceof ProviderExecutionError ? err.kind : undefined;
         queue.push({ type: 'error', message, recoverable: true, failureKind, t: Date.now() });
         finalExit = { exitCode: 1, ok: false };

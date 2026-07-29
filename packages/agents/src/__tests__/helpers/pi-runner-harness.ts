@@ -34,6 +34,7 @@ export type FakeScenario =
   | 'report-without-end'
   | 'malformed-then-report'
   | 'provider-error-then-report'
+  | 'always-provider-error'
   | 'interaction-then-report'
   | 'reviewer-latch-blocked-interaction';
 

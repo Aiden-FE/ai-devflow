@@ -87,6 +87,15 @@ switch (scenario) {
     }
     break;
 
+  case 'always-provider-error':
+    emit({
+      type: 'error',
+      status: 404,
+      message: `${'diagnostic '.repeat(250)}model unavailable for fake-secret`,
+    });
+    process.exit(1);
+    break;
+
   case 'runtime-crash':
     if (isFirst) {
       process.exit(7);
