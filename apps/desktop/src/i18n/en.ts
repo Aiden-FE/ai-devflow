@@ -419,6 +419,15 @@ export const en: Record<string, string> = {
   'usage.workloads': 'Workloads',
   'usage.sources': 'Sources',
   'usage.failures': 'Failure types',
+  'usage.unknown': 'Unknown',
+  'usage.failedCalls': 'Failed calls',
+  'usage.kpi.calls.support': '{n} logical requests',
+  'usage.kpi.coverage.support': '{n} unknown',
+  'usage.scope.selected': 'Selected provider',
+  'usage.empty.action': 'View 365 days',
+  'usage.chart.error': 'Chart failed to load',
+  'usage.chart.retry': 'Retry chart',
+  'usage.retry': 'Retry',
 
   // ---- Data retention ----
   'settings.retention.title': 'Data retention and cleanup',

@@ -419,6 +419,15 @@ export const zh: Record<string, string> = {
   'usage.workloads': '工作负载',
   'usage.sources': '调用来源',
   'usage.failures': '失败类型',
+  'usage.unknown': '未知',
+  'usage.failedCalls': '失败调用',
+  'usage.kpi.calls.support': '含 {n} 次逻辑请求',
+  'usage.kpi.coverage.support': '{n} 次未知',
+  'usage.scope.selected': '所选供应商',
+  'usage.empty.action': '查看 365 天',
+  'usage.chart.error': '图表加载失败',
+  'usage.chart.retry': '重试图表',
+  'usage.retry': '重试',
 
   // ---- 数据保留 ----
   'settings.retention.title': '数据保留与清理',
