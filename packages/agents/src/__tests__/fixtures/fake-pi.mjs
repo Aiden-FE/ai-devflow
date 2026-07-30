@@ -46,7 +46,12 @@ function succeed(summary = 'done') {
   emit({
     type: 'message_end',
     message: {
-      id: `${attemptId}-assistant`, role: 'assistant',
+      role: 'assistant',
+      timestamp: 1_753_824_000_000,
+      provider: 'openai',
+      model: 'gpt-default',
+      responseId: `${attemptId}-resp`,
+      stopReason: 'toolUse',
       usage: { input: 100, output: 40, cacheRead: 20, cacheWrite: 5, totalTokens: 165 },
     },
   });
@@ -54,7 +59,12 @@ function succeed(summary = 'done') {
   emit({
     type: 'agent_end',
     messages: [{
-      id: `${attemptId}-assistant`, role: 'assistant',
+      role: 'assistant',
+      timestamp: 1_753_824_000_000,
+      provider: 'openai',
+      model: 'gpt-default',
+      responseId: `${attemptId}-resp`,
+      stopReason: 'toolUse',
       usage: { input: 100, output: 40, cacheRead: 20, cacheWrite: 5, totalTokens: 165 },
     }],
   });

@@ -54,14 +54,25 @@ const SUCCESS_EVENTS = [
   JSON.stringify({
     type: 'message_end',
     message: {
-      id: 'assistant-1', role: 'assistant', content: [{ type: 'text', text: 'ok' }],
+      role: 'assistant',
+      timestamp: 1_753_824_000_000,
+      provider: 'openai',
+      model: 'm',
+      responseId: 'resp-1',
+      stopReason: 'end_turn',
+      content: [{ type: 'text', text: 'ok' }],
       usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 1, totalTokens: 17 },
     },
   }),
   JSON.stringify({
     type: 'agent_end',
     messages: [{
-      id: 'assistant-1', role: 'assistant',
+      role: 'assistant',
+      timestamp: 1_753_824_000_000,
+      provider: 'openai',
+      model: 'm',
+      responseId: 'resp-1',
+      stopReason: 'end_turn',
       usage: { input: 10, output: 4, cacheRead: 2, cacheWrite: 1, totalTokens: 17 },
     }],
   }),
@@ -242,5 +253,80 @@ describe('executeTextOnRoute streaming', () => {
     await expect(executor('task_chat', [{ role: 'user', content: 'hi' }], (d) => calls.push(d)))
       .rejects.toMatchObject({ kind: 'runtime' });
     expect(calls).toEqual(['partial']);
+  });
+
+  it('keeps the returned assistant text unchanged when the usage finish sink throws after a valid completion', async () => {
+    // Analytics is best effort: a finish-sink failure after a successful completion must not alter the
+    // returned assistant text or suppress the succeeded status.
+    const finishes: Array<Parameters<ProviderUsageSink['finish']>> = [];
+    const usage: ProviderUsageSink = {
+      start: () => 'call-finish-throws',
+      finish: (id, value) => { finishes.push([id, value]); throw new Error('analytics unavailable'); },
+    };
+    const supervisor = {
+      spawn: () => ({
+        lines: (async function* () {
+          for (const text of SUCCESS_EVENTS) yield { stream: 'stdout' as const, text };
+        })(),
+        cancel: async () => undefined,
+        done: async () => ({ exitCode: 0, signal: null }),
+        send: () => false,
+        onMessage: () => undefined,
+      }),
+    };
+    const deps = {
+      locator: { verify: async () => ({ version: '0.80.10', entry: '/verified/pi.js' }) },
+      router: { execute: async (_w: unknown, op: (r: ProviderRoute, ordinal: number) => Promise<string>) => op(ROUTE, 1) },
+      supervisor,
+      sessionsBaseDir: mkdtempSync(join(tmpdir(), 'pi-ai-finish-throws-')),
+      projectToolPath: '/usr/bin:/bin',
+      assetsRoot: ASSETS_ROOT,
+      usage,
+    } as unknown as ProductionExecutorDeps;
+    const executor = createProductionTextExecutor(deps);
+
+    const result = await executor('task_chat', [{ role: 'user', content: 'hi' }]);
+
+    expect(result).toBe('ok');
+    expect(finishes).toEqual([['call-finish-throws', expect.objectContaining({ status: 'succeeded' })]]);
+  });
+
+  it('records an all-null finished usage when the run fails before a terminal usage message', async () => {
+    // A runtime crash before any assistant message_end yields no captured tokens: every field of the
+    // finished usage must remain null (never zero or estimated), while the call is still recorded as failed.
+    const finishes: Array<Parameters<ProviderUsageSink['finish']>> = [];
+    const usage: ProviderUsageSink = {
+      start: () => 'call-no-terminal',
+      finish: (id, value) => finishes.push([id, value]),
+    };
+    const supervisor = {
+      spawn: () => ({
+        lines: (async function* () {
+          // No stdout lines: the process exits with a non-zero code before emitting any usage-bearing message.
+        })(),
+        cancel: async () => undefined,
+        done: async () => ({ exitCode: 7, signal: null }),
+        send: () => false,
+        onMessage: () => undefined,
+      }),
+    };
+    const deps = {
+      locator: { verify: async () => ({ version: '0.80.10', entry: '/verified/pi.js' }) },
+      router: { execute: async (_w: unknown, op: (r: ProviderRoute, ordinal: number) => Promise<string>) => op(ROUTE, 1) },
+      supervisor,
+      sessionsBaseDir: mkdtempSync(join(tmpdir(), 'pi-ai-no-terminal-')),
+      projectToolPath: '/usr/bin:/bin',
+      assetsRoot: ASSETS_ROOT,
+      usage,
+    } as unknown as ProductionExecutorDeps;
+    const executor = createProductionTextExecutor(deps);
+
+    await expect(executor('task_chat', [{ role: 'user', content: 'hi' }]))
+      .rejects.toMatchObject({ kind: 'runtime' });
+
+    expect(finishes).toEqual([['call-no-terminal', expect.objectContaining({
+      status: 'failed',
+      usage: { input: null, output: null, cacheRead: null, cacheWrite: null, total: null },
+    })]]);
   });
 });

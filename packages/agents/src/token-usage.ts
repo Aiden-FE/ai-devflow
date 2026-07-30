@@ -39,8 +39,34 @@ function messagesFromEvent(event: Record<string, unknown>): unknown[] {
   return [];
 }
 
+/**
+ * Content-free message fingerprint: identifies the same assistant message whether it
+ * arrives via `message_end` or repeated in `agent_end.messages`, without ever hashing
+ * or storing message text. Only stable non-content fields plus the normalized usage
+ * numbers participate, so deduplication tolerates Pi omitting `id` on assistant messages.
+ */
+function messageFingerprint(message: Record<string, unknown>, usage: TokenUsage): string {
+  const text = (key: string): string | null =>
+    typeof message[key] === 'string' ? message[key] as string : null;
+  const timestamp = typeof message.timestamp === 'number' && Number.isSafeInteger(message.timestamp)
+    ? message.timestamp
+    : null;
+  return JSON.stringify([
+    timestamp,
+    text('provider'),
+    text('model'),
+    text('responseId'),
+    text('stopReason'),
+    usage.input,
+    usage.output,
+    usage.cacheRead,
+    usage.cacheWrite,
+    usage.total,
+  ]);
+}
+
 export class PiTokenUsageAccumulator {
-  private readonly messageIds = new Set<string>();
+  private readonly fingerprints = new Set<string>();
   private readonly sums: Record<keyof TokenUsage, number> = {
     input: 0,
     output: 0,
@@ -56,11 +82,11 @@ export class PiTokenUsageAccumulator {
       if (typeof value !== 'object' || value === null) continue;
       const message = value as Record<string, unknown>;
       if (message.role !== undefined && message.role !== 'assistant') continue;
-      const id = typeof message.id === 'string' && message.id.length > 0 ? message.id : undefined;
-      if (!id || this.messageIds.has(id)) continue;
       const usage = normalizeUsage(message.usage);
       if (!usage) continue;
-      this.messageIds.add(id);
+      const fingerprint = messageFingerprint(message, usage);
+      if (this.fingerprints.has(fingerprint)) continue;
+      this.fingerprints.add(fingerprint);
       for (const key of Object.keys(this.sums) as Array<keyof TokenUsage>) {
         const token = usage[key];
         if (token !== null) {
