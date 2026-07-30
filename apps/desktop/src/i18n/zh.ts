@@ -199,6 +199,7 @@ export const zh: Record<string, string> = {
   // ---- 任务详情（侧滑窗） ----
   'detail.start': '启动',
   'detail.cancel': '取消',
+  'detail.cancelAwaiting': '放弃等待',
   'detail.retry': '重试',
   'detail.archive': '验收通过并归档',
   'detail.archive.confirm.title': '验收通过并归档',

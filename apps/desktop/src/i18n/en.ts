@@ -199,6 +199,7 @@ export const en: Record<string, string> = {
   // ---- task detail (sheet) ----
   'detail.start': 'Start',
   'detail.cancel': 'Cancel',
+  'detail.cancelAwaiting': 'Abandon wait',
   'detail.retry': 'Retry',
   'detail.archive': 'Accept & archive',
   'detail.archive.confirm.title': 'Accept & archive',

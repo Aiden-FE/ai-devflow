@@ -20,6 +20,28 @@ import { Checkbox } from '../components/ui/checkbox.js';
 import { upsertTaskMessage } from '../task-messages.js';
 import { RejectTaskDialog } from '../components/RejectTaskDialog.js';
 
+export function InterruptibleTaskActions({
+  status,
+  busy,
+  onCancel,
+  onPause,
+}: {
+  status: Task['status'];
+  busy: boolean;
+  onCancel(): void;
+  onPause(): void;
+}): React.ReactElement {
+  const t = useT();
+  const canPause = status === 'in_progress' || status === 'testing' || status === 'in_review';
+
+  return (
+    <>
+      {status === 'in_progress' && <Button size="sm" variant="outline" disabled={busy} onClick={onCancel}>{t('detail.cancel')}</Button>}
+      {canPause && <Button size="sm" variant="outline" disabled={busy} onClick={onPause}><Pause className="h-3.5 w-3.5" /> {t('detail.pause')}</Button>}
+    </>
+  );
+}
+
 export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: () => void }): React.ReactElement {
   const t = useT();
   const [task, setTask] = useState<Task | undefined>();
@@ -34,6 +56,7 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
   const [siblingsCollapsed, setSiblingsCollapsed] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const [interruptBusy, setInterruptBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [confirmAccept, setConfirmAccept] = useState(false);
@@ -82,6 +105,13 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
     finally { setBusy(false); }
   };
 
+  const interrupt = async (fn: () => Promise<void>) => {
+    setInterruptBusy(true); setError(undefined);
+    try { await fn(); await load(); onChanged(); }
+    catch (e) { setError((e as Error).message); }
+    finally { setInterruptBusy(false); }
+  };
+
   if (!task) return <EmptyState title={t('common.loading')} />;
 
   const editable = task.status === 'ready';
@@ -95,8 +125,6 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
   const depsOk = depIds.length === 0 || (missingCount === 0 && blockedDeps.length === 0);
 
   const pendingInteraction = interactions.find((x) => x.status === 'pending');
-  const canPause = task.status === 'in_progress' || task.status === 'testing' || task.status === 'in_review';
-
   return (
     <div className="flex min-w-0 flex-col gap-3 px-4 pb-6">
       {/* 头部：标题/描述/状态控制 */}
@@ -114,9 +142,14 @@ export function TaskDetail({ taskId, onChanged }: { taskId: string; onChanged: (
         )}
         <div className="mt-2 flex flex-wrap gap-2">
           {task.status === 'ready' && <Button size="sm" disabled={busy || !depsOk} onClick={() => act(() => api.tasks.start(task.id))}><Play className="h-3.5 w-3.5" /> {t('detail.start')}</Button>}
-          {task.status === 'in_progress' && <Button size="sm" variant="outline" disabled={busy} onClick={() => act(() => api.tasks.cancel(task.id))}>{t('detail.cancel')}</Button>}
+          <InterruptibleTaskActions
+            status={task.status}
+            busy={interruptBusy}
+            onCancel={() => { void interrupt(() => api.tasks.cancel(task.id)); }}
+            onPause={() => { void interrupt(() => api.tasks.pause(task.id)); }}
+          />
+          {task.status === 'awaiting_input' && <Button size="sm" variant="outline" disabled={busy} onClick={() => act(() => api.tasks.cancel(task.id))}>{t('detail.cancelAwaiting')}</Button>}
           {(task.status === 'ready' || task.status === 'in_progress') && task.retryCount > 0 && <Button size="sm" variant="outline" disabled={busy} onClick={() => act(() => api.tasks.retry(task.id))}>{t('detail.retry')}</Button>}
-          {canPause && <Button size="sm" variant="outline" disabled={busy} onClick={() => act(() => api.tasks.pause(task.id))}><Pause className="h-3.5 w-3.5" /> {t('detail.pause')}</Button>}
           {task.status === 'in_review' && <Button size="sm" disabled={busy} onClick={() => setConfirmAccept(true)}><CheckCircle2 className="h-3.5 w-3.5" /> {t('detail.archive')}</Button>}
           {task.status === 'in_review' && <Button size="sm" variant="outline" className="text-destructive" disabled={busy} onClick={() => setRejectOpen(true)}><XCircle className="h-3.5 w-3.5" /> {t('detail.reject')}</Button>}
         </div>
