@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { ProfileMaterializer, ROLE_PROFILES, BUILTIN_EXTENSIONS, BUILTIN_SKILLS, validateRoleProfiles, STEP_AGENTS, stepAgentForWorkload, validateStepAgents, type BuiltinSkill } from '../profiles.js';
+import { ProfileMaterializer, ROLE_PROFILES, EXPERT_PROFILES, BUILTIN_EXTENSIONS, BUILTIN_SKILLS, validateRoleProfiles, STEP_AGENTS, stepAgentForWorkload, validateStepAgents, type BuiltinSkill } from '../profiles.js';
 
 const ASSETS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../assets/profiles');
 
@@ -93,6 +93,36 @@ describe('ProfileMaterializer', () => {
     expect(second.profileDir).toBe(first.profileDir);
     expect(readFileSync(join(second.profileDir, 'models.json'), 'utf8')).toContain('fallback-model');
     expect(readFileSync(join(second.profileDir, '.complete'), 'utf8')).toContain(first.digest);
+  });
+
+  it('creates a new expert snapshot when a selected shared extension changes', () => {
+    const base = mkdtempSync(join(tmpdir(), 'profiles-source-change-'));
+    const assets = mkdtempSync(join(tmpdir(), 'profiles-source-change-assets-'));
+    mkdirSync(join(assets, 'tester'), { recursive: true });
+    mkdirSync(join(assets, 'shared', 'extensions'), { recursive: true });
+    writeFileSync(join(assets, 'tester', 'SYSTEM.md'), '# tester\n');
+    writeFileSync(join(assets, 'shared', 'extensions', 'event-bridge.ts'), 'export default 1;\n');
+    const expertProfiles = {
+      ...EXPERT_PROFILES,
+      test: { ...EXPERT_PROFILES.test, skills: [], extensions: ['event-bridge'] },
+    };
+    const m = new ProfileMaterializer(assets, base, ROLE_PROFILES, [], expertProfiles);
+    const input = {
+      expert: 'test' as const,
+      providerId: 'p1',
+      providerKind: 'openai' as const,
+      providerRevision: 1,
+      providerName: 'openai',
+      models: ['m'],
+    };
+
+    const first = m.materializeExpert(input);
+    writeFileSync(join(assets, 'shared', 'extensions', 'event-bridge.ts'), 'export default 2;\n');
+    const second = m.materializeExpert(input);
+
+    expect(second.digest).not.toBe(first.digest);
+    expect(second.profileDir).not.toBe(first.profileDir);
+    expect(readFileSync(join(second.profileDir, 'extensions', 'event-bridge.ts'), 'utf8')).toContain('default 2');
   });
 
   it('materializes all four roles distinctly', () => {

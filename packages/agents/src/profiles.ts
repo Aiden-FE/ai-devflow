@@ -301,6 +301,7 @@ export class ProfileMaterializer {
     const key = JSON.stringify({
       role: input.role,
       profileVersion: profile.version,
+      sourceDigest: this.roleSourceDigest(input.role),
       providerId: input.providerId,
       providerKind: input.providerKind,
       providerName: input.providerName,
@@ -317,6 +318,7 @@ export class ProfileMaterializer {
     const key = JSON.stringify({
       expert: input.expert,
       profileVersion: profile.version,
+      sourceDigest: this.expertSourceDigest(input.expert),
       providerId: input.providerId,
       providerKind: input.providerKind,
       providerName: input.providerName,
@@ -325,6 +327,59 @@ export class ProfileMaterializer {
       models: [...new Set(input.models)].sort(),
     });
     return createHash('sha256').update(key).digest('hex').slice(0, 16);
+  }
+
+  private roleSourceDigest(role: TaskRole): string {
+    const profile = this.profiles[role];
+    const skillByName = new Map(this.skillPool.map((skill) => [skill.name, skill]));
+    const entries: SourceEntry[] = [{ destination: '.', source: join(this.assetsRoot, role), kind: 'directory' }];
+    for (const skill of profile.skills) {
+      const entry = skillByName.get(skill);
+      if (!entry) throw new Error(`角色 ${role} 引用了未注册的技能：${skill}`);
+      if (entry.source !== role) {
+        entries.push({
+          destination: join('skills', skill),
+          source: join(this.assetsRoot, entry.source, 'skills', skill),
+          kind: 'directory',
+        });
+      }
+    }
+    for (const extension of profile.extensions) {
+      const source = join(this.assetsRoot, 'shared', 'extensions', `${extension}.ts`);
+      if (existsSync(source)) {
+        entries.push({ destination: join('extensions', `${extension}.ts`), source, kind: 'file' });
+      }
+    }
+    return sourceEntriesDigest(entries);
+  }
+
+  private expertSourceDigest(expert: ExecutionExpertKey): string {
+    const profile = this.expertProfiles[expert];
+    const assetDir = EXPERT_ASSETS_DIR[expert];
+    const skillByName = new Map(this.skillPool.map((skill) => [skill.name, skill]));
+    const entries: SourceEntry[] = [{ destination: '.', source: join(this.assetsRoot, assetDir), kind: 'directory' }];
+    for (const skill of profile.skills) {
+      const entry = skillByName.get(skill);
+      if (!entry) throw new Error(`专家 ${expert} 引用了未注册的技能：${skill}`);
+      const skillAssetDir =
+        (typeof entry.source === 'string' && (entry.source as string) in EXPERT_ASSETS_DIR)
+          ? EXPERT_ASSETS_DIR[entry.source as ExecutionExpertKey]
+          : entry.source;
+      if (skillAssetDir !== assetDir) {
+        entries.push({
+          destination: join('skills', skill),
+          source: join(this.assetsRoot, skillAssetDir, 'skills', skill),
+          kind: 'directory',
+        });
+      }
+    }
+    for (const extension of profile.extensions) {
+      const source = join(this.assetsRoot, 'shared', 'extensions', `${extension}.ts`);
+      if (existsSync(source)) {
+        entries.push({ destination: join('extensions', `${extension}.ts`), source, kind: 'file' });
+      }
+    }
+    return sourceEntriesDigest(entries);
   }
 
   materialize(input: MaterializeInput): { profileDir: string; digest: string } {
@@ -426,6 +481,44 @@ export class ProfileMaterializer {
     }
     return { profileDir, digest };
   }
+}
+
+interface SourceEntry {
+  destination: string;
+  source: string;
+  kind: 'directory' | 'file';
+}
+
+/** Hash exactly the source files copied into a profile snapshot, keyed by their destination path. */
+function sourceEntriesDigest(entries: SourceEntry[]): string {
+  const hash = createHash('sha256');
+  const visit = (sourceRoot: string, destinationRoot: string, relative: string): void => {
+    const absolute = relative ? join(sourceRoot, relative) : sourceRoot;
+    for (const entry of readdirSync(absolute, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const childRelative = relative ? join(relative, entry.name) : entry.name;
+      const childDestination = join(destinationRoot, childRelative);
+      if (entry.isDirectory()) {
+        hash.update(`d:${childDestination}\0`);
+        visit(sourceRoot, destinationRoot, childRelative);
+      } else if (entry.isFile()) {
+        hash.update(`f:${childDestination}\0`);
+        hash.update(readFileSync(join(sourceRoot, childRelative)));
+      } else {
+        throw new Error(`角色源资产包含不支持的文件类型：${join(sourceRoot, childRelative)}`);
+      }
+    }
+  };
+
+  for (const entry of [...entries].sort((a, b) => a.destination.localeCompare(b.destination))) {
+    if (entry.kind === 'directory') {
+      hash.update(`d:${entry.destination}\0`);
+      visit(entry.source, entry.destination, '');
+    } else {
+      hash.update(`f:${entry.destination}\0`);
+      hash.update(readFileSync(entry.source));
+    }
+  }
+  return hash.digest('hex');
 }
 
 function snapshotContentDigest(root: string): string {
