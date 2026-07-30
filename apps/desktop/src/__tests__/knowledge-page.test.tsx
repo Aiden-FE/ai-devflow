@@ -230,6 +230,8 @@ describe('KnowledgePage project reset and stale response rejection', () => {
     expect(text()).not.toContain('audit failed');
     // shell reflects the new project
     expect(container.querySelector('[data-testid="knowledge-shell"]')?.getAttribute('data-project-id')).toBe('p2');
+    // stable loading state is present while p2 snapshot is pending (refresh(true) sets loading=true)
+    expect(container.querySelector('[data-testid="knowledge-shell"] .h-40')).not.toBeNull();
   });
 
   it('rejects a late response from the previous project and keeps only the new project data', async () => {
