@@ -31,3 +31,5 @@ apps/desktop/build/pi-runtime/
 
 # Local git worktrees for isolated feature work
 .worktrees/
+.pi-subagents
+.superpowers
