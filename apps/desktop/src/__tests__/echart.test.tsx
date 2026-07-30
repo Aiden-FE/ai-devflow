@@ -27,13 +27,15 @@ vi.mock('echarts/core', () => ({ init, use }));
 // --- Controllable ResizeObserver ---
 type ROEntries = Array<{ contentRect: { width: number; height: number } }>;
 let roCallback: ((entries: ROEntries) => void) | null = null;
+let lastObserver: MockResizeObserver | null = null;
 class MockResizeObserver {
+  disconnect = vi.fn();
   constructor(cb: (entries: ROEntries) => void) {
     roCallback = cb;
+    lastObserver = this;
   }
   observe(): void {}
   unobserve(): void {}
-  disconnect(): void {}
 }
 
 const matchMediaMock = vi.fn().mockReturnValue({
@@ -46,11 +48,14 @@ const { EChart } = await import('../components/usage/EChart.js');
 
 const option = { series: [{ type: 'line', data: [1, 2, 3] }] } as const;
 
+const trackedRoots: ReturnType<typeof createRoot>[] = [];
+
 function setup(props?: { option?: Record<string, unknown>; ariaLabel?: string; onError?: (e: unknown) => void; className?: string }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const onError = props?.onError ?? vi.fn();
   const root = createRoot(container);
+  trackedRoots.push(root);
   act(() => {
     root.render(
       <EChart
@@ -71,6 +76,9 @@ describe('EChart lifecycle', () => {
     chart.resize.mockClear();
     chart.dispose.mockClear();
     roCallback = null;
+    lastObserver?.disconnect.mockClear();
+    lastObserver = null;
+    trackedRoots.length = 0;
     themeState.current = 'light';
     matchMediaMock.mockClear();
     matchMediaMock.mockReturnValue({ matches: false, addEventListener: () => {}, removeEventListener: () => {} });
@@ -79,6 +87,12 @@ describe('EChart lifecycle', () => {
   });
 
   afterEach(() => {
+    for (const root of trackedRoots) {
+      act(() => {
+        root.unmount();
+      });
+    }
+    trackedRoots.length = 0;
     vi.restoreAllMocks();
   });
 
@@ -103,6 +117,7 @@ describe('EChart lifecycle', () => {
       root.unmount();
     });
     expect(chart.dispose).toHaveBeenCalledTimes(1);
+    expect(lastObserver?.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it('updates option without re-initializing', () => {
