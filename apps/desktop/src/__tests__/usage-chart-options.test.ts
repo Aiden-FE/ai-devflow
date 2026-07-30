@@ -163,6 +163,24 @@ describe('buildUsageTrendOption', () => {
     expect(text).toContain('未知');
   });
 
+  it('reports total tokens in the successRate focus tooltip, including the unknown label for a null-total bucket', () => {
+    const option = buildUsageTrendOption(trendInput('successRate'));
+    const formatter = (option as any).tooltip.formatter;
+    // Known-total bucket (2026-07-29, total 165): total tokens line present.
+    const known: string = formatter([{ dataIndex: 0, axisValue: '2026-07-29' }]);
+    expect(known).toContain('165');
+    // Null-total bucket (2026-07-30): rendered as the localized unknown label.
+    const unknown: string = formatter([{ dataIndex: 1, axisValue: '2026-07-30' }]);
+    expect(unknown).toContain('未知');
+    // All six mandated fields present in the successRate tooltip.
+    expect(unknown).toContain('日期');
+    expect(unknown).toContain('调用次数');
+    expect(unknown).toContain('成功');
+    expect(unknown).toContain('失败');
+    expect(unknown).toContain('Token 总量');
+    expect(unknown).toContain('Token 覆盖率');
+  });
+
   it('disables animation under reduced motion', () => {
     const option = buildUsageTrendOption(trendInput('calls', { reducedMotion: true }));
     expect((option as any).animationDuration).toBe(0);

@@ -92,8 +92,9 @@ export function buildUsageTrendOption(input: UsageTrendInput): EChartsCoreOption
             `${labels.calls}: ${bucket.providerCalls}`,
             `${labels.succeeded}: ${bucket.succeeded}`,
             `${labels.failed}: ${bucket.failed}`,
-            `${labels.successRate}: ${rate}%`,
+            `${labels.totalTokens}: ${tokenTotalLabel(bucket, labels)}`,
             `${labels.coverage}: ${Math.round(bucket.tokenCoverage * 100)}%`,
+            `${labels.successRate}: ${rate}%`,
           ].join('\n');
         },
       },
