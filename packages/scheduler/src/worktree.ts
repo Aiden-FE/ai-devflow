@@ -248,7 +248,10 @@ export async function syncWorktreeWithBranch(opts: {
   sourceBranch: string;
 }): Promise<{ merged: boolean; reason?: string }> {
   try {
-    const { stdout } = await git(opts.worktreePath, ['status', '--porcelain']);
+    const excludedRuntimePaths = await untrackedRuntimePathExclusions(opts.worktreePath);
+    const { stdout } = await git(opts.worktreePath, [
+      'status', '--porcelain', '--untracked-files=all', '--', '.', ...excludedRuntimePaths,
+    ]);
     if (stdout.trim()) {
       return { merged: false, reason: '任务 worktree 存在未提交改动，无法同步迭代分支' };
     }
@@ -270,6 +273,26 @@ const HOST_COMMIT_FORBIDDEN_SEGMENTS = new Set([
   'node_modules',
 ]);
 
+/** Worktree-local dependency/tool caches that are execution scaffolding, not reviewed task output. */
+const WORKTREE_RUNTIME_PATHS = [
+  { tracked: 'node_modules', excluded: ':(top,exclude)node_modules' },
+  { tracked: '.extramods', excluded: ':(top,exclude).extramods' },
+  { tracked: '.pw-browsers', excluded: ':(top,exclude).pw-browsers' },
+  { tracked: '.toolchain', excluded: ':(top,exclude).toolchain' },
+  { tracked: '.toolchainbin', excluded: ':(top,exclude).toolchainbin' },
+  { tracked: ':(top,glob).tmp-*', excluded: ':(top,glob,exclude).tmp-*' },
+] as const;
+
+async function untrackedRuntimePathExclusions(worktreePath: string): Promise<string[]> {
+  const exclusions: string[] = [];
+  for (const pathspec of WORKTREE_RUNTIME_PATHS) {
+    const { stdout } = await git(worktreePath, ['ls-files', '-z', '--', pathspec.tracked]);
+    // Repository-owned paths remain visible; only wholly untracked execution scaffolding is excluded.
+    if (!stdout) exclusions.push(pathspec.excluded);
+  }
+  return exclusions;
+}
+
 function hostCommitForbidden(path: string): boolean {
   return path.split('/').some((segment) => {
     const lower = segment.toLowerCase();
@@ -283,7 +306,8 @@ export async function commitWorktreeChanges(opts: {
   message: string;
 }): Promise<{ committed: boolean; changedPaths: string[]; reason?: string }> {
   try {
-    await git(opts.worktreePath, ['add', '-A']);
+    const excludedRuntimePaths = await untrackedRuntimePathExclusions(opts.worktreePath);
+    await git(opts.worktreePath, ['add', '-A', '--', '.', ...excludedRuntimePaths]);
     const { stdout } = await git(opts.worktreePath, ['diff', '--cached', '--name-only', '-z']);
     const changedPaths = stdout.split('\0').filter(Boolean).sort();
     const forbidden = changedPaths.filter(hostCommitForbidden);

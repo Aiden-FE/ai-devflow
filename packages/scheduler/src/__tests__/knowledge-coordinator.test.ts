@@ -28,13 +28,23 @@ function makeRepo(): string {
 /** Fake runner：project_lead 只写文件；Git 暂存、提交与合并必须由宿主负责。 */
 class KnowledgeFakeRunner implements AgentRunner {
   requests: AgentRunRequest[] = [];
-  constructor(private opts: { outOfScope?: boolean } = {}) {}
+  constructor(private opts: { outOfScope?: boolean; runtimeArtifacts?: string[]; stageRuntimeArtifacts?: boolean } = {}) {}
   async verifyRuntime(): Promise<{ version: string; entry: string }> {
     return { version: 'fake', entry: 'fake' };
   }
   async run(req: AgentRunRequest): Promise<AgentRun> {
     this.requests.push(req);
     if (req.expert === 'project_lead' && req.resultKind === 'knowledge_initialization') {
+      // 运行时（打包的 esbuild/lightningcss 平台二进制等）可能在 worktree 落下 .extramods/ 等产物。
+      // 这类产物既非 agent 越界源码改动，也不应进入知识提交门禁。
+      for (const artifact of this.opts.runtimeArtifacts ?? []) {
+        const abs = join(req.cwd, artifact);
+        mkdirSync(join(abs).split('/').slice(0, -1).join('/'), { recursive: true });
+        writeFileSync(abs, 'runtime artifact\n', 'utf8');
+      }
+      if (this.opts.stageRuntimeArtifacts && this.opts.runtimeArtifacts?.length) {
+        shGit(req.cwd, ['add', '-f', '--', ...this.opts.runtimeArtifacts]);
+      }
       const path = this.opts.outOfScope ? 'packages/core/src/types.ts' : 'docs/knowledge/feature/task-review.md';
       mkdirSync(join(req.cwd, join(path).split('/').slice(0, -1).join('/')), { recursive: true });
       writeFileSync(join(req.cwd, path), this.opts.outOfScope ? '# Task Review\n' : `---
@@ -147,6 +157,107 @@ describe('KnowledgeCoordinator', () => {
     expect(execFileSync('git', [
       'show', 'ai-devflow-sprint/v-node-modules:docs/iterations/v-node-modules/index.md',
     ], { cwd: repo, encoding: 'utf8' })).toContain('it-node-modules');
+  });
+
+  it('ignores runtime .extramods artifacts when committing knowledge drafts', async () => {
+    // 运行时（打包的 esbuild/lightningcss 平台二进制等）在 worktree 里落下未忽略的 .extramods/，
+    // 这类产物不是 agent 越界源码改动，知识门禁必须豁免，否则任务会被确定性卡死且无法靠重启解开。
+    const runtimeRunner = new KnowledgeFakeRunner({
+      runtimeArtifacts: [
+        '.extramods/esbuild-0.21.3.tgz',
+        '.extramods/esbuild-0.21.3/bin/esbuild',
+        '.extramods/lightningcss-darwin-x64/lightningcss.darwin-x64.node',
+      ],
+    });
+    const guardedCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: runtimeRunner,
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    const run = await guardedCoordinator.startInitialization('p1');
+
+    expect(run.confirmationState).toBe('pending');
+    expect(run.changedPaths).toContain('docs/knowledge/feature/task-review.md');
+    // .extramods 运行时产物不得进入知识草稿提交。
+    expect(run.changedPaths.some((p) => p.startsWith('.extramods/'))).toBe(false);
+  });
+
+  it('rejects staged runtime artifacts instead of including them in a knowledge commit', async () => {
+    const guardedCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: new KnowledgeFakeRunner({
+        runtimeArtifacts: ['.extramods/esbuild/bin/esbuild'],
+        stageRuntimeArtifacts: true,
+      }),
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    await expect(guardedCoordinator.startInitialization('p1')).rejects.toThrow(
+      /越界改动被拒绝：\.extramods\/esbuild\/bin\/esbuild/,
+    );
+  });
+
+  it('rejects tracked runtime artifact modifications in knowledge worktrees', async () => {
+    mkdirSync(join(repo, '.extramods'), { recursive: true });
+    writeFileSync(join(repo, '.extramods', 'tracked.txt'), 'baseline\n');
+    shGit(repo, ['add', '.extramods/tracked.txt']);
+    shGit(repo, ['commit', '-q', '-m', 'track runtime fixture']);
+    const guardedCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: new KnowledgeFakeRunner({ runtimeArtifacts: ['.extramods/tracked.txt'] }),
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    await expect(guardedCoordinator.startInitialization('p1')).rejects.toThrow(
+      /越界改动被拒绝：\.extramods\/tracked\.txt/,
+    );
+  });
+
+  it('prepares a retried task without treating existing implementation changes as knowledge changes', async () => {
+    repos.iterations.insert({
+      id: 'it-retry', projectId: 'p1', name: 'Retry', version: 'v-retry', status: 'active', createdAt: 1,
+    });
+    repos.requirements.insert({
+      id: 'req-retry', iterationId: 'it-retry', title: 'Retry requirement', description: '',
+      priority: 'medium', acceptance: '', createdAt: 1, archived: false,
+    });
+    const task = {
+      id: 'task-retry', requirementId: 'req-retry', iterationId: 'it-retry', projectId: 'p1',
+      title: 'Resume implementation', description: '', status: 'in_progress' as const, role: 'coder' as const,
+      stages: [], currentStage: 0, statusChangedAt: 1, createdAt: 1, updatedAt: 1, retryCount: 1,
+    };
+    repos.tasks.insert(task);
+    repos.executions.insert({
+      id: 'exec-retry', taskId: task.id, attempt: 2, startedAt: 1, status: 'running',
+    });
+    writeFileSync(join(repo, 'README.md'), '# staged implementation change\n');
+    shGit(repo, ['add', 'README.md']);
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'feature.ts'), 'export const feature = true;\n');
+    mkdirSync(join(repo, '.toolchain'), { recursive: true });
+    writeFileSync(join(repo, '.toolchain', 'node'), 'runtime cache\n');
+
+    await expect(coordinator.prepareTaskExecution({
+      task,
+      project: { id: 'p1', path: repo, defaultBranch: 'main' },
+      executionId: 'exec-retry',
+      expert: 'dev',
+      stage: 'development',
+      cwd: repo,
+    })).resolves.toBeDefined();
+
+    const committedPaths = execFileSync(
+      'git', ['show', '--pretty=', '--name-only', 'HEAD'], { cwd: repo, encoding: 'utf8' },
+    ).trim().split('\n').filter(Boolean);
+    expect(committedPaths).toEqual(['docs/iterations/v-retry/tasks/task-retry/index.md']);
+    const status = execFileSync('git', ['status', '--short'], { cwd: repo, encoding: 'utf8' });
+    expect(status).toContain('M  README.md');
+    expect(status).toContain('?? .toolchain/');
+    expect(status).toContain('?? src/');
   });
 
   it('rejects a node_modules link that no longer targets the project dependencies', async () => {

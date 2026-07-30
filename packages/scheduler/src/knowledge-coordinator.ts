@@ -152,15 +152,26 @@ function isManagedNodeModulesLink(cwd: string, projectPath: string, relativePath
   }
 }
 
+// 运行时产物根目录：运行时（打包的 esbuild/lightningcss 平台二进制等）可能在 worktree 里
+// 落下未忽略的产物目录。这些并非 agent 越界源码改动，知识门禁必须豁免，否则任务会被确定性
+// 卡死且无法靠重启解开（取消->重启复用同一 worktree，产物持续残留并重复触发越界拒绝）。
+const RUNTIME_ARTIFACT_ROOTS = new Set(['.extramods']);
+
+function isRuntimeArtifactPath(relativePath: string): boolean {
+  const root = relativePath.split('/')[0] ?? '';
+  return RUNTIME_ARTIFACT_ROOTS.has(root);
+}
+
 /** Agent 只负责写文件；宿主在提交前读取完整工作区变化并执行路径门禁。 */
 function workingTreeChangedPaths(cwd: string, projectPath: string): string[] {
   const paths = new Set<string>();
   for (const probe of [
-    { args: ['diff', '--name-only', '-z'], allowManagedDependencies: false },
-    { args: ['diff', '--cached', '--name-only', '-z'], allowManagedDependencies: false },
-    { args: ['ls-files', '--others', '--exclude-standard', '-z'], allowManagedDependencies: true },
+    { args: ['diff', '--name-only', '-z'], allowManagedDependencies: false, ignoreRuntimeArtifacts: false },
+    { args: ['diff', '--cached', '--name-only', '-z'], allowManagedDependencies: false, ignoreRuntimeArtifacts: false },
+    { args: ['ls-files', '--others', '--exclude-standard', '-z'], allowManagedDependencies: true, ignoreRuntimeArtifacts: true },
   ]) {
     for (const path of splitNul(gitOutput(cwd, probe.args))) {
+      if (probe.ignoreRuntimeArtifacts && isRuntimeArtifactPath(path)) continue;
       if (!probe.allowManagedDependencies || !isManagedNodeModulesLink(cwd, projectPath, path)) {
         paths.add(path);
       }
@@ -177,8 +188,25 @@ function commitKnowledgeDraft(cwd: string, projectPath: string, message: string)
   }
   if (changedPaths.length === 0) return [];
   shGit(cwd, ['add', '-A', '--', ...changedPaths]);
-  shGit(cwd, ['commit', '-q', '-m', message]);
+  shGit(cwd, ['commit', '-q', '--only', '-m', message, '--', ...changedPaths]);
   return changedPaths;
+}
+
+/**
+ * 任务 worktree 可保留上一次开发运行的源码、测试产物与暂存内容。这里只提交布局初始化
+ * 本次明确创建的文档，避免通用知识草稿门禁把合法的既有实现改动判为越界。
+ */
+function commitCreatedTaskDocs(cwd: string, createdPaths: string[], message: string): string[] {
+  const paths = [...new Set(createdPaths)].sort();
+  const outOfScope = paths.filter((path) => !isDocPath(path));
+  if (outOfScope.length > 0) {
+    throw new Error(`任务文档路径越界：${outOfScope.join(', ')}`);
+  }
+  if (paths.length === 0) return [];
+  shGit(cwd, ['add', '--', ...paths]);
+  // --only 保证此前已暂存的业务改动不会被宿主的任务文档提交夹带。
+  shGit(cwd, ['commit', '-q', '--only', '-m', message, '--', ...paths]);
+  return paths;
 }
 
 /** 将 Agent 事件流消费为 done 载荷或错误。 */
@@ -917,14 +945,14 @@ export class KnowledgeCoordinator extends EventEmitter {
     if (input.stage === 'development') {
       const iteration = this.opts.repos.iterations.get(input.task.iterationId);
       if (iteration) {
-        await this.opts.knowledge.initializeTask({
+        const layout = await this.opts.knowledge.initializeTask({
           repoPath: input.cwd,
           version: iteration.version,
           taskId: input.task.id,
           title: input.task.title,
           date: dateStr(this.now()),
         });
-        commitKnowledgeDraft(input.cwd, input.project.path, `task docs: ${input.task.id}`);
+        commitCreatedTaskDocs(input.cwd, layout.created, `task docs: ${input.task.id}`);
       }
     }
     const manifest = await this.opts.knowledge.planRetrieval({

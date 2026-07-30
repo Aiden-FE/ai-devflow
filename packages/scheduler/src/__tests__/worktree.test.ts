@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createWorktree, removeWorktree, listWorktrees, isGitRepo, WorktreeError, mergeWorktreeBranch, commitWorktreeChanges, sprintBranchName, sanitizeBranchSegment, ensureSprintBranch, mergeBranchInto, branchExists, compareAndSwapBranchRef, resolveProjectDefaultBranch } from '../worktree.js';
+import { createWorktree, removeWorktree, listWorktrees, isGitRepo, WorktreeError, mergeWorktreeBranch, syncWorktreeWithBranch, commitWorktreeChanges, sprintBranchName, sanitizeBranchSegment, ensureSprintBranch, mergeBranchInto, branchExists, compareAndSwapBranchRef, resolveProjectDefaultBranch } from '../worktree.js';
 
 let repo: string;
 let base: string;
@@ -232,7 +232,57 @@ describe('mergeWorktreeBranch', () => {
   });
 });
 
+describe('syncWorktreeWithBranch', () => {
+  it('ignores untracked runtime scaffolding after reviewed task files are committed', async () => {
+    mkdirSync(join(repo, 'node_modules'));
+    writeFileSync(join(repo, 'node_modules', 'package.json'), '{}');
+    const handle = await createWorktree({ repoPath: repo, baseDir: base, id: 'sync-runtime', baseBranch: 'main' });
+    mkdirSync(join(handle.path, '.toolchain'), { recursive: true });
+    writeFileSync(join(handle.path, '.toolchain', 'node'), 'runtime cache\n');
+    writeFileSync(join(handle.path, '.tmp-verify.mk'), 'runtime verification helper\n');
+    writeFileSync(join(handle.path, 'feature.txt'), 'reviewed change\n');
+    const committed = await commitWorktreeChanges({ worktreePath: handle.path, message: 'task: reviewed' });
+    expect(committed.committed).toBe(true);
+
+    writeFileSync(join(repo, 'sprint-update.txt'), 'latest sprint change\n');
+    sh('git', ['add', 'sprint-update.txt'], repo);
+    sh('git', ['commit', '-q', '-m', 'sprint update'], repo);
+
+    const result = await syncWorktreeWithBranch({ worktreePath: handle.path, sourceBranch: 'main' });
+
+    expect(result).toEqual({ merged: true });
+    expect(existsSync(join(handle.path, 'sprint-update.txt'))).toBe(true);
+    expect(existsSync(join(handle.path, '.toolchain', 'node'))).toBe(true);
+  });
+
+  it('still rejects untracked task files', async () => {
+    const handle = await createWorktree({ repoPath: repo, baseDir: base, id: 'sync-dirty', baseBranch: 'main' });
+    writeFileSync(join(handle.path, 'unreviewed.txt'), 'not committed\n');
+
+    const result = await syncWorktreeWithBranch({ worktreePath: handle.path, sourceBranch: 'main' });
+
+    expect(result.merged).toBe(false);
+    expect(result.reason).toMatch(/未提交改动/);
+  });
+});
+
 describe('host task commits', () => {
+  it('ignores untracked runtime scaffolding while committing reviewed task files', async () => {
+    mkdirSync(join(repo, 'node_modules'));
+    writeFileSync(join(repo, 'node_modules', 'package.json'), '{}');
+    const handle = await createWorktree({ repoPath: repo, baseDir: base, id: 'runtime-artifacts', baseBranch: 'main' });
+    mkdirSync(join(handle.path, '.toolchain'), { recursive: true });
+    writeFileSync(join(handle.path, '.toolchain', 'node'), 'runtime cache\n');
+    writeFileSync(join(handle.path, '.tmp-verify.mk'), 'runtime verification helper\n');
+    writeFileSync(join(handle.path, 'feature.txt'), 'reviewed change\n');
+
+    const result = await commitWorktreeChanges({ worktreePath: handle.path, message: 'task: reviewed' });
+
+    expect(result).toMatchObject({ committed: true, changedPaths: ['feature.txt'] });
+    expect(lstatSync(join(handle.path, 'node_modules')).isSymbolicLink()).toBe(true);
+    expect(execFileSync('git', ['show', '--name-only', '--format=', 'HEAD'], { cwd: handle.path, encoding: 'utf8' }).trim()).toBe('feature.txt');
+  });
+
   it('rejects sensitive paths and leaves their changes uncommitted', async () => {
     writeFileSync(join(repo, '.env.local'), 'BASELINE=true\n');
     sh('git', ['add', '-f', '.env.local'], repo);
