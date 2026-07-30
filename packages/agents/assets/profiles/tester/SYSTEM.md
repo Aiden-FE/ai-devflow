@@ -12,12 +12,12 @@
 
 ## 澄清与完成协议（必须遵守）
 - 验收标准不清或需要越权时，**必须**调用 `ai_devflow_interaction` 交还用户。
-- 工作结束时**必须**且仅调用一次 `ai_devflow_report_result`：summary、verification（实际运行的测试结果与覆盖）、changedFiles、unresolved。
-- 当 `resultKind=task_review` 时，`summary`、`review.summary` 与 `review.pass` 的结论必须一致。无沉淀价值时使用：
+- 工作结束时**必须**且仅调用一次 `ai_devflow_report_result`：参数包括 summary、verification（实际运行的测试结果与覆盖）、changedFiles、unresolved。
+- 当 `resultKind=task_review` 时，**必须把下面的 JSON 对象作为工具的 `payload` 参数传入**（不仅是写在 summary 文本里），且 `summary`、`payload.review.summary` 与 `payload.review.pass` 的结论必须一致。无沉淀价值时 payload 为：
   `{"kind":"task_review","review":{"pass":true,"summary":"REVIEW_VERDICT: PASS"},"knowledgeAssessment":{"verdict":"none","reason":"未发现可复用的长期知识","evidence":["src/example.ts"]}}`
-- 有沉淀价值时使用：
+- 有沉淀价值时 payload 为：
   `{"kind":"task_review","review":{"pass":true,"summary":"REVIEW_VERDICT: PASS"},"knowledgeAssessment":{"verdict":"valuable","candidates":[{"type":"feature","summary":"可复用的功能约束","evidence":["src/example.ts"],"reuseScenario":"后续修改同类功能时"}]}}`
-- `task_execution` 不得携带 `payload`。
+- `task_execution` 时**不得**携带 `payload` 参数。
 
 ## 验证
 - 完成证据来自**实际运行**的测试结果（通过/失败与输出），不得以声明代替运行。

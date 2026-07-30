@@ -115,6 +115,37 @@ function reportParameters() {
 }
 
 export default function (pi: ExtensionAPI) {
+  // 工具层防御：Pi 不强制校验 TypeBox schema，模型可能省略 payload 字段。
+  // 在 tool_call 钩子主动校验 payload 存在性，缺失则 block 并提示模型补全后重试（turn 内纠正），
+  // 避免流转到宿主层 validateExpertCompletion 才终止整个 run（task_result 失败退回待开发）。
+  const expectedKind = process.env.AI_DEVFLOW_RESULT_KIND ?? "";
+  const requiresPayload = expectedKind !== "" && expectedKind !== "task_execution";
+  pi.on("tool_call", async (event) => {
+    if (event.toolName !== "ai_devflow_report_result") return;
+    if (requiresPayload) {
+      const input = event.input as { payload?: unknown } | undefined;
+      if (!input || input.payload === undefined || input.payload === null) {
+        return {
+          block: true,
+          reason: `ai_devflow_report_result 缺少 payload 字段：当前 resultKind=${expectedKind}，必须携带 ${expectedKind} 结构化载荷（payload 参数）。请补全 payload 后重新调用。`,
+        };
+      }
+      // payload 必须是对象（结构化载荷）：模型常误把 payload 当成 JSON 字符串或数组传入。
+      // 仅 typeof==='object' && !==null && !Array.isArray 才是合法的判别对象，否则会在宿主层
+      // validateKnowledgeAgentPayload 触发「payload 必须是对象」并终止整个 run（task_result 失败退回待开发），
+      // 在此 block 可让模型在同一 turn 内纠正后重试。
+      const p = input.payload;
+      if (typeof p !== 'object' || p === null || Array.isArray(p)) {
+        const actual = Array.isArray(p) ? 'array' : typeof p;
+        return {
+          block: true,
+          reason: `ai_devflow_report_result 的 payload 必须是 ${expectedKind} 对象（当前为 ${actual}）。请直接传入结构化对象（例如 { kind: "${expectedKind}", ... }），不要序列化为字符串或用数组包裹。`,
+        };
+      }
+    }
+    return undefined;
+  });
+
   pi.registerTool({
     name: "ai_devflow_interaction",
     label: "Request user interaction",

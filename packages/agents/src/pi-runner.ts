@@ -392,8 +392,18 @@ export class PiRunner implements AgentRunner {
 
     try { this.deps.attempts?.finish(attemptId, 'failed', Date.now()); } catch { /* best-effort telemetry */ }
     let error: ProviderExecutionError;
+    const completedWithoutDomainResult =
+      request.resultKind !== 'task_execution'
+      && agentEndObserved
+      && !translator.hasStructuredResult()
+      && (exitInfo.exitCode === 0 || (cancelAfterAgentEnd !== undefined && exitInfo.signal !== null));
     if (pe) {
       error = new ProviderExecutionError(pe.message || 'provider error', classifyProviderFailure(pe), pe.status);
+    } else if (completedWithoutDomainResult) {
+      error = new ProviderExecutionError(
+        finishError instanceof Error ? finishError.message : `${request.resultKind} 结果缺少领域载荷`,
+        'task_result',
+      );
     } else if (exitInfo.exitCode !== null && exitInfo.exitCode !== 0) {
       error = new ProviderExecutionError(`Pi 进程异常退出（code ${exitInfo.exitCode}）`, 'runtime', exitInfo.exitCode);
     } else {

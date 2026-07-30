@@ -121,6 +121,31 @@ describe('createPiEventTranslator', () => {
     expect(() => translator.finish()).not.toThrow();
   });
 
+  it('rejects a string payload as a non-object with the contract diagnostic', () => {
+    // 回归：模型把 payload 误传为 JSON 字符串时，工具层守卫应 block（见 event-bridge.ts），
+    // 万一流转到翻译器，validateKnowledgeAgentPayload 必须给出「payload 必须是对象」诊断，
+    // 而不是「payload.kind 无效」（数组路径）或静默接受，以便宿主层以 task_result 失败精确退回。
+    const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
+    translator.push(JSON.stringify({
+      type: 'tool_execution_start', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', args: {},
+    }));
+    translator.push(JSON.stringify({
+      type: 'tool_execution_end', toolCallId: 'tc1', toolName: 'ai_devflow_report_result', isError: false,
+      result: {
+        details: {
+          aiDevflowResult: {
+            summary: 'done', verification: ['ok'], changedFiles: [], unresolved: [],
+            payload: '{"kind":"task_review","review":{"pass":true}}',
+          },
+        },
+      },
+    }));
+    translator.push(JSON.stringify({ type: 'agent_end', messages: [] }));
+    const result = translator.structuredResult()!;
+    expect(result.payload).toBeUndefined();
+    expect(result.payloadError).toBe('payload 必须是对象');
+  });
+
   it('rejects a report result when agent_end is missing', () => {
     const translator = createPiEventTranslator({ executionId: 'e1', attemptId: 'a1' });
     translator.push(JSON.stringify({

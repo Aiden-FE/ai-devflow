@@ -283,6 +283,24 @@ it('fails a reviewer latch-blocked interaction terminal without pausing', async 
   expect((await run.done()).ok).toBe(false);
 });
 
+it('classifies a completed review turn without a structured result as task_result', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'review-missing-result' });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 'review-missing-result' },
+    executionId: 'review-missing-result',
+    expert: 'test',
+    resultKind: 'task_review',
+    prompt: 'review',
+    cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+
+  expect(events).toContainEqual(expect.objectContaining({ type: 'error', failureKind: 'task_result' }));
+  expect(events).not.toContainEqual(expect.objectContaining({ type: 'done' }));
+  expect(harness.spawnedCommands).toHaveLength(1);
+  expect((await run.done()).ok).toBe(false);
+});
+
 it('does not fail over on a task-result failure (structured result received)', async () => {
   const harness = createPiRunnerHarness({ scenario: 'task-result-failure' });
   const run = await harness.runner.run({

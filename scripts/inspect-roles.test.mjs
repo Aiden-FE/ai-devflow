@@ -17,7 +17,7 @@ async function reportParametersFor(resultKind) {
         process.env.AI_DEVFLOW_RESULT_KIND = ${JSON.stringify(resultKind)};
         const { default: register } = await import(${JSON.stringify(eventBridge)});
         const tools = [];
-        register({ registerTool(tool) { tools.push(tool); } });
+        register({ registerTool(tool) { tools.push(tool); }, on() {} });
         export const parameters = tools.find((tool) => tool.name === 'ai_devflow_report_result').parameters;
       `,
       resolveDir: here,
@@ -141,4 +141,77 @@ test('event bridge requires a result-kind-specific payload schema', async () => 
     assert.ok(parameters.required.includes('payload'), `${kind} payload must be required`);
     assert.equal(parameters.properties.payload.properties.kind.const, kind);
   }
+});
+
+test('event bridge tool_call hook blocks missing payload for non-task_execution kinds and lets task_execution through', async () => {
+  // 每个 resultKind 用独立的 bundle（独立模块实例），避免 ES module 缓存导致 process.env 切换失效。
+  async function dispatchForResultKind(resultKind, input) {
+    const result = await build({
+      stdin: {
+        contents: `
+          process.env.AI_DEVFLOW_RESULT_KIND = ${JSON.stringify(resultKind)};
+          const handlers = [];
+          const tools = [];
+          const api = { registerTool(tool) { tools.push(tool); }, on(_name, fn) { handlers.push(fn); } };
+          const { default: register } = await import(${JSON.stringify(eventBridge)});
+          register(api);
+          export async function dispatch(input) {
+            const ev = { toolName: 'ai_devflow_report_result', input };
+            for (const fn of handlers) {
+              const r = await fn(ev);
+              if (r) return r;
+            }
+            return undefined;
+          }
+        `,
+        resolveDir: here,
+        loader: 'js',
+      },
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      write: false,
+      logLevel: 'silent',
+      plugins: [{
+        name: 'typebox-test-double',
+        setup(esbuild) {
+          esbuild.onResolve({ filter: /^typebox$/ }, () => ({ path: 'typebox', namespace: 'typebox-test' }));
+          esbuild.onLoad({ filter: /.*/, namespace: 'typebox-test' }, () => ({
+            loader: 'js',
+            contents: `
+              const scalar = (type, options = {}) => ({ type, ...options });
+              export const Type = {
+                String: (options) => scalar('string', options),
+                Number: (options) => scalar('number', options),
+                Integer: (options) => scalar('integer', options),
+                Boolean: () => scalar('boolean'),
+                Literal: (value) => ({ const: value }),
+                Union: (anyOf) => ({ anyOf }),
+                Array: (items, options = {}) => ({ type: 'array', items, ...options }),
+                Optional: (schema) => ({ ...schema, __optional: true }),
+                Unknown: () => ({}),
+                Object: (properties) => ({ type: 'object', properties }),
+              };
+            `,
+          }));
+        },
+      }],
+    });
+    const dataUrl = `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`;
+    const mod = await import(dataUrl);
+    return mod.dispatch(input);
+  }
+
+  // task_review 缺少 payload -> block，提示模型补全。
+  const blocked = await dispatchForResultKind('task_review', { summary: 'ok', verification: ['v'], changedFiles: [], unresolved: [] });
+  assert.ok(blocked && blocked.block === true, 'missing payload must be blocked for task_review');
+  assert.match(blocked.reason, /payload/);
+
+  // task_review 携带 payload -> 放行。
+  const allowed = await dispatchForResultKind('task_review', { summary: 'ok', verification: ['v'], changedFiles: [], unresolved: [], payload: { kind: 'task_review', review: { pass: true, summary: 'REVIEW_VERDICT: PASS' }, knowledgeAssessment: { verdict: 'none', reason: 'r', evidence: ['e'] } } });
+  assert.equal(allowed, undefined, 'present payload must be allowed');
+
+  // task_execution 不得携带 payload -> 即便无 payload 也放行。
+  const noPayloadOk = await dispatchForResultKind('task_execution', { summary: 'ok', verification: ['v'], changedFiles: [], unresolved: [] });
+  assert.equal(noPayloadOk, undefined, 'task_execution must not require payload');
 });

@@ -24,6 +24,7 @@ export type FakeScenario =
   | 'rate-limit'
   | 'runtime-crash'
   | 'protocol-corruption'
+  | 'review-missing-result'
   | 'interaction'
   | 'interaction-then-hang'
   | 'report-then-hang'

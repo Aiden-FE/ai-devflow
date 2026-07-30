@@ -225,6 +225,11 @@ switch (scenario) {
     process.exit(0);
     break;
 
+  case 'review-missing-result':
+    emit({ type: 'agent_end', messages: [] });
+    process.exit(0);
+    break;
+
   default:
     succeed('done');
 }
