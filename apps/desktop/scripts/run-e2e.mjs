@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const require = createRequire(import.meta.url);
@@ -748,6 +749,151 @@ try {
   await win.getByRole('option', { name: '中文' }).click();
   await win.getByRole('button', { name: '设置' }).first().waitFor({ timeout: 3000 });
   check('切换回中文', await win.getByRole('button', { name: '设置' }).first().isVisible());
+
+  // 9. 使用统计仪表盘：seed 确定性原始数据 -> 断言 KPI / 图表 / UUID 去标识 / 下钻 / 主题 / 响应式布局。
+  const userDataPath = await app.evaluate(({ app }) => app.getPath('userData'));
+  const usageDbPath = join(userDataPath, 'ai-devflow.db');
+  const USAGE_PROVIDER_ID = 'development-e2e-provider';
+  const USAGE_PROVIDER_NAME = 'Development E2E provider';
+  const USAGE_UUID_PROVIDER = '776f5082-9779-4a15-8f3d-ac0b7068da9b';
+  const now = Date.now();
+  const startedAt = now - 60_000;
+  const endedAt = now - 30_000;
+  const durationMs = endedAt - startedAt;
+  {
+    const seedDb = new DatabaseSync(usageDbPath);
+    seedDb.exec('PRAGMA busy_timeout = 5000');
+    seedDb.exec('DELETE FROM provider_usage');
+    seedDb.exec('DELETE FROM provider_usage_daily');
+    seedDb.exec('DELETE FROM logical_request_daily');
+    const insertUsage = seedDb.prepare(`
+      INSERT INTO provider_usage(
+        id, logical_request_id, provider_id, provider_name, route_id, model, workload, source,
+        execution_id, task_id, project_id, attempt_ordinal, status, failure_kind,
+        started_at, ended_at, duration_ms,
+        input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+    // 三条配置供应商调用（两个逻辑请求），三条已知 Token 总量。
+    insertUsage.run('usage-seed-1', 'usage-lr-cfg-1', USAGE_PROVIDER_ID, USAGE_PROVIDER_NAME, '',
+      'gpt-5', 'task', 'agent', null, null, null, 1, 'succeeded', null,
+      startedAt, endedAt, durationMs, 100, 40, 20, 5, 165);
+    insertUsage.run('usage-seed-2', 'usage-lr-cfg-1', USAGE_PROVIDER_ID, USAGE_PROVIDER_NAME, '',
+      'gpt-5', 'task', 'agent', null, null, null, 2, 'succeeded', null,
+      startedAt + 1_000, endedAt + 1_000, durationMs, 30, 10, 0, 0, 40);
+    insertUsage.run('usage-seed-3', 'usage-lr-cfg-2', USAGE_PROVIDER_ID, USAGE_PROVIDER_NAME, '',
+      'gpt-5', 'task', 'agent', null, null, null, 1, 'failed', 'network',
+      startedAt + 2_000, endedAt + 2_000, durationMs, 20, 8, 0, 0, 28);
+    // 一条未配置 UUID 供应商调用，total_tokens 未知（NULL）。
+    insertUsage.run('usage-seed-4', 'usage-lr-uuid-1', USAGE_UUID_PROVIDER, USAGE_UUID_PROVIDER, '',
+      'claude', 'task', 'agent', null, null, null, 1, 'failed', 'timeout',
+      startedAt + 3_000, endedAt + 3_000, durationMs, null, null, null, null, null);
+    seedDb.close();
+  }
+
+  await win.getByRole('button', { name: '使用统计' }).click();
+  await win.getByTestId('usage-shell').waitFor({ timeout: 10_000 });
+  await win.getByText('供应商对比').waitFor({ timeout: 10_000 });
+  const usageBody1 = await win.evaluate(() => document.body.textContent ?? '');
+  check('使用统计页面渲染 KPI 与供应商对比',
+    usageBody1.includes('调用次数') && usageBody1.includes('Token 覆盖率') && usageBody1.includes('供应商对比'));
+  check('使用统计展示 75% Token 覆盖率', usageBody1.includes('75%'));
+  check('使用统计展示四条调用', usageBody1.includes('4'));
+  check('使用统计展示两条失败调用', usageBody1.includes('2') && usageBody1.includes('失败调用'));
+  // 配置供应商装饰为展示名；UUID 供应商短码化，页面永不出现完整 UUID 或 ai-devflow-<hex>。
+  check('使用统计装饰配置供应商展示名', usageBody1.includes(USAGE_PROVIDER_NAME));
+  check('使用统计 UUID 供应商短码化', usageBody1.includes('776f…da9b'));
+  check('使用统计不泄露完整 UUID', !usageBody1.includes(USAGE_UUID_PROVIDER));
+  check('使用统计不泄露运行时哈希名', !/ai-devflow-[0-9a-f]+/.test(usageBody1));
+  const providerRowCount = await win.evaluate(() =>
+    document.querySelectorAll('[data-testid="provider-table-scroll"] tbody tr').length);
+  check('使用统计渲染两个供应商行', providerRowCount === 2);
+
+  const charts = await win.evaluate(() => {
+    const canvases = [...document.querySelectorAll('[data-testid="usage-shell"] canvas')];
+    return canvases.map((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      let dataLen = 0;
+      try { dataLen = canvas.toDataURL().length; } catch { dataLen = 0; }
+      return { width: rect.width, height: rect.height, dataLen };
+    });
+  });
+  const meaningfulCharts = charts.filter((chart) => chart.width > 0 && chart.height > 0 && chart.dataLen > 100);
+  check('使用统计渲染至少两个有效图表 Canvas', meaningfulCharts.length >= 2);
+
+  // 下钻配置供应商：五个分项齐全；返回后 30 天按钮仍选中。
+  // 表格按 provider_id 排序，UUID 供应商排在配置供应商之前，因此按行内展示名定位详情按钮。
+  await win.locator('[data-testid="provider-table-scroll"] tbody tr')
+    .filter({ hasText: USAGE_PROVIDER_NAME })
+    .getByRole('button', { name: '查看详情' })
+    .click();
+  await win.getByText('模型').waitFor({ timeout: 5_000 });
+  const drillBody = await win.evaluate(() => document.body.textContent ?? '');
+  check('使用统计下钻展示分项分组',
+    drillBody.includes('模型') && drillBody.includes('项目') && drillBody.includes('工作负载')
+    && drillBody.includes('调用来源') && drillBody.includes('失败类型'));
+  check('使用统计下钻装饰供应商展示名', drillBody.includes(USAGE_PROVIDER_NAME));
+  await win.getByRole('button', { name: '返回总体统计' }).click();
+  await win.getByText('供应商对比').waitFor({ timeout: 5_000 });
+  const days30Selected = await win.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[data-testid="usage-shell"] button[aria-pressed]')];
+    const target = buttons.find((button) => /30 天/.test(button.textContent ?? ''));
+    return target ? target.getAttribute('aria-pressed') === 'true' : false;
+  });
+  check('使用统计返回后 30 天按钮仍选中', days30Selected);
+
+  // 宽窗口（默认 1280x840）无页面级横向溢出；截图归档到临时 userData。
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
+  await win.waitForTimeout(200);
+  const wideLayout = await win.evaluate(() => ({
+    document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    table: document.querySelector('[data-testid="provider-table-scroll"]')?.scrollWidth ?? 0,
+    tableClient: document.querySelector('[data-testid="provider-table-scroll"]')?.clientWidth ?? 0,
+  }));
+  check('使用统计宽窗口无页面级横向溢出', wideLayout.document <= 2);
+  const wideShot = join(userDataPath, 'usage-wide.png');
+  await win.screenshot({ path: wideShot });
+  check('使用统计宽窗口截图已归档', existsSync(wideShot));
+
+  // 窄窗口 960x640：页面无横向溢出；供应商表局部横向滚动。
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(960, 640); });
+  await win.waitForTimeout(200);
+  const narrowLayout = await win.evaluate(() => ({
+    document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    table: document.querySelector('[data-testid="provider-table-scroll"]')?.scrollWidth ?? 0,
+    tableClient: document.querySelector('[data-testid="provider-table-scroll"]')?.clientWidth ?? 0,
+    selectorVisible: Boolean(document.querySelector('[data-testid="provider-table-scroll"]')),
+  }));
+  check('使用统计窄窗口无页面级横向溢出', narrowLayout.document <= 2);
+  check('使用统计窄窗口供应商表局部滚动', narrowLayout.table > narrowLayout.tableClient);
+  check('使用统计供应商表在窄窗口可见', narrowLayout.selectorVisible);
+  const narrowShot = join(userDataPath, 'usage-narrow.png');
+  await win.screenshot({ path: narrowShot });
+  check('使用统计窄窗口截图已归档', existsSync(narrowShot));
+
+  // 深色主题：设置 -> 主题 -> 深色，返回使用统计，图表仍非空。
+  await win.getByRole('button', { name: '设置' }).click();
+  await win.getByText('主题').first().waitFor({ timeout: 5_000 });
+  // Radix Select 触发器角色为 combobox；限定在含「主题」标题的卡片内，避免误中语言下拉。
+  await win.locator('div.rounded-lg', { hasText: '主题' }).first().getByRole('combobox').click();
+  await win.getByRole('option', { name: '深色' }).click();
+  await win.getByRole('button', { name: '使用统计' }).click();
+  await win.getByTestId('usage-shell').waitFor({ timeout: 10_000 });
+  await win.getByText('供应商对比').waitFor({ timeout: 10_000 });
+  const darkCharts = await win.evaluate(() => {
+    const canvases = [...document.querySelectorAll('[data-testid="usage-shell"] canvas')];
+    return canvases.map((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      let dataLen = 0;
+      try { dataLen = canvas.toDataURL().length; } catch { dataLen = 0; }
+      return { width: rect.width, height: rect.height, dataLen };
+    });
+  });
+  const darkMeaningful = darkCharts.filter((chart) => chart.width > 0 && chart.height > 0 && chart.dataLen > 100);
+  check('使用统计深色主题图表仍非空', darkMeaningful.length >= 2);
+  // 收尾：回到工作台并恢复默认窗口尺寸，避免影响后续断言。
+  await win.getByRole('button', { name: '工作台' }).click();
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
 } catch (err) {
   console.error('[e2e] error:', err.message);
   failures++;
