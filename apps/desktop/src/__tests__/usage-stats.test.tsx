@@ -6,29 +6,42 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { UsageAnalytics, UsageMetric } from '@ai-devflow/core';
 
 // --- Mock EChart as an accessible <div> so tests stay Canvas-independent ---
-vi.mock('../components/usage/EChart.js', () => ({
-  EChart: ({ option, ariaLabel, className, onError }: {
-    option: Record<string, unknown>;
-    ariaLabel: string;
-    className?: string;
-    onError?: (e: unknown) => void;
-  }) => (
-    <div
-      role="img"
-      aria-label={ariaLabel}
-      data-testid="echart"
-      data-error-key={typeof onError === 'function' ? 'set' : 'unset'}
-      className={className}
-    >
-      {JSON.stringify(option?.series ?? [])}
-    </div>
-  ),
+// The mock calls onError on mount when `setChartErrorTrigger` returns true for
+// the chart's ariaLabel, so a test can force exactly one chart to error.
+const chartErrorState = vi.hoisted(() => ({
+  trigger: null as null | ((ariaLabel: string) => boolean),
 }));
-
-// --- Controllable theme (EChart consumers use useTheme) ---
-vi.mock('@/theme', () => ({
-  useTheme: () => ({ resolved: 'light' }),
-}));
+vi.mock('../components/usage/EChart.js', async () => {
+  const { useEffect, createElement } = await import('react');
+  return {
+    setChartErrorTrigger: (fn: ((ariaLabel: string) => boolean) | null) => {
+      chartErrorState.trigger = fn;
+    },
+    EChart: ({ option, ariaLabel, className, onError }: {
+      option: Record<string, unknown>;
+      ariaLabel: string;
+      className?: string;
+      onError?: (e: unknown) => void;
+    }) => {
+      useEffect(() => {
+        if (onError && chartErrorState.trigger?.(ariaLabel)) {
+          onError(new Error('forced chart error'));
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return createElement(
+        'div',
+        {
+          role: 'img',
+          'aria-label': ariaLabel,
+          'data-testid': 'echart',
+          className,
+        },
+        JSON.stringify(option?.series ?? []),
+      );
+    },
+  };
+});
 
 // --- Synchronous i18n: LocaleProvider renders children; useT returns zh translate ---
 // Avoids the async settings.getLocale() effect that bleeds work across tests.
@@ -102,6 +115,9 @@ if (!(window as unknown as Record<string, unknown>).HTMLIFrameElement) {
 }
 const { LocaleProvider } = await import('../i18n/index.js');
 const { UsageStatsView, UsageStatsPage } = await import('../pages/UsageStats.js');
+const { setChartErrorTrigger } = (await import('../components/usage/EChart.js')) as unknown as {
+  setChartErrorTrigger: (fn: ((ariaLabel: string) => boolean) | null) => void;
+};
 
 const trackedRoots: ReturnType<typeof createRoot>[] = [];
 
@@ -132,6 +148,7 @@ afterEach(() => {
     act(() => { root.unmount(); });
   }
   document.body.innerHTML = '';
+  setChartErrorTrigger(null);
 });
 
 describe('UsageStats dashboard', () => {
@@ -253,15 +270,36 @@ describe('UsageStats dashboard', () => {
   });
 
   it('chart error leaves KPIs and provider table visible, with per-chart retry', () => {
-    // EChart mock calls onError on mount via a data attribute; to simulate a chart
-    // error we render with a fixture and assert the error surface can coexist.
-    // Since the mock EChart never errors, we instead assert that when a chart
-    // error state is forced, summary/table remain. We drive this by rendering the
-    // global view and confirming KPIs + table are always present alongside charts.
+    // Force only the trend chart (ariaLabel starts with the zh trend title) to error
+    // on mount. The composition chart must stay mounted and unaffected.
+    setChartErrorTrigger((label: string) => label.startsWith('每日调用趋势'));
     const c = render({ data: fixture, loading: false, onProviderSelect: () => undefined });
-    expect(c.textContent).toContain('调用次数'); // KPI
-    expect(c.textContent).toContain('Provider One'); // table
-    expect(c.querySelectorAll('[data-testid="echart"]').length).toBeGreaterThanOrEqual(2); // charts
+
+    // Trend chart errored -> its error block is visible.
+    expect(c.textContent).toContain('图表加载失败');
+    // KPIs and provider table remain visible alongside the trend error.
+    expect(c.textContent).toContain('调用次数');
+    expect(c.textContent).toContain('Provider One');
+    // The other chart (composition) is unaffected: exactly one echart still rendered.
+    expect(c.querySelectorAll('[data-testid="echart"]').length).toBe(1);
+    // No composition error text.
+    expect(c.querySelectorAll('[role="alert"]').length).toBe(1);
+
+    // Clear the trigger so the remounted chart does not re-error.
+    setChartErrorTrigger(null);
+    const retry = Array.from(c.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('重试图表'),
+    );
+    expect(retry).toBeTruthy();
+    click(retry!);
+
+    // Trend chart remounted; both charts now rendered and no error alerts remain.
+    expect(c.querySelectorAll('[data-testid="echart"]').length).toBe(2);
+    expect(c.querySelectorAll('[role="alert"]').length).toBe(0);
+    expect(c.textContent).not.toContain('图表加载失败');
+    // KPIs/table still present after retry.
+    expect(c.textContent).toContain('调用次数');
+    expect(c.textContent).toContain('Provider One');
   });
 
   it('renders partial token values without crashing', () => {

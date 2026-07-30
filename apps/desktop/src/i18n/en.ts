@@ -428,6 +428,8 @@ export const en: Record<string, string> = {
   'usage.chart.error': 'Chart failed to load',
   'usage.chart.retry': 'Retry chart',
   'usage.retry': 'Retry',
+  'usage.succeeded': 'Succeeded',
+  'usage.date': 'Date',
 
   // ---- Data retention ----
   'settings.retention.title': 'Data retention and cleanup',

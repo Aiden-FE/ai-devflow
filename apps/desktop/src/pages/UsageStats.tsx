@@ -101,12 +101,12 @@ export function UsageStatsView({
       labels: {
         calls: t('usage.calls'),
         tokens: t('usage.totalTokens'),
-        succeeded: t('usage.calls'),
+        succeeded: t('usage.succeeded'),
         failed: t('usage.failedCalls'),
         totalTokens: t('usage.totalTokens'),
         coverage: t('usage.coverage'),
         successRate: t('usage.successRate'),
-        date: t('usage.days', { n: 0 }),
+        date: t('usage.date'),
         unknown: t('usage.unknown'),
       },
       reducedMotion,
@@ -155,6 +155,7 @@ export function UsageStatsView({
                 size="icon-sm"
                 variant="ghost"
                 title={t('usage.back')}
+                aria-label={t('usage.back')}
                 onClick={() => onProviderSelect(undefined)}
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -170,19 +171,20 @@ export function UsageStatsView({
               key={value}
               size="sm"
               variant={days === value ? 'secondary' : 'ghost'}
+              aria-pressed={days === value}
               onClick={() => onDaysChange?.(value)}
             >
               {t('usage.days', { n: value })}
             </Button>
           ))}
-          <Button size="icon-sm" variant="ghost" title={t('usage.refresh')} onClick={onRefresh}>
+          <Button size="icon-sm" variant="ghost" title={t('usage.refresh')} aria-label={t('usage.refresh')} onClick={onRefresh}>
             <RefreshCw className="h-4 w-4" />
           </Button>
         </div>
       </header>
 
       {error ? (
-        <div className="flex min-h-36 flex-col items-start gap-2 border-l-2 border-destructive px-4 py-6 text-sm text-destructive">
+        <div role="alert" className="flex min-h-36 flex-col items-start gap-2 border-l-2 border-destructive px-4 py-6 text-sm text-destructive">
           <span>{error}</span>
           <Button size="sm" variant="outline" onClick={onRefresh}>{t('usage.retry')}</Button>
         </div>
@@ -239,7 +241,7 @@ export function UsageStatsView({
                     </div>
                   </div>
                   {trendError ? (
-                    <div className="flex min-h-36 flex-col items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-6 text-sm text-destructive">
+                    <div role="alert" className="flex min-h-36 flex-col items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-6 text-sm text-destructive">
                       <span>{t('usage.chart.error')}</span>
                       <Button size="sm" variant="outline" onClick={() => setTrendError(false)}>
                         {t('usage.chart.retry')}
@@ -258,7 +260,7 @@ export function UsageStatsView({
                 <section className="flex flex-col gap-2 xl:col-span-4">
                   <h3 className="m-0 text-sm font-semibold">{t('usage.tokens')}</h3>
                   {compositionError ? (
-                    <div className="flex min-h-36 flex-col items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-6 text-sm text-destructive">
+                    <div role="alert" className="flex min-h-36 flex-col items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-6 text-sm text-destructive">
                       <span>{t('usage.chart.error')}</span>
                       <Button size="sm" variant="outline" onClick={() => setCompositionError(false)}>
                         {t('usage.chart.retry')}

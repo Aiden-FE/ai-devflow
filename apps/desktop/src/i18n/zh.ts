@@ -428,6 +428,8 @@ export const zh: Record<string, string> = {
   'usage.chart.error': '图表加载失败',
   'usage.chart.retry': '重试图表',
   'usage.retry': '重试',
+  'usage.succeeded': '成功',
+  'usage.date': '日期',
 
   // ---- 数据保留 ----
   'settings.retention.title': '数据保留与清理',
