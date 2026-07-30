@@ -749,6 +749,79 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
     await expect(call('analytics', 'query', { startAt: 0, endAt: 1000, status: 'mystery' })).rejects.toThrow(/状态/);
   });
 
+  it('analytics.query decorates a configured provider label over an internal stored name', async () => {
+    const providerId = '776f5082-9779-4a15-8f3d-ac0b7068da9b';
+    services.providerStore?.save({
+      id: providerId,
+      kind: 'openai',
+      displayName: 'Configured Gateway',
+      enabled: true,
+      priority: 1,
+      authType: 'api_key',
+      revision: 0,
+      apiKey: 'sk-test',
+    });
+    const usage = repos.providerUsage.start({
+      logicalRequestId: 'configured-provider',
+      providerId,
+      providerName: providerId,
+      routeId: `${providerId}:chat`,
+      model: 'gpt-5',
+      workload: 'chat',
+      source: 'task_chat',
+      attemptOrdinal: 1,
+      startedAt: 100,
+      projectId: 'project-1',
+    });
+    repos.providerUsage.finish(usage.id, {
+      status: 'succeeded',
+      endedAt: 150,
+      usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, total: 18 },
+    });
+
+    const result = (await call('analytics', 'query', { startAt: 0, endAt: 10_000_000 })) as import('@ai-devflow/core').UsageAnalytics;
+    const provider = result.providers.find((p) => p.key === providerId);
+    expect(provider?.label).toBe('Configured Gateway');
+    // 稳定 ID 仍是聚合键与过滤值，永不作为可见标签。
+    expect(provider?.key).toBe(providerId);
+    expect(result.providers.some((p) => p.label === providerId)).toBe(false);
+  });
+
+  it('analytics.query resolves unconfigured historical providers and failures with a localized fallback label', async () => {
+    const providerId = '776f5082-9779-4a15-8f3d-ac0b7068da9b';
+    const usage = repos.providerUsage.start({
+      logicalRequestId: 'historical-provider',
+      providerId,
+      providerName: providerId,
+      routeId: `${providerId}:chat`,
+      model: 'gpt-5',
+      workload: 'chat',
+      source: 'task_chat',
+      attemptOrdinal: 1,
+      startedAt: 100,
+      projectId: 'project-1',
+    });
+    repos.providerUsage.finish(usage.id, {
+      status: 'failed',
+      endedAt: 200,
+      failureKind: 'transient_provider',
+      usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 },
+    });
+    await call('settings', 'setLocale', 'en');
+
+    const result = (await call('analytics', 'query', { startAt: 0, endAt: 10_000_000 })) as import('@ai-devflow/core').UsageAnalytics;
+    const provider = result.providers.find((p) => p.key === providerId);
+    expect(provider?.label).toBe('Historical provider · 776f…da9b');
+    expect(provider?.key).toBe(providerId);
+    expect(result.latestFailures.length).toBeGreaterThan(0);
+    const failure = result.latestFailures.find((f) => f.providerId === providerId);
+    expect(failure?.providerName).toBe('Historical provider · 776f…da9b');
+    expect(failure?.providerId).toBe(providerId);
+    // 完整 UUID 永不出现在任何可见标签中。
+    expect(result.providers.some((p) => p.label === providerId)).toBe(false);
+    expect(result.latestFailures.some((f) => f.providerName === providerId)).toBe(false);
+  });
+
   it('settings retention round-trips and compaction requires explicit confirmation', async () => {
     expect(await call('settings', 'getRetention')).toMatchObject({
       policy: { executionDetailDays: 90, archivedConversationDays: 180, providerRawDays: 365 },

@@ -7,6 +7,8 @@ import { execFileSync } from 'node:child_process';
 import type { Services } from './services.js';
 import type { StreamEvent, AiStreamEvent, CreateProjectAtInput, UpdateTaskInput, AskAnswer, AskTabs } from './api.js';
 import { hasModelConfig } from './provider-store.js';
+import { createUsageAnalyticsService } from './usage-analytics.js';
+import type { Locale } from '@ai-devflow/core';
 import { mergeWorktreeBranch, sprintBranchName, branchExists, requireCanonicalBranchSegment, resolveProjectDefaultBranch } from '@ai-devflow/scheduler';
 import { materializeKnowledgeContext } from '@ai-devflow/knowledge';
 import type { AiChatMessage, AiTaskProposal, Task, ThemeMode, RejectTaskInput, ProviderConfig, AgentModelOverride, AgentKey, KnowledgeReadEvidence, KnowledgeRetrievalManifest, ProviderCallSource, ProviderCallStatus, UsageFilters } from '@ai-devflow/core';
@@ -116,6 +118,14 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   const { repos, orchestrator, timeoutEngine, webhooks, encryptSecret, decryptSecret, updater } = services;
   const activeAiChats = new Map<string, AbortController>();
 
+  // 语言默认 zh：credentials 未存或值非 en 时均视为 zh。analytics 与 settings.getLocale 共用此规则。
+  const readLocale = (): Locale => (repos.credentials.get('locale') === 'en' ? 'en' : 'zh');
+  const usageAnalytics = createUsageAnalyticsService({
+    usage: repos.providerUsage,
+    providerStore: services.providerStore,
+    locale: readLocale,
+  });
+
   // ---- 主题：启动时应用持久化模式 ----
   nativeTheme.themeSource = readThemeMode();
 
@@ -142,7 +152,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
 
   // ---- 供应商使用统计 ----
   ipcMain.handle(channel('analytics', 'query'), (_event, filters: unknown) =>
-    repos.providerUsage.query(validateUsageFilters(filters)));
+    usageAnalytics.query(validateUsageFilters(filters)));
 
   ipcMain.handle(channel('settings', 'getRetention'), () => {
     if (!services.retention) throw new Error('数据保留服务未就绪');
@@ -568,10 +578,7 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('webhooks', 'deliveries'), (_e, id) => repos.webhookDeliveries.listByWebhook(id));
 
   // ---- 设置：语言 / AI 服务商 ----
-  ipcMain.handle(channel('settings', 'getLocale'), () => {
-    const raw = repos.credentials.get('locale');
-    return raw === 'en' ? 'en' : 'zh';
-  });
+  ipcMain.handle(channel('settings', 'getLocale'), () => readLocale());
   ipcMain.handle(channel('settings', 'setLocale'), (_e, locale) => {
     repos.credentials.upsert('locale', locale);
   });
