@@ -256,18 +256,22 @@ describe('orchestrator failure + retry', () => {
 describe('orchestrator recovery (restart)', () => {
   beforeEach(() => setup(() => [{ type: 'done', summary: 'ok', t: 0 }]));
 
-  it('fails dead in_progress tasks and keeps awaiting_input', async () => {
+  it('fails dead running tasks, preserves the testing retry source, and keeps awaiting_input', async () => {
     const tRunning = makeTask({ id: randomId(), status: 'in_progress' });
     repos.tasks.insert(tRunning);
     repos.executions.insert({ id: randomId(), taskId: tRunning.id, attempt: 1, startedAt: now(), status: 'running' });
+    const tTesting = makeTask({ id: randomId(), status: 'testing', pausedFrom: undefined });
+    repos.tasks.insert(tTesting);
     const tWaiting = makeTask({ id: randomId(), status: 'awaiting_input' });
     repos.tasks.insert(tWaiting);
     repos.pendingQuestions.upsert({ taskId: tWaiting.id, question: 'q?', context: '', askedAt: now() });
 
     const res = await orch.recover();
     expect(res.failed).toContain(tRunning.id);
+    expect(res.failed).toContain(tTesting.id);
     expect(res.awaiting).toContain(tWaiting.id);
     expect(repos.tasks.get(tRunning.id)!.status).toBe('ready');
+    expect(repos.tasks.get(tTesting.id)).toMatchObject({ status: 'ready', pausedFrom: 'testing' });
     expect(repos.tasks.get(tWaiting.id)!.status).toBe('awaiting_input');
     expect(repos.executions.getLatest(tRunning.id)!.status).toBe('failed');
   });
@@ -401,7 +405,8 @@ describe('orchestrator bounded retry (no infinite loop)', () => {
     expect(failed.length).toBe(2);
     const interaction = repos.pendingInteractions.getPendingForTask(t.id);
     expect(interaction).toMatchObject({ kind: 'clarification', status: 'pending' });
-    expect(`${interaction?.title} ${interaction?.detail}`).toContain('AI 服务');
+    expect(`${interaction?.title} ${interaction?.detail}`).toContain('多次失败');
+    expect(`${interaction?.title} ${interaction?.detail}`).toContain('boom');
   }, 8000);
 
   it('transient_provider failure reverts task to ready (retry entry) instead of awaiting_input', async () => {
@@ -467,6 +472,51 @@ describe('orchestrator review (testing lane)', () => {
     expect(execs.some((e) => (e.summary ?? '').includes('review:pass'))).toBe(true);
   });
 
+  it('pauses for user action when a passed review cannot commit sensitive task changes', async () => {
+    setup(() => [{ type: 'done', summary: 'dev ok', t: 0 }]);
+    const t = makeTask();
+    writeFileSync(join(t.worktreePath!, '.env.local'), 'SECRET=not-a-real-secret\n');
+    repos.tasks.insert(t);
+
+    await orch.start(t.id);
+
+    const final = repos.tasks.get(t.id)!;
+    expect(final.status).toBe('awaiting_input');
+    expect(final.pausedFrom).toBe('testing');
+    const pending = repos.pendingInteractions.getPendingForTask(t.id);
+    expect(pending).toMatchObject({ kind: 'clarification', status: 'pending' });
+    expect(pending?.detail).toMatch(/敏感路径|\.env/);
+  });
+
+  it('pauses for user action when a passed review cannot sync the sprint branch', async () => {
+    setup(() => [{ type: 'done', summary: 'dev ok', t: 0 }]);
+    const t = makeTask({ status: 'awaiting_input', pausedFrom: 'testing' });
+    await ensureSprintBranch({ repoPath: worktreeDir, version: 'v1', baseBranch: 'main' });
+
+    writeFileSync(join(t.worktreePath!, 'conflict.txt'), 'task branch\n');
+    shGit(t.worktreePath!, ['add', 'conflict.txt']);
+    shGit(t.worktreePath!, ['commit', '-q', '-m', 'task conflict']);
+
+    const sprintBase = mkdtempSync(join(tmpdir(), 'aidf-sprint-conflict-'));
+    const sprintWorktree = join(sprintBase, 'worktree');
+    shGit(worktreeDir, ['worktree', 'add', sprintWorktree, 'ai-devflow-sprint/v1']);
+    writeFileSync(join(sprintWorktree, 'conflict.txt'), 'sprint branch\n');
+    shGit(sprintWorktree, ['add', 'conflict.txt']);
+    shGit(sprintWorktree, ['commit', '-q', '-m', 'sprint conflict']);
+    shGit(worktreeDir, ['worktree', 'remove', '--force', sprintWorktree]);
+    rmSync(sprintBase, { recursive: true, force: true });
+
+    repos.tasks.insert(t);
+    await orch.resume(t.id, 'retry finalization');
+
+    const final = repos.tasks.get(t.id)!;
+    expect(final.status).toBe('awaiting_input');
+    expect(final.pausedFrom).toBe('testing');
+    const pending = repos.pendingInteractions.getPendingForTask(t.id);
+    expect(pending).toMatchObject({ kind: 'clarification', status: 'pending' });
+    expect(pending?.detail).toMatch(/冲突|merge|同步/i);
+  });
+
   it('review prompt instructs REVIEW_VERDICT must go into ai_devflow_report_result summary (regression for missing-verdict)', async () => {
     setup(() => [{ type: 'done', summary: 'dev ok', t: 0 }]);
     const t = makeTask();
@@ -498,6 +548,217 @@ describe('orchestrator review (testing lane)', () => {
     expect(final.retryCount).toBe(2);
     const msgs = r2.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
     expect(msgs.some((m) => m.includes('审查不通过'))).toBe(true);
+    db2.close();
+  });
+
+  it('review missing task_review payload is a deterministic contract failure: parks ready, no dev rework, no fabricated verdict, no awaiting_input', async () => {
+    // 回归：载荷缺失曾被伪造成「审查不通过」触发无效返工循环，随后耗尽重试预算把任务卡在
+    // “AI 服务多次失败，请检查提供商配置后重试”的待沟通里——但它是 task_result 契约失败，
+    // 与提供商连通性无关，用户点“重试”只是恢复同一条确定性失败路径（“无法重试”的表象）。
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], {
+      testExpertEvents: () => [{ type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }],
+    });
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    seedBasic(r2);
+    const orch2 = makeOrch(r2, fr, { maxReviewRounds: 2 });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    const final = r2.tasks.get(t.id)!;
+    // 退回待开发（可点“启动/重试”显式再跑），而非卡在待沟通。
+    expect(final.status).toBe('ready');
+    // 保留失败来源泳道，供「重试」按来源恢复：审查失败重试只重跑审查。
+    expect(final.pausedFrom).toBe('testing');
+    // 未触发返工：dev 只跑 1 次，reviewer 只跑 1 次，retryCount 不递增。
+    expect(final.retryCount).toBe(0);
+    expect(fr.requests.filter((r) => r.expert === 'dev')).toHaveLength(1);
+    expect(fr.requests.filter((r) => r.expert === 'test')).toHaveLength(1);
+    // 无待处理交互、无伪造的「审查不通过」结论。
+    expect(r2.pendingInteractions.getPendingForTask(t.id)).toBeUndefined();
+    const msgs = r2.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('审查不通过'))).toBe(false);
+    // 给出与提供商不可达区分开的契约失败说明。
+    expect(msgs.some((m) => m.includes('结果校验失败') && m.includes('结构化结果契约'))).toBe(true);
+    db2.close();
+  });
+
+  it('retry after a review contract failure reruns review only (resumeToReview), not development', async () => {
+    // 显式「重试」按失败来源恢复：审查阶段（testing）契约失败 -> 只重跑审查，不重复开发。
+    // 与「启动」（从开发重走）语义分化；与待沟通 resumeFromPause 的 testing 分支一致。
+    // setup() 初始化全局 worktreeDir（真实 git 仓库 + makeTask 创建任务 worktree），供 mergeWorktreeBranch 成功。
+    setup(() => [{ type: 'done', summary: 'unused', t: 0 }], {});
+    let reviewRuns = 0;
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], {
+      testExpertEvents: () => {
+        reviewRuns += 1;
+        if (reviewRuns === 1) {
+          // 首次审查：载荷缺失 -> task_result 契约失败 -> parkInReady(pausedFrom=testing)。
+          return [{ type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0 }];
+        }
+        // 重试审查：补全合法载荷 -> 通过。
+        return [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0,
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: { verdict: 'none', reason: 'no durable knowledge', evidence: ['README.md'] },
+          },
+        }];
+      },
+    });
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    seedBasic(r2);
+    const orch2 = makeOrch(r2, fr, { maxReviewRounds: 2 });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    expect(r2.tasks.get(t.id)!.status).toBe('ready');
+    expect(r2.tasks.get(t.id)!.pausedFrom).toBe('testing');
+    expect(fr.requests.filter((r) => r.expert === 'dev')).toHaveLength(1);
+
+    await orch2.retry(t.id);
+    for (let i = 0; i < 60; i++) {
+      if (r2.tasks.get(t.id)!.status === 'in_review') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const final = r2.tasks.get(t.id)!;
+    expect(final.status).toBe('in_review');
+    // retry 只重跑审查：dev 仍为 1 次，reviewer 为 2 次。
+    expect(fr.requests.filter((r) => r.expert === 'dev')).toHaveLength(1);
+    expect(fr.requests.filter((r) => r.expert === 'test')).toHaveLength(2);
+    expect(final.retryCount).toBe(1);
+    db2.close();
+  });
+
+  it('retry from a legacy testing record without pausedFrom reruns review only', async () => {
+    setup(() => [{ type: 'done', summary: 'unexpected dev run', t: 0 }]);
+    const t = makeTask({ status: 'testing', pausedFrom: undefined, retryCount: 1 });
+    repos.tasks.insert(t);
+
+    await orch.retry(t.id);
+
+    expect(repos.tasks.get(t.id)!.status).toBe('in_review');
+    expect(runner.requests.filter((r) => r.expert === 'dev')).toHaveLength(0);
+    expect(runner.requests.filter((r) => r.expert === 'test')).toHaveLength(1);
+  });
+
+  it('review provider error is a contract-independent failure: parks ready with provider guidance, not a fabricated verdict', async () => {
+    // 审查器 error 事件（如 transient_provider）：直接抛错分流到 provider 说明，不再伪造成「审查执行异常」结论。
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], {
+      testExpertEvents: () => [{ type: 'error', message: '所有已配置 AI 服务暂时不可用，请稍后重试', recoverable: true, failureKind: 'transient_provider', t: 0 }],
+    });
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    seedBasic(r2);
+    const orch2 = makeOrch(r2, fr, { maxReviewRounds: 2, retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1, backoff: false } });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    const final = r2.tasks.get(t.id)!;
+    expect(final.status).toBe('ready');
+    expect(final.retryCount).toBe(0);
+    expect(fr.requests.filter((r) => r.expert === 'dev')).toHaveLength(1);
+    expect(fr.requests.filter((r) => r.expert === 'test')).toHaveLength(1);
+    const msgs = r2.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('审查不通过'))).toBe(false);
+    expect(msgs.some((m) => m.includes('AI 服务暂时不可用'))).toBe(true);
+    db2.close();
+  });
+
+  it('restart after a development failure injects the prior failure reason as userInput (no blind retry)', async () => {
+    // 手动「启动/重试」从 ready 重走开发时，注入上次失败原因供针对性修复，避免开发专家拿干净 prompt 重蹈覆辙。
+    // 首次启动无失败历史 -> 不注入；失败重启 -> userInput 携带「[上次失败原因...]」与失败摘要。
+    setup(() => [{ type: 'done', summary: 'unused', t: 0 }], {});
+    let devRuns = 0;
+    const fr = new FakeAgentRunner(() => {
+      devRuns += 1;
+      if (devRuns === 1) {
+        // 首次开发：提供商暂不可用 -> transient_provider 失败 -> parkInReady(pausedFrom=in_progress)。
+        return [{
+          type: 'error', message: 'dev provider temporarily unavailable', recoverable: true,
+          failureKind: 'transient_provider', t: 0,
+        }];
+      }
+      return [{ type: 'done', summary: 'dev ok', t: 0 }];
+    }, { testExpertVerdict: 'PASS' });
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    seedBasic(r2);
+    // autoRetry=false：避免自动重试，交由显式 retry() 驱动第二次开发。
+    const orch2 = makeOrch(r2, fr, { autoRetry: false, retryPolicy: { maxAttempts: 1, baseDelayMs: 5, maxDelayMs: 5, backoff: false } });
+    const t = makeTask();
+    r2.tasks.insert(t);
+    await orch2.start(t.id);
+    // 首次启动无失败历史：开发请求不带 userInput。
+    const devReqsBefore = fr.requests.filter((r) => r.expert === 'dev');
+    expect(devReqsBefore).toHaveLength(1);
+    expect(devReqsBefore[0]!.userInput).toBeUndefined();
+    const afterFirst = r2.tasks.get(t.id)!;
+    expect(afterFirst.status).toBe('ready');
+    expect(afterFirst.pausedFrom).toBe('in_progress');
+    expect(r2.executions.getLatest(t.id)!.status).toBe('failed');
+
+    await orch2.retry(t.id);
+    for (let i = 0; i < 60; i++) {
+      if (r2.tasks.get(t.id)!.status === 'in_review') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const devReqsAfter = fr.requests.filter((r) => r.expert === 'dev');
+    expect(devReqsAfter).toHaveLength(2);
+    // 重启注入失败原因：第二次开发请求的 userInput 含「[上次失败原因...]」与失败摘要。
+    expect(devReqsAfter[1]!.userInput).toBeTruthy();
+    expect(devReqsAfter[1]!.userInput!.includes('上次失败原因')).toBe(true);
+    expect(devReqsAfter[1]!.userInput!.includes('dev provider temporarily unavailable')).toBe(true);
+    expect(r2.tasks.get(t.id)!.status).toBe('in_review');
+    db2.close();
+  });
+
+  it('retries a transient review failure in the testing lane without rerunning development', async () => {
+    setup(() => [{ type: 'done', summary: 'unused', t: 0 }]);
+    let reviewRuns = 0;
+    const fr = new FakeAgentRunner(() => [{ type: 'done', summary: 'dev ok', t: 0 }], {
+      testExpertEvents: () => {
+        reviewRuns += 1;
+        if (reviewRuns === 1) {
+          return [{
+            type: 'error', message: 'review provider temporarily unavailable', recoverable: true,
+            failureKind: 'transient_provider', t: 0,
+          }];
+        }
+        return [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS', t: 0,
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: { verdict: 'none', reason: 'no durable knowledge', evidence: ['README.md'] },
+          },
+        }];
+      },
+    });
+    const db2 = openDatabase(':memory:');
+    const r2 = createRepositories(db2);
+    seedBasic(r2);
+    const orch2 = makeOrch(r2, fr, {
+      autoRetry: true,
+      retryPolicy: { maxAttempts: 2, baseDelayMs: 5, maxDelayMs: 5, backoff: false },
+    });
+    const t = makeTask();
+    r2.tasks.insert(t);
+
+    await orch2.start(t.id);
+    for (let i = 0; i < 60; i++) {
+      if (r2.tasks.get(t.id)!.status === 'in_review') break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    expect(r2.tasks.get(t.id)!.status).toBe('in_review');
+    expect(r2.tasks.get(t.id)!.retryCount).toBe(1);
+    expect(fr.requests.filter((r) => r.expert === 'dev')).toHaveLength(1);
+    expect(fr.requests.filter((r) => r.expert === 'test')).toHaveLength(2);
     db2.close();
   });
 });
@@ -802,6 +1063,34 @@ describe('orchestrator pause/cancel during review (testing lane)', () => {
     expect(repos.executions.listByTask(t.id).find((execution) => isReviewExecution(execution.summary))).toMatchObject({
       status: 'paused',
     });
+  });
+
+  it('cancels an awaiting_input task back to ready and clears the pending interaction', async () => {
+    // 已被卡在待沟通（旧逻辑“无法重试”）的任务应能放弃等待退回待开发，再点“启动”重跑。
+    const fr = new FakeAgentRunner(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      {
+        testExpertEvents: () => [{
+          type: 'ask_user',
+          question: '请确认审查范围',
+          context: '需用户指定范围。',
+          t: 0,
+        }],
+      },
+    );
+    const orch2 = makeOrch(repos, fr);
+    const t = makeTask();
+    repos.tasks.insert(t);
+    await orch2.start(t.id);
+    expect(repos.tasks.get(t.id)!.status).toBe('awaiting_input');
+    expect(repos.pendingInteractions.getPendingForTask(t.id)).toBeDefined();
+    // 放弃等待 -> 退回 ready 且清理待处理交互。
+    await orch2.cancel(t.id);
+    const final = repos.tasks.get(t.id)!;
+    expect(final.status).toBe('ready');
+    expect(repos.pendingInteractions.getPendingForTask(t.id)).toBeUndefined();
+    // 可再次启动（不报“任务已在运行”/状态非法）。
+    await expect(orch2.start(t.id)).resolves.toBeUndefined();
   });
 
   it('cancel during review stops the reviewer and lands stably in ready (no fail verdict, no retry)', async () => {

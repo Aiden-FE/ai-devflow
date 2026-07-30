@@ -179,7 +179,9 @@ export class Orchestrator extends EventEmitter {
       // 状态门禁：进入 in_progress（审查恢复则回到 testing）
       if (task.status !== 'in_progress') {
         if (init?.resumeToReview) {
-          this.transition(task, 'testing', { hasUserAnswer: true });
+          if (task.status !== 'testing') {
+            this.transition(task, 'testing', { hasUserAnswer: true });
+          }
         } else {
           const gate = canTransition(task, 'in_progress', {
             hasAcceptance: true,
@@ -283,6 +285,9 @@ export class Orchestrator extends EventEmitter {
       this.repos.tasks.update(task);
 
       const prompt = this.buildPrompt(task);
+      // 重启反馈：未提供显式 userInput 且存在失败历史时，注入上次失败原因供针对性修复（避免盲目重试）。
+      // 不覆盖调用方显式输入（in-lane 返工、交互恢复等）；只随本次 run 请求传递，不落库。
+      const restartFeedback = init?.userInput ? undefined : this.collectRestartFeedback(task);
       const knowledgeManifest = await this.prepareTaskManifest(task, project, execution.id, expert, 'development', worktreePath!);
       const run = await this.runner.run({
         scope: { kind: 'task', taskId: task.id },
@@ -293,7 +298,7 @@ export class Orchestrator extends EventEmitter {
         cwd: worktreePath!,
         knowledgeManifest,
         resumeFrom: i === startStage ? init?.resumeFrom : undefined,
-        userInput: i === startStage ? init?.userInput : undefined,
+        userInput: i === startStage ? (init?.userInput ?? restartFeedback) : undefined,
         interactionResponse: i === startStage ? init?.interactionResponse : undefined,
       });
       entry.run = run;
@@ -438,7 +443,12 @@ export class Orchestrator extends EventEmitter {
   ): Promise<void> {
     const branchName = `ai-devflow/${task.id}`;
     if (!task.worktreePath) {
-      this.emit('task-error', { taskId: task.id, error: '任务 worktree 缺失，无法提交审查通过的改动' });
+      this.pauseForFinalizationFailure(task, {
+        title: '审查已通过，但任务 worktree 缺失，请处理后回复以重试',
+        detail: '任务 worktree 缺失，无法提交审查通过的改动',
+        message: '提交审查通过的任务改动失败：任务 worktree 缺失',
+        error: '任务 worktree 缺失，无法提交审查通过的改动',
+      });
       return;
     }
     const commit = await commitWorktreeChanges({
@@ -446,13 +456,12 @@ export class Orchestrator extends EventEmitter {
       message: `task: ${task.id}`,
     });
     if (commit.reason) {
-      const latest = this.repos.executions.getLatest(task.id);
-      this.recordMessage(task, latest, {
-        role: 'system',
-        kind: 'error',
-        text: `提交审查通过的任务改动失败：${commit.reason}（工作保留在 ${task.worktreePath}）`,
+      this.pauseForFinalizationFailure(task, {
+        title: '审查已通过，但任务改动无法提交，请处理后回复以重试',
+        detail: commit.reason,
+        message: `提交审查通过的任务改动失败：${commit.reason}（工作保留在 ${task.worktreePath}）`,
+        error: `任务改动提交失败：${commit.reason}`,
       });
-      this.emit('task-error', { taskId: task.id, error: `任务改动提交失败：${commit.reason}` });
       return;
     }
     const sprintBranch = await this.resolveSprintTarget(task);
@@ -462,13 +471,13 @@ export class Orchestrator extends EventEmitter {
         sourceBranch: sprintBranch,
       });
       if (!sync.merged) {
-        const latest = this.repos.executions.getLatest(task.id);
-        this.recordMessage(task, latest, {
-          role: 'system',
-          kind: 'error',
-          text: `同步迭代分支失败：${sync.reason ?? '未知原因'}（工作保留在分支 ${branchName}）`,
+        const reason = sync.reason ?? '未知原因';
+        this.pauseForFinalizationFailure(task, {
+          title: '审查已通过，但无法同步迭代分支，请处理后回复以重试',
+          detail: reason,
+          message: `同步迭代分支失败：${reason}（工作保留在分支 ${branchName}）`,
+          error: `同步迭代分支失败：${reason}`,
         });
-        this.emit('task-error', { taskId: task.id, error: `同步迭代分支失败：${sync.reason ?? '未知原因'}` });
         return;
       }
     }
@@ -529,13 +538,39 @@ export class Orchestrator extends EventEmitter {
       }
     }
     if (!merged) {
-      // 合并失败：任务保持 testing，任务分支/worktree 保留以供重试。
-      this.recordMessage(task, latest, { role: 'system', kind: 'error', text: `审查通过但合并失败：${mergeReason ?? '未知原因'}（工作保留在分支 ${branchName}）` });
-      this.emit('task-error', { taskId: task.id, error: `任务分支合并失败：${mergeReason ?? '未知原因'}` });
+      const reason = mergeReason ?? '未知原因';
+      this.pauseForFinalizationFailure(task, {
+        title: '审查已通过，但任务分支无法合并，请处理后回复以重试',
+        detail: reason,
+        message: `审查通过但合并失败：${reason}（工作保留在分支 ${branchName}）`,
+        error: `任务分支合并失败：${reason}`,
+      });
       return;
     }
     // 审查通过 + 知识门禁 + 合并成功才进入待验收。
     this.transition(task, 'in_review', { reviewPassed: true, knowledgeGatePassed: true });
+  }
+
+  private pauseForFinalizationFailure(task: Task, input: {
+    title: string;
+    detail: string;
+    message: string;
+    error: string;
+  }): void {
+    const latest = this.repos.executions.getLatest(task.id);
+    this.recordMessage(task, latest, { role: 'system', kind: 'error', text: input.message });
+    const message = this.recordMessage(task, latest, {
+      role: 'system', kind: 'clarification_request', text: input.title,
+    });
+    this.createInteraction(task, 'clarification', input.title, {
+      messageId: message.id,
+      detail: input.detail,
+    });
+    const pausedFrom = task.status;
+    this.transition(task, 'awaiting_input');
+    task.pausedFrom = pausedFrom;
+    this.repos.tasks.update(task);
+    this.emit('task-error', { taskId: task.id, error: input.error });
   }
 
   /**
@@ -562,7 +597,6 @@ export class Orchestrator extends EventEmitter {
 
     const prompt = this.buildReviewPrompt(task);
     let output = '';
-    let errored: string | undefined;
     let assessment: import('@ai-devflow/core').KnowledgeAssessment | undefined;
     try {
       const knowledgeManifest = await this.prepareTaskManifest(task, project, execution.id, expert, 'review', task.worktreePath ?? project.path);
@@ -591,28 +625,41 @@ export class Orchestrator extends EventEmitter {
           consumed.error || consumed.interacted || !consumed.done ? 'failed' : 'completed',
         );
         if (consumed.interacted) return undefined;
-        output = consumed.output;
-        errored = consumed.error;
-        // 强结构化：审查结果必须是 task_review 载荷；缺失则视为失败而非伪造评估。
-        if (consumed.result?.kind === 'task_review') {
-          assessment = consumed.result.knowledgeAssessment;
-        } else if (!consumed.error) {
-          errored = '审查结果缺少 task_review 结构化载荷';
+        // 受控停止（暂停/取消）：不得误判失败；任务状态由 pause()/cancel() 落定。
+        if (entry.stopReason) {
+          this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', `审查已停止（${this.stopSummary(entry.stopReason)}）`);
+          return undefined;
         }
+        // 审查执行/契约失败：直接抛错走失败处理（recordMessage 已随 error 事件写入），
+        // 绝不伪造成「审查不通过」结论触发无效的开发返工循环（开发 Agent 无法修复审查器的契约问题）。
+        if (consumed.error) throw new TaskRunError(consumed.error, consumed.failureKind);
+        if (!consumed.done) throw new TaskRunError('审查运行未完成', 'protocol');
+        // 强结构化：审查结果必须是 task_review 载荷；缺失则视为契约失败而非伪造评估。
+        if (consumed.result?.kind !== 'task_review') {
+          throw new TaskRunError('审查结果缺少 task_review 结构化载荷', 'task_result');
+        }
+        output = consumed.output;
+        assessment = consumed.result.knowledgeAssessment;
       } finally {
         entry.run = undefined;
       }
     } catch (e) {
-      errored = (e as Error).message;
+      // 受控停止过程中的异常不按失败处理：任务状态由 pause()/cancel() 落定。
+      if (entry.stopReason) {
+        this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', `审查已停止（${this.stopSummary(entry.stopReason)}）`);
+        return undefined;
+      }
+      const err = e instanceof TaskRunError
+        ? e
+        : new TaskRunError((e as Error).message, undefined);
+      this.markExecution(execution, 'failed', `[review:error] ${err.message}`);
+      this.recordMessage(task, execution, {
+        role: 'system', kind: 'error', text: `审查执行失败：${err.message}`,
+      });
+      throw err;
     }
 
-    // 受控停止：标记审查执行记录后直接收尾，绝不停留期间误判 FAIL 进入返工分支。
-    if (entry.stopReason) {
-      this.markExecution(execution, entry.stopReason === 'paused' ? 'paused' : 'canceled', `审查已停止（${this.stopSummary(entry.stopReason)}）`);
-      return undefined;
-    }
-
-    const verdict = this.parseReviewVerdict(output, errored);
+    const verdict = this.parseReviewVerdict(output);
     // 持久化审查结论与证据：执行记录摘要 + 任务对话。
     this.markExecution(
       execution,
@@ -686,7 +733,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** 解析审查 Agent 输出中的结论标记；无明确 PASS 时保守按不通过（绝不绕过审查进入待验收）。 */
-  private parseReviewVerdict(output: string, errored?: string): ReviewVerdict {
+  private parseReviewVerdict(output: string): ReviewVerdict {
     const failM = /REVIEW_VERDICT:\s*FAIL:?\s*(.*)/i.exec(output);
     const passM = /REVIEW_VERDICT:\s*PASS\b/i.exec(output);
     if (failM) {
@@ -697,8 +744,8 @@ export class Orchestrator extends EventEmitter {
     }
     return {
       pass: false,
-      summary: errored ? `审查执行异常：${errored}` : '审查未给出明确结论',
-      feedback: errored ?? '审查 Agent 未输出 REVIEW_VERDICT 结论，按不通过处理。',
+      summary: '审查未给出明确结论',
+      feedback: '审查 Agent 未输出 REVIEW_VERDICT 结论，按不通过处理。',
       checks: REVIEW_CHECKS,
     };
   }
@@ -1051,6 +1098,11 @@ export class Orchestrator extends EventEmitter {
     }
     const task = this.repos.tasks.get(taskId);
     if (task && task.status !== 'archived') {
+      // 取消前清理待沟通/授权/确认交互（避免退回 ready 后残留“待回答”项）。
+      const pending = this.repos.pendingInteractions.getPendingForTask(taskId);
+      if (pending && pending.status === 'pending') {
+        this.repos.pendingInteractions.resolve(pending.id, 'cancelled', '取消任务', now());
+      }
       // 取消后退回 ready（可重新启动）
       if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
         this.transition(task, 'ready');
@@ -1072,10 +1124,23 @@ export class Orchestrator extends EventEmitter {
   async retry(taskId: string): Promise<void> {
     const task = this.repos.tasks.get(taskId);
     if (!task) throw new Error(`任务不存在：${taskId}`);
+    // 历史失败记录可能没有 pausedFrom；迁移到 ready 前保留当前泳道作为重试来源。
+    const retryFrom = task.pausedFrom ?? task.status;
     this.repos.tasks.incRetry(taskId);
     task.retryCount += 1;
     if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
       this.transition(task, 'ready');
+    }
+    // 按失败来源恢复：审查阶段（testing）失败只重跑审查，不重复开发；其余来源重跑开发。
+    // 与待沟通 resumeFromPause 的 pausedFrom==='testing' 分支语义一致；start() 不读此字段，
+    // 仍从开发重走（保住「启动」=带反馈重走的语义）。
+    // ready 无法直达 testing（状态机禁止 ready->testing），故先经 in_progress 再到 testing，
+    // 随后 start({resumeToReview:true}) 看到 testing 跳过状态门直接重跑审查。
+    if (task.status === 'ready' && retryFrom === 'testing') {
+      this.transition(task, 'in_progress', { hasUserAnswer: false });
+      this.transition(task, 'testing');
+      await this.start(taskId, { resumeToReview: true });
+      return;
     }
     await this.start(taskId);
   }
@@ -1091,35 +1156,51 @@ export class Orchestrator extends EventEmitter {
 
   /**
    * 调度可追踪、可撤销的自动重试。回调前核对：运行代次未变（用户未显式启动/重试）、
-   * 无活跃运行、任务仍停在失败后的 in_progress（未被暂停/取消/手动改态），任一不满足则放弃。
+   * 无活跃运行、任务仍停在失败时的泳道（开发=in_progress，审查=testing），任一不满足则放弃。
    */
-  private scheduleRetry(taskId: string, delayMs: number, generation: number): void {
+  private scheduleRetry(taskId: string, delayMs: number, generation: number, resumeToReview = false): void {
     this.revokeRetry(taskId);
     const timer = setTimeout(() => {
       this.retryTimers.delete(taskId);
       if (this.generations.get(taskId) !== generation) return;
       if (this.active.has(taskId)) return;
       const cur = this.repos.tasks.get(taskId);
-      if (!cur || cur.status !== 'in_progress') return;
+      const expectedStatus: TaskStatus = resumeToReview ? 'testing' : 'in_progress';
+      if (!cur || cur.status !== expectedStatus) return;
       this.repos.tasks.incRetry(taskId);
-      this.start(taskId).catch((e) => this.emit('task-error', { taskId, error: (e as Error).message }));
+      this.start(taskId, resumeToReview ? { resumeToReview: true } : undefined)
+        .catch((e) => this.emit('task-error', { taskId, error: (e as Error).message }));
     }, delayMs);
     timer.unref?.();
     this.retryTimers.set(taskId, timer);
   }
 
   private handleFailure(task: Task, err: Error, attempt: number, generation: number): void {
-    const decision = decideRetry(this.retryPolicy, attempt, this.autoRetry);
     const latest = this.repos.executions.getLatest(task.id);
     if (latest) {
       this.markExecution(latest, 'failed', err.message);
       // 把失败原因写入日志面板，避免“无日志”
       this.log(latest, 'error', `失败（第 ${attempt} 次）：${err.message}`);
     }
+    // Agent 结果契约失败（task_result）：确定性错误，重试/返工都无法改变结果。
+    // 不自动重试、不进待沟通（用户无法通过对话回答修复审查器/开发器的结构化上报），
+    // 直接退回待开发，以「启动/重试」按钮作为显式入口，并给出与提供商不可达区分开的准确说明。
+    if (err instanceof TaskRunError && err.failureKind === 'task_result') {
+      const safeDetail = redactText(err.message).slice(0, 500);
+      this.recordMessage(task, latest, {
+        role: 'system', kind: 'error',
+        text: `Agent 结果校验失败，任务已退回待开发。这是结构化结果契约问题而非提供商不可达，请检查 Agent 结果上报约定后重新启动：${safeDetail}`,
+      });
+      this.parkInReady(task);
+      if (latest) this.log(latest, 'error', `Agent 结果校验失败，退回待开发：${safeDetail}`);
+      this.emit('task-failed', { taskId: task.id, error: err.message });
+      return;
+    }
+    const decision = decideRetry(this.retryPolicy, attempt, this.autoRetry);
     if (decision.retry && this.autoRetry) {
       if (latest) this.log(latest, 'warn', `将在 ${decision.delayMs}ms 后重试（第 ${attempt + 1} 次）`);
       this.emit('task-retry', { taskId: task.id, delayMs: decision.delayMs, reason: decision.reason });
-      this.scheduleRetry(task.id, decision.delayMs, generation);
+      this.scheduleRetry(task.id, decision.delayMs, generation, task.status === 'testing');
       return;
     }
     // 重试预算耗尽后的终态处理：按失败类型分流。
@@ -1134,15 +1215,7 @@ export class Orchestrator extends EventEmitter {
         role: 'system', kind: 'error',
         text: `AI 服务暂时不可用，任务已退回待开发。请检查 AI 服务商配置后重新启动：${safeDetail}`,
       });
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
-        this.transition(task, 'ready');
-      } else {
-        // 门禁不满足（如无可用提供商）：仍尽力退回 ready，保留任务可见可启动。
-        this.repos.tasks.updateStatus(task.id, 'ready', now());
-        task.status = 'ready';
-        task.statusChangedAt = now();
-        this.emit('task-status', { taskId: task.id, status: 'ready' });
-      }
+      this.parkInReady(task);
       if (latest) this.log(latest, 'error', `AI 服务失败已耗尽重试，退回待开发：${safeDetail}`);
       this.emit('task-failed', { taskId: task.id, error: err.message });
       return;
@@ -1153,7 +1226,7 @@ export class Orchestrator extends EventEmitter {
       this.transition(task, 'awaiting_input');
       task.pausedFrom = pausedFrom;
       this.repos.tasks.update(task);
-      const title = 'AI 服务多次失败，请检查提供商配置后重试';
+      const title = '任务执行多次失败，请查看诊断后处理';
       const msg = this.recordMessage(task, latest, { role: 'system', kind: 'clarification_request', text: title });
       this.createInteraction(task, 'clarification', title, {
         messageId: msg.id,
@@ -1167,6 +1240,25 @@ export class Orchestrator extends EventEmitter {
       }
     }
     this.emit('task-failed', { taskId: task.id, error: err.message });
+  }
+
+  /** 失败后尽力退回待开发：优先走门禁迁移，门禁不满足（如无可用提供商）时仍保底落 ready，保留任务可见可启动。 */
+  private parkInReady(task: Task): void {
+    // 记录失败来源泳道（in_progress/testing），供显式「重试」按来源恢复：
+    // testing 来源只重跑审查（resumeToReview），in_progress 来源重跑开发。start()（手动启动）不读此字段，
+    // 始终从开发重走，故两按钮语义分化。与 awaiting_input 路径一样用 update(task) 整体落库，
+    // 因为 updateStatus 对非 awaiting_input 状态会把 paused_from 清空。
+    const pausedFrom = task.status;
+    if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
+      this.transition(task, 'ready');
+    } else {
+      this.repos.tasks.updateStatus(task.id, 'ready', now());
+      task.status = 'ready';
+      task.statusChangedAt = now();
+      this.emit('task-status', { taskId: task.id, status: 'ready' });
+    }
+    task.pausedFrom = pausedFrom === 'in_progress' || pausedFrom === 'testing' ? pausedFrom : undefined;
+    this.repos.tasks.update(task);
   }
 
   private markExecution(exec: ExecutionRecord, status: ExecutionRecord['status'], summary: string): void {
@@ -1197,6 +1289,34 @@ export class Orchestrator extends EventEmitter {
 
   private buildPrompt(task: Task): string {
     return `【任务】${task.title}\n【描述】${task.description || '(无)'}\n请在当前仓库工作区完成开发工作：设计 -> 实现 -> 自验（调用实现计划技能编排子步骤）。`;
+  }
+
+  /**
+   * 收集重启反馈：从失败历史合成「上次失败原因」提示，供开发专家重启后针对性修复，避免盲目重试。
+   * - 仅当存在失败历史（最近执行 failed，或有 retryCount/错误消息）且调用方未提供 userInput 时激活；
+   *   首次启动、resume、交互恢复、in-lane 返工（已自传 userInput）等路径不注入，不覆盖显式输入。
+   * - 数据源：最近一次失败执行的 summary + 最近一条 system error 消息，去重后拼接，有界且脱敏。
+   * - 返回的 userInput 只随本次 run 请求传递（buildInitialMessage 追加为「【用户补充】...」），不落库。
+   */
+  private collectRestartFeedback(task: Task): string | undefined {
+    const latest = this.repos.executions.getLatest(task.id);
+    const hadFailure = latest?.status === 'failed' || (task.retryCount ?? 0) > 0;
+    if (!hadFailure) return undefined;
+    const parts: string[] = [];
+    const execSummary = latest?.status === 'failed' && latest.summary?.trim()
+      ? latest.summary.trim()
+      : undefined;
+    if (execSummary) parts.push(redactText(execSummary).slice(0, 400));
+    const msgs = this.repos.taskMessages.listByTask(task.id, 2000);
+    for (let i = msgs.length - 1; i >= 0 && parts.length < 2; i -= 1) {
+      const m = msgs[i];
+      if (m.role === 'system' && m.kind === 'error' && m.text && m.text.trim()) {
+        const text = redactText(m.text.trim()).slice(0, 400);
+        if (text && !parts.includes(text)) parts.push(text);
+      }
+    }
+    if (parts.length === 0) return undefined;
+    return `[上次失败原因，请据此优先修复] ${parts.join(' | ')}`;
   }
 
   /** 知识门禁：valuable 需完成沉淀校验；none 需非空理由与证据。无 coordinator 时默认放行。 */
@@ -1273,7 +1393,9 @@ export class Orchestrator extends EventEmitter {
       if (latest && latest.status === 'running') {
         this.markExecution(latest, 'failed', '应用重启，子进程已终止');
       }
-      if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
+      if (task.status === 'testing') {
+        this.parkInReady(task);
+      } else if (canTransition(task, 'ready', { hasAcceptance: true, hasAgentAssigned: this.hasProvider(), hasArtifacts: false }).ok) {
         this.transition(task, 'ready');
       }
       failed.push(task.id);

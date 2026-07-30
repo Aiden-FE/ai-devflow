@@ -709,7 +709,10 @@ related:
     t.worktreePath = undefined;
     repos.tasks.insert(t);
     await orch.start(t.id);
-    expect(repos.tasks.get(t.id)!.status).toBe('testing');
+    // 载荷缺失属确定性契约失败：不伪造审查结论、不返工、不进待沟通，直接退回待开发供显式重试。
+    expect(repos.tasks.get(t.id)!.status).toBe('ready');
+    const msgs = repos.taskMessages.listByTask(t.id).map((m) => m.text ?? '');
+    expect(msgs.some((m) => m.includes('task_review 结构化载荷'))).toBe(true);
   });
 
   it('does not enter in_review when task branch merge fails', async () => {
