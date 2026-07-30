@@ -252,6 +252,27 @@ async function startFakeProvider(fakeKey) {
       const isTaskReview = Array.isArray(body.messages) && body.messages.some((message) =>
         contentIncludesText(message?.content, 'resultKind=task_review'),
       );
+      // Pi injects the resultKind via the AI_DEVFLOW_RESULT_KIND env var, which
+      // the event-bridge extension bakes into the ai_devflow_report_result tool's
+      // payload schema (Type.Literal -> {"const":"knowledge_initialization"}).
+      // That schema is serialized into body.tools, NOT message text, so the old
+      // message-literal scan never matched. Detect via tools schema first, then
+      // fall back to message text (project_lead prompt mentions the kind) when
+      // the tool schema is not present (Pi-version-dependent serialization).
+      const toolSchemaMentionsKind = (kind) => {
+        if (!Array.isArray(body.tools)) return false;
+        return body.tools.some((tool) => {
+          const fn = tool?.function;
+          if (fn?.name !== 'ai_devflow_report_result') return false;
+          return JSON.stringify(fn?.parameters ?? {}).includes(`"${kind}"`);
+        });
+      };
+      const messagesMention = (text) => Array.isArray(body.messages)
+        && body.messages.some((message) => contentIncludesText(message?.content, text));
+      const isKnowledgeInit = toolSchemaMentionsKind('knowledge_initialization')
+        || messagesMention('knowledge_initialization') && !messagesMention('resultKind=task_review')
+        || messagesMention('docs/knowledge')
+        || messagesMention('生成长期知识草稿');
       const model = typeof body.model === 'string' ? body.model : 'packaged-fake-model';
       let chunk;
       if (hasToolResult) {
@@ -271,6 +292,13 @@ async function startFakeProvider(fakeKey) {
                 reason: 'deterministic E2E review found no reusable knowledge',
                 evidence: ['README.md'],
               },
+            },
+          } : {}),
+          ...(isKnowledgeInit ? {
+            payload: {
+              kind: 'knowledge_initialization',
+              changedPaths: [],
+              knowledgeIds: [],
             },
           } : {}),
         });
@@ -538,6 +566,9 @@ run('node', ['build-electron.mjs']);
 
 const repo = mkdtempSync(join(tmpdir(), 'aidf-e2e-repo-'));
 initGitRepo(repo);
+// 第二个确定性项目（知识库跨项目同步 E2E）。
+const repoB = mkdtempSync(join(tmpdir(), 'aidf-e2e-repo-b-'));
+initGitRepo(repoB);
 const userData = mkdtempSync(join(tmpdir(), 'aidf-e2e-userdata-'));
 const fakeKey = `development-fake-${randomBytes(18).toString('hex')}`;
 const provider = await startFakeProvider(fakeKey);
@@ -578,11 +609,11 @@ try {
   // 1. 导入本地项目（新建项目 -> 导入已有 tab）
   await win.getByRole('button', { name: '新建项目' }).click();
   await dialog().waitFor();
-  await dialog().getByPlaceholder('my-project').fill('E2E Proj');
+  await dialog().getByPlaceholder('my-project').fill('E2E Proj A');
   await dialog().getByPlaceholder('/Users/me/code/repo').fill(repo);
   await dialog().getByRole('button', { name: '导入', exact: true }).click();
-  await win.getByText('E2E Proj').first().waitFor();
-  check('导入本地 Git 项目', await win.getByText('E2E Proj').first().isVisible());
+  await win.getByText('E2E Proj A').first().waitFor();
+  check('导入本地 Git 项目', await win.getByText('E2E Proj A').first().isVisible());
 
   // 进入工作台
   await win.getByRole('button', { name: '打开' }).click();
@@ -894,6 +925,133 @@ try {
   // 收尾：回到工作台并恢复默认窗口尺寸，避免影响后续断言。
   await win.getByRole('button', { name: '工作台' }).click();
   await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
+
+  // 10. 知识库跨项目同步：两个确定性项目，真实 Radix 选择器跨页面同步 + 草稿确认选择器禁用 + 窄布局无溢出。
+  // 项目 A 已是当前全局选择（使用统计/工作台均基于 A）。先导入项目 B（不点“打开”，保持 A 为全局选择）。
+  await win.getByRole('button', { name: '项目' }).click();
+  await win.getByRole('button', { name: '新建项目' }).click();
+  await dialog().waitFor();
+  await dialog().getByPlaceholder('my-project').fill('E2E Proj B');
+  await dialog().getByPlaceholder('/Users/me/code/repo').fill(repoB);
+  await dialog().getByRole('button', { name: '导入', exact: true }).click();
+  await win.getByText('E2E Proj B').first().waitFor();
+  // 取得两个项目的 id 与路径，用于后续 data-attribute 断言。
+  const projectsList = await win.evaluate(() => window.api.projects.list());
+  const projectA = projectsList.find((p) => p.name === 'E2E Proj A');
+  const projectB = projectsList.find((p) => p.name === 'E2E Proj B');
+  check('知识库 E2E 两个确定性项目均已导入', Boolean(projectA && projectB));
+
+  // 进入知识库：当前全局选择为 A，openKnowledge 复用之。
+  await win.getByRole('button', { name: '知识库' }).click();
+  await win.getByTestId('knowledge-shell').waitFor({ timeout: 10_000 });
+  const knowledgeShellA = await win.getByTestId('knowledge-shell').getAttribute('data-project-id');
+  check('知识库以全局项目 A 打开', knowledgeShellA === projectA?.id);
+
+  // 在知识库选择器中切换到项目 B（真实 Radix combobox）。
+  await win.getByTestId('knowledge-project-select').click();
+  await win.getByRole('option', { name: 'E2E Proj B' }).click();
+  // 切换后立即更新 data-project-id 与相邻路径；等待新项目快照加载完成。
+  await win.waitForFunction((bId) =>
+    document.querySelector('[data-testid="knowledge-shell"]')?.getAttribute('data-project-id') === bId,
+    projectB?.id, { timeout: 10_000 });
+  const knowledgeShellB = await win.getByTestId('knowledge-shell').getAttribute('data-project-id');
+  const knowledgePath = await win.evaluate(() =>
+    document.querySelector('[data-testid="knowledge-shell"] [title]')?.getAttribute('title') ?? '');
+  check('知识库选择器立即切换到项目 B', knowledgeShellB === projectB?.id);
+  check('知识库相邻路径指向仓库 B', knowledgePath === repoB);
+  // 等待项目 B 快照加载（新仓库 → not_initialized 快照），断言快照归属 B 且无 A 残留。
+  await win.waitForFunction((bId) => {
+    const node = document.querySelector('[data-testid="knowledge-shell"] [data-snapshot-project-id]');
+    return node?.getAttribute('data-snapshot-project-id') === bId;
+  }, projectB?.id, { timeout: 15_000 });
+  const snapshotOwners = await win.evaluate(() =>
+    [...document.querySelectorAll('[data-testid="knowledge-shell"] [data-snapshot-project-id]')]
+      .map((node) => node.getAttribute('data-snapshot-project-id')));
+  check('知识库快照归属项目 B 且无 A 残留',
+    snapshotOwners.length === 1 && snapshotOwners[0] === projectB?.id);
+
+  // 切换到工作台：工作台选择器应同步显示项目 B。
+  await win.getByRole('button', { name: '工作台' }).click();
+  // 项目 B 无迭代，工作台不会渲染「看板」；以项目选择器触发器就绪为准。
+  await win.locator('main button[role="combobox"]').first().waitFor({ timeout: 10_000 });
+  // 工作台项目选择器无 testid；取其触发器展示文本判定。
+  const workspaceSelectValue = await win.evaluate(() => {
+    const triggers = [...document.querySelectorAll('main button[role="combobox"]')];
+    const trigger = triggers.find((node) => node.className?.includes('h-9 w-56')) ?? triggers[0];
+    return trigger?.textContent?.trim() ?? '';
+  });
+  check('工作台选择器同步显示项目 B', workspaceSelectValue.includes('E2E Proj B'));
+  // 在工作台切换回项目 A，再回到知识库，断言知识库显示 A（无独立选择）。
+  await win.evaluate(() => {
+    const trigger = [...document.querySelectorAll('main button[role="combobox"]')]
+      .find((node) => node.className?.includes('h-9 w-56'));
+    trigger?.click();
+  });
+  await win.getByRole('option', { name: 'E2E Proj A' }).click();
+  await win.getByRole('button', { name: '知识库' }).click();
+  await win.getByTestId('knowledge-shell').waitFor({ timeout: 10_000 });
+  await win.waitForFunction((aId) =>
+    document.querySelector('[data-testid="knowledge-shell"]')?.getAttribute('data-project-id') === aId,
+    projectA?.id, { timeout: 10_000 });
+  const knowledgeShellA2 = await win.getByTestId('knowledge-shell').getAttribute('data-project-id');
+  check('工作台切回 A 后知识库显示 A（无独立选择）', knowledgeShellA2 === projectA?.id);
+
+  // 草稿确认期间选择器禁用：切到 B，启动初始化，等待草稿预览面出现，断言选择器 disabled，取消后重新启用。
+  await win.getByTestId('knowledge-project-select').click();
+  await win.getByRole('option', { name: 'E2E Proj B' }).click();
+  await win.waitForFunction((bId) =>
+    document.querySelector('[data-testid="knowledge-shell"]')?.getAttribute('data-project-id') === bId,
+    projectB?.id, { timeout: 10_000 });
+  await win.waitForFunction((bId) => {
+    const node = document.querySelector('[data-testid="knowledge-shell"] [data-snapshot-project-id]');
+    return node?.getAttribute('data-snapshot-project-id') === bId;
+  }, projectB?.id, { timeout: 15_000 });
+  // 新仓库快照为 not_initialized，初始化按钮可点。
+  await win.getByRole('button', { name: '初始化知识库' }).click();
+  // 等待草稿预览面出现；超时则采集诊断信息以定位真实失败。
+  const draftAppeared = await win.getByText('草稿预览').first().waitFor({ state: 'visible', timeout: 45_000 })
+    .then(() => true).catch(async () => {
+      const diag = await win.evaluate(() => {
+        const shell = document.querySelector('[data-testid="knowledge-shell"]');
+        return {
+          shellText: (shell?.textContent ?? '').slice(0, 2000),
+          pendingRunVisible: (shell?.textContent ?? '').includes('草稿预览'),
+          selectorDisabled: document.querySelector('[data-testid="knowledge-project-select"]')?.hasAttribute('disabled') ?? false,
+        };
+      });
+      console.error('[e2e] knowledge init draft diagnostic:', JSON.stringify(diag, null, 2));
+      return false;
+    });
+  const selectorDisabledDuringDraft = await win.evaluate(() =>
+    document.querySelector('[data-testid="knowledge-project-select"]')?.getAttribute('aria-disabled') === 'true'
+    || (document.querySelector('[data-testid="knowledge-project-select"]')?.hasAttribute('disabled') ?? false));
+  check('知识库草稿确认期间选择器禁用', draftAppeared && selectorDisabledDuringDraft);
+  // 以选择器重新可用为准：disabled 解除（草稿面同时消失）。
+  if (draftAppeared) {
+    await win.getByRole('button', { name: '取消', exact: true }).click();
+    await win.waitForFunction(() => {
+      const trigger = document.querySelector('[data-testid="knowledge-project-select"]');
+      return trigger && (trigger.getAttribute('aria-disabled') !== 'true') && !trigger.hasAttribute('disabled');
+    }, { timeout: 15_000 });
+  }
+  const selectorEnabledAfterCancel = await win.evaluate(() => {
+    const trigger = document.querySelector('[data-testid="knowledge-project-select"]');
+    return trigger && (trigger.getAttribute('aria-disabled') !== 'true') && !trigger.hasAttribute('disabled');
+  });
+  check('知识库取消草稿后选择器重新启用', draftAppeared && selectorEnabledAfterCancel);
+
+  // 窄布局 960x640：选择器可见且页面无横向溢出。
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(960, 640); });
+  await win.waitForTimeout(200);
+  const knowledgeLayout = await win.evaluate(() => ({
+    overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    selectorVisible: Boolean(document.querySelector('[data-testid="knowledge-project-select"]')),
+  }));
+  check('知识库最小窗口无页面级横向溢出', knowledgeLayout.overflow <= 2);
+  check('知识库项目选择器在最小窗口可见', knowledgeLayout.selectorVisible);
+  // 收尾：回到工作台并恢复默认窗口尺寸。
+  await win.getByRole('button', { name: '工作台' }).click();
+  await app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0].setSize(1280, 840); });
 } catch (err) {
   console.error('[e2e] error:', err.message);
   failures++;
@@ -901,6 +1059,7 @@ try {
   await app.close().catch(() => {});
   await provider.close().catch(() => {});
   rmSync(repo, { recursive: true, force: true });
+  rmSync(repoB, { recursive: true, force: true });
   rmSync(userData, { recursive: true, force: true });
 }
 

@@ -282,16 +282,21 @@ export class PiRunner implements AgentRunner {
     }
     state.spawned = spawned;
 
-    this.deps.attempts?.create({
-      id: attemptId,
-      executionId: request.executionId,
-      ordinal,
-      routeId: route.routeId,
-      state: 'running',
-      mutationsObserved: false,
-      journalJson: '{}',
-      startedAt: Date.now(),
-    });
+    try {
+      this.deps.attempts?.create({
+        id: attemptId,
+        executionId: request.executionId,
+        ordinal,
+        routeId: route.routeId,
+        state: 'running',
+        mutationsObserved: false,
+        journalJson: '{}',
+        startedAt: Date.now(),
+      });
+    } catch {
+      // Attempt telemetry is best-effort and must never change execution semantics
+      // (e.g. a knowledge-init run has no execution_records parent row).
+    }
 
     let interactionTerminated = false;
     let agentEndObserved = false;
@@ -302,7 +307,7 @@ export class PiRunner implements AgentRunner {
       const events = translator.push(line.text);
       for (const ev of events) queue.push(ev);
       const journal = translator.journal();
-      this.deps.attempts?.updateJournal(attemptId, JSON.stringify(journal), journal.mutationsObserved);
+      try { this.deps.attempts?.updateJournal(attemptId, JSON.stringify(journal), journal.mutationsObserved); } catch { /* best-effort telemetry */ }
       // §7.4：ai_devflow_interaction 工具结果落入 JSONL 后，supervisor 主动终止本次 Pi 进程组，
       // 把任务交还 awaiting_input 流程。不等待 Pi 自行结束（非契约行为，版本变化后可能 hang 到超时）。
       if (!interactionTerminated && translator.hadInteraction()) {
@@ -344,7 +349,7 @@ export class PiRunner implements AgentRunner {
       const structured = translator.structuredResult()!;
       const invalid = validateExpertCompletion(request, structured);
       if (invalid) {
-        this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+        try { this.deps.attempts?.finish(attemptId, 'failed', Date.now()); } catch { /* best-effort telemetry */ }
         finishUsage('failed', 'task_result');
         return {
           ok: false,
@@ -352,7 +357,7 @@ export class PiRunner implements AgentRunner {
           error: new ProviderExecutionError(invalid, 'task_result'),
         };
       }
-      this.deps.attempts?.finish(attemptId, 'succeeded', Date.now());
+      try { this.deps.attempts?.finish(attemptId, 'succeeded', Date.now()); } catch { /* best-effort telemetry */ }
       finishUsage('succeeded');
       queue.push({
         type: 'done',
@@ -369,11 +374,11 @@ export class PiRunner implements AgentRunner {
       // interaction 是暂停终态：protocol 已由 finish() 校验（interactionOccurred 且无 result）。
       // §7.4 主动终止进程组后退出码不再为 0，故此处不依赖 exitCode，只校验无 protocol 失败/结果/提供商错误。
       if (!finishError && !translator.hasStructuredResult() && !pe) {
-        this.deps.attempts?.finish(attemptId, 'canceled', Date.now());
+        try { this.deps.attempts?.finish(attemptId, 'canceled', Date.now()); } catch { /* best-effort telemetry */ }
         finishUsage('canceled');
         return { ok: true, journal };
       }
-      this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+      try { this.deps.attempts?.finish(attemptId, 'failed', Date.now()); } catch { /* best-effort telemetry */ }
       finishUsage('failed', 'interaction');
       return {
         ok: false,
@@ -385,7 +390,7 @@ export class PiRunner implements AgentRunner {
       };
     }
 
-    this.deps.attempts?.finish(attemptId, 'failed', Date.now());
+    try { this.deps.attempts?.finish(attemptId, 'failed', Date.now()); } catch { /* best-effort telemetry */ }
     let error: ProviderExecutionError;
     if (pe) {
       error = new ProviderExecutionError(pe.message || 'provider error', classifyProviderFailure(pe), pe.status);
