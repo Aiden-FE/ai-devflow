@@ -143,6 +143,20 @@ function metric(row: AttemptAggregateRow | undefined, logicalRequests: number): 
   };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RUNTIME_NAME = /^ai-devflow-[0-9a-f]+$/i;
+
+function isInternalSnapshot(providerId: string, value: string): boolean {
+  const name = value.trim();
+  return !name || name === providerId || UUID.test(name) || RUNTIME_NAME.test(name);
+}
+
+function preferredSnapshot(providerId: string, values: readonly string[]): string {
+  return values.map((value) => value.trim()).find((value) => !isInternalSnapshot(providerId, value))
+    ?? values.map((value) => value.trim()).find(Boolean)
+    ?? providerId;
+}
+
 function aggregateSelect(groupExpression: string, labelExpression: string): string {
   return `
     SELECT ${groupExpression} AS bucket_key, ${labelExpression} AS bucket_label,
@@ -226,11 +240,46 @@ function queryRows(
   return db.prepare(`${cte.sql} ${aggregateSelect(key, label)} ORDER BY bucket_key`).all(...cte.values) as unknown as AttemptAggregateRow[];
 }
 
+function providerBreakdowns(db: DatabaseSync, filters: UsageFilters): UsageBreakdown[] {
+  const cte = attemptCte(filters);
+  const aggregateRows = db.prepare(`${cte.sql}
+    SELECT provider_id AS bucket_key, '' AS bucket_label,
+      SUM(call_count) AS provider_calls,
+      SUM(CASE WHEN status='succeeded' THEN call_count ELSE 0 END) AS succeeded,
+      SUM(CASE WHEN status='failed' THEN call_count ELSE 0 END) AS failed,
+      SUM(CASE WHEN status='canceled' THEN call_count ELSE 0 END) AS canceled,
+      SUM(CASE WHEN status='interrupted' THEN call_count ELSE 0 END) AS interrupted,
+      SUM(duration_sum) AS duration_sum, SUM(duration_count) AS duration_count,
+      SUM(input_sum) AS input_sum, SUM(input_known) AS input_known,
+      SUM(output_sum) AS output_sum, SUM(output_known) AS output_known,
+      SUM(cache_read_sum) AS cache_read_sum, SUM(cache_read_known) AS cache_read_known,
+      SUM(cache_write_sum) AS cache_write_sum, SUM(cache_write_known) AS cache_write_known,
+      SUM(total_sum) AS total_sum, SUM(total_known) AS total_known
+    FROM attempts GROUP BY provider_id ORDER BY provider_id
+  `).all(...cte.values) as unknown as AttemptAggregateRow[];
+  const snapshotRows = db.prepare(`${cte.sql}
+    SELECT provider_id, provider_name FROM attempts
+  `).all(...cte.values) as Array<{ provider_id: string; provider_name: string }>;
+  const snapshots = new Map<string, string[]>();
+  for (const row of snapshotRows) {
+    const list = snapshots.get(row.provider_id);
+    if (list) list.push(row.provider_name);
+    else snapshots.set(row.provider_id, [row.provider_name]);
+  }
+  const counts = logicalCounts(db, filters, 'provider_id');
+  return aggregateRows.map((row) => ({
+    key: row.bucket_key,
+    label: preferredSnapshot(row.bucket_key, snapshots.get(row.bucket_key) ?? []),
+    ...metric(row, counts.get(row.bucket_key) ?? 0),
+  }));
+}
+
 function toBreakdowns(
   db: DatabaseSync,
   filters: UsageFilters,
   column: 'provider_id' | 'model' | 'project_id' | 'workload' | 'source' | 'failure_kind',
 ): UsageBreakdown[] {
+  if (column === 'provider_id') return providerBreakdowns(db, filters);
   const counts = logicalCounts(db, filters, column);
   return queryRows(db, filters, column).map((row) => ({
     key: row.bucket_key,

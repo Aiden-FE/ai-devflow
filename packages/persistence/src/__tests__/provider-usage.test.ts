@@ -109,6 +109,57 @@ describe('ProviderUsageRepo', () => {
     expect(repos.providerUsage.query({ startAt: 0, endAt: 1000, model: 'm1', source: 'task_chat' }).summary.providerCalls).toBe(1);
   });
 
+  it('aggregates a renamed provider into one row by stable id (raw + rolled up)', () => {
+    const providerId = '776f5082-9779-4a15-8f3d-ac0b7068da9b';
+    const rows = [
+      // Oldest call stored under an internal UUID snapshot (name === provider id).
+      { logicalRequestId: 'r1', providerName: providerId, startedAt: 100, total: 100 },
+      // Later call stored under a friendly, non-internal snapshot.
+      { logicalRequestId: 'r2', providerName: 'Friendly Gateway', startedAt: 200, total: 100 },
+      // Same logical request (r1) retried, now under the friendly name.
+      { logicalRequestId: 'r1', providerName: 'Friendly Gateway', startedAt: 300, total: 100 },
+    ];
+    rows.forEach((row, index) => {
+      const record = start({
+        logicalRequestId: row.logicalRequestId,
+        providerId,
+        providerName: row.providerName,
+        routeId: `${providerId}:dev`,
+        model: 'm1',
+        workload: 'dev',
+        source: 'task_agent',
+        attemptOrdinal: index + 1,
+        startedAt: row.startedAt,
+        projectId: 'a',
+      });
+      repos.providerUsage.finish(record.id, {
+        status: 'succeeded',
+        endedAt: row.startedAt + 50,
+        usage: known(row.total),
+      });
+    });
+
+    // Roll the oldest (UUID-snapshot) row into provider_usage_daily; leave newer rows raw.
+    expect(repos.providerUsage.rollupAndPrune(1000, 1)).toEqual({ rolledUp: 1, deleted: 1 });
+
+    const result = repos.providerUsage.query({ startAt: 0, endAt: 100000 });
+    expect(result.providers).toHaveLength(1);
+    expect(result.providers[0]).toMatchObject({
+      key: providerId,
+      label: 'Friendly Gateway',
+      providerCalls: 3,
+      logicalRequests: 2,
+    });
+    expect(result.summary).toMatchObject({
+      providerCalls: 3,
+      logicalRequests: 2,
+      succeeded: 3,
+      tokens: { total: 300 },
+      tokenKnownCalls: 3,
+      tokenCoverage: 1,
+    });
+  });
+
   it('rolls up bounded batches without double-counting a split logical request', () => {
     for (const providerId of ['p1', 'p2']) {
       const record = start({
