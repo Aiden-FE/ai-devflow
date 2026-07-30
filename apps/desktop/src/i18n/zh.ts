@@ -44,6 +44,9 @@ export const zh: Record<string, string> = {
   'knowledge.verdict.none': '无沉淀价值',
   'knowledge.verdict.valuable': '有沉淀价值',
   'knowledge.depositionState': '沉淀状态',
+  'knowledge.project': '项目',
+  'knowledge.loading': '加载中…',
+  'knowledge.switchDisabled': '当前操作或草稿确认未完成，暂不可切换项目',
 
   // ---- 跨项目状态（左下角） ----
   'status.cross.title': '跨项目状态',

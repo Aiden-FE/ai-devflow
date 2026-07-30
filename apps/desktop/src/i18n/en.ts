@@ -44,6 +44,9 @@ export const en: Record<string, string> = {
   'knowledge.verdict.none': 'No deposition value',
   'knowledge.verdict.valuable': 'Valuable',
   'knowledge.depositionState': 'Deposition state',
+  'knowledge.project': 'Project',
+  'knowledge.loading': 'Loading…',
+  'knowledge.switchDisabled': 'Switching is disabled until the current operation or draft confirmation finishes.',
 
   // ---- cross-project status ----
   'status.cross.title': 'Cross-project',

@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib.js';
 import { useT } from '../i18n/index.js';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '../components/ui/select.js';
 import { ScanSearch, FolderPlus, Wrench, Check, X } from 'lucide-react';
 import type { KnowledgeHealthSnapshot, KnowledgeRunView, Project } from '@ai-devflow/core';
 
@@ -14,24 +15,43 @@ export interface KnowledgePageProps {
   onSwitchProject(projectId: string): void;
 }
 
-export function KnowledgePage({ project }: KnowledgePageProps): React.ReactElement {
+export function KnowledgePage({ project, projects, onSwitchProject }: KnowledgePageProps): React.ReactElement {
   const t = useT();
   const [snapshot, setSnapshot] = useState<KnowledgeHealthSnapshot | undefined>(undefined);
   const [pendingRun, setPendingRun] = useState<KnowledgeRunView | undefined>(undefined);
   const [selectedFindings, setSelectedFindings] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
-  const refresh = useCallback(async () => {
+  // Monotonic request version: shared by the project-change effect and manual
+  // refresh so a late response from a previously selected project cannot
+  // overwrite the current project's state.
+  const requestVersion = useRef(0);
+
+  const refresh = useCallback(async (reset = false) => {
+    const version = ++requestVersion.current;
+    if (reset) {
+      setSnapshot(undefined);
+      setPendingRun(undefined);
+      setSelectedFindings(new Set());
+      setError(undefined);
+    }
+    setLoading(true);
     try {
-      const snap = await api.knowledge.getProjectSnapshot(project.id);
-      setSnapshot(snap);
+      const next = await api.knowledge.getProjectSnapshot(project.id);
+      if (version === requestVersion.current) setSnapshot(next);
     } catch (e) {
-      setError((e as Error).message);
+      if (version === requestVersion.current) setError((e as Error).message);
+    } finally {
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [project.id]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh(true);
+    return () => { requestVersion.current += 1; };
+  }, [refresh]);
 
   const startInit = async () => {
     setBusy(true); setError(undefined);
@@ -76,11 +96,29 @@ export function KnowledgePage({ project }: KnowledgePageProps): React.ReactEleme
   };
 
   const notInitialized = snapshot?.state === 'not_initialized';
+  const switchDisabled = busy || pendingRun?.confirmationState === 'pending';
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="m-0 text-lg font-semibold">{t('nav.knowledge')}</h2>
+    <div className="flex flex-col gap-4" data-testid="knowledge-shell" data-project-id={project.id}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Select value={project.id} onValueChange={onSwitchProject} disabled={switchDisabled}>
+            <SelectTrigger
+              className="h-9 w-56"
+              aria-label={t('knowledge.project')}
+              data-testid="knowledge-project-select"
+              title={switchDisabled ? t('knowledge.switchDisabled') : undefined}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="truncate text-xs text-muted-foreground" title={project.path}>{project.path}</span>
+        </div>
         <div className="flex gap-2">
           <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-secondary" onClick={startFull} disabled={busy}>
             <ScanSearch className="mr-1 inline h-4 w-4" />{t('knowledge.fullAudit')}
@@ -100,8 +138,14 @@ export function KnowledgePage({ project }: KnowledgePageProps): React.ReactEleme
         </div>
       </div>
 
+      {loading && !snapshot && (
+        <div className="flex h-40 items-center justify-center rounded-md border border-border bg-card text-sm text-muted-foreground">
+          {t('knowledge.loading')}
+        </div>
+      )}
+
       {snapshot && (
-        <div className="rounded-md border border-border bg-card p-3">
+        <div className="rounded-md border border-border bg-card p-3" data-snapshot-project-id={snapshot.projectId}>
           <div className="text-sm text-muted-foreground">{t('knowledge.state')}: <span className="font-medium text-foreground">{snapshot.state}</span></div>
           <div className="mt-2 flex flex-wrap gap-3 text-xs">
             {Object.entries(snapshot.counts).map(([type, n]) => (
