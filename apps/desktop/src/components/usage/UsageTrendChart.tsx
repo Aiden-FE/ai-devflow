@@ -1,12 +1,8 @@
-// 每日调用趋势：纯 option 构造器 + 受控的 ECharts 包装与焦点切换。
+// 每日调用趋势：纯 option 构造器。
 // 构造器是纯函数（不读 DOM、不读 i18n、不读主题），所有本地化文案与解析后的
-// CSS 颜色都由调用方通过 input 传入；组件层负责解析主题色与 aria-label。
-import React, { useState } from 'react';
+// CSS 颜色都由调用方通过 input 传入。
 import type { EChartsCoreOption } from 'echarts/core';
 import type { UsageAnalytics, UsageTimeBucket } from '@ai-devflow/core';
-import { EChart } from './EChart.js';
-import { useT } from '../../i18n/index.js';
-import { cn } from '@/lib/utils';
 
 export type UsageTrendMode = 'calls' | 'tokens' | 'successRate';
 
@@ -192,70 +188,4 @@ export function buildUsageTrendOption(input: UsageTrendInput): EChartsCoreOption
       },
     ],
   };
-}
-
-function resolveColor(name: string): string {
-  if (typeof window === 'undefined') return '';
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-const FOCUS_OPTIONS: Array<{ mode: UsageTrendMode; key: string }> = [
-  { mode: 'calls', key: 'usage.calls' },
-  { mode: 'tokens', key: 'usage.totalTokens' },
-  { mode: 'successRate', key: 'usage.successRate' },
-];
-
-export interface UsageTrendChartProps {
-  data: UsageAnalytics;
-  reducedMotion?: boolean;
-}
-
-export function UsageTrendChart({ data, reducedMotion = false }: UsageTrendChartProps): React.ReactElement {
-  const t = useT();
-  const [mode, setMode] = useState<UsageTrendMode>('calls');
-
-  const colors: UsageTrendColors = {
-    calls: resolveColor('--color-foreground'),
-    tokens: resolveColor('--color-lane-in_review'),
-    success: resolveColor('--color-ok'),
-    grid: resolveColor('--color-border'),
-    text: resolveColor('--color-muted-foreground'),
-  };
-
-  const labels: UsageTrendLabels = {
-    calls: t('usage.calls'),
-    tokens: t('usage.totalTokens'),
-    succeeded: t('usage.calls'),
-    failed: t('usage.calls'),
-    totalTokens: t('usage.totalTokens'),
-    coverage: t('usage.coverage'),
-    successRate: t('usage.successRate'),
-    date: t('usage.days', { n: 0 }),
-    unknown: '未知',
-  };
-
-  const option = buildUsageTrendOption({ data, mode, colors, labels, reducedMotion });
-  const ariaLabel = `${t('usage.trend')} · ${mode} · ${new Date(data.filters.startAt).toLocaleDateString()}–${new Date(data.filters.endAt).toLocaleDateString()}`;
-
-  return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-1 rounded-md border border-border p-1">
-        {FOCUS_OPTIONS.map((option) => (
-          <button
-            key={option.mode}
-            type="button"
-            aria-pressed={mode === option.mode}
-            className={cn(
-              'rounded px-3 py-1 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
-              mode === option.mode ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-            )}
-            onClick={() => setMode(option.mode)}
-          >
-            {t(option.key)}
-          </button>
-        ))}
-      </div>
-      <EChart option={option as unknown as Record<string, unknown>} ariaLabel={ariaLabel} />
-    </section>
-  );
 }

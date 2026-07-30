@@ -1,11 +1,8 @@
-// Token 构成：纯 option 构造器 + 受控的 ECharts 包装与覆盖率 DOM 文本。
+// Token 构成：纯 option 构造器。
 // 构造器是纯函数（不读 DOM、不读 i18n、不读主题），所有本地化文案与解析后的
-// CSS 颜色都由调用方通过 input 传入；组件层负责解析主题色与覆盖率的非 Canvas 文本。
-import React from 'react';
+// CSS 颜色都由调用方通过 input 传入。
 import type { EChartsCoreOption } from 'echarts/core';
 import type { UsageMetric } from '@ai-devflow/core';
-import { EChart } from './EChart.js';
-import { useT } from '../../i18n/index.js';
 
 export interface TokenCompositionColors {
   input: string;
@@ -104,47 +101,4 @@ export function buildTokenCompositionOption(input: TokenCompositionInput): EChar
       },
     ],
   };
-}
-
-function resolveColor(name: string): string {
-  if (typeof window === 'undefined') return '';
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-export interface TokenCompositionChartProps {
-  metric: UsageMetric;
-  reducedMotion?: boolean;
-}
-
-export function TokenCompositionChart({ metric, reducedMotion = false }: TokenCompositionChartProps): React.ReactElement {
-  const t = useT();
-
-  const colors: TokenCompositionColors = {
-    input: resolveColor('--color-lane-in_review'),
-    output: resolveColor('--color-foreground'),
-    cacheRead: resolveColor('--color-ok'),
-    cacheWrite: resolveColor('--color-warn'),
-    grid: resolveColor('--color-border'),
-    text: resolveColor('--color-muted-foreground'),
-  };
-
-  const labels: TokenCompositionLabels = {
-    input: t('usage.token.input'),
-    output: t('usage.token.output'),
-    cacheRead: t('usage.token.cacheRead'),
-    cacheWrite: t('usage.token.cacheWrite'),
-    unknown: '未知',
-  };
-
-  const option = buildTokenCompositionOption({ metric, colors, labels, reducedMotion });
-  const ariaLabel = `${t('usage.tokens')} · ${metric.tokenKnownCalls}/${metric.providerCalls}`;
-
-  return (
-    <section className="flex flex-col gap-2">
-      <EChart option={option as unknown as Record<string, unknown>} ariaLabel={ariaLabel} className="h-[200px] min-h-[180px]" />
-      <p className="text-xs tabular-nums text-muted-foreground">
-        {t('usage.coverage')}: {metric.tokenKnownCalls}/{metric.providerCalls}
-      </p>
-    </section>
-  );
 }
