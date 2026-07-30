@@ -56,6 +56,13 @@ export function App(): React.ReactElement {
     if (p) setProject(p);
   }, [projects]);
 
+  const openKnowledge = useCallback(() => {
+    const next = project ?? projects[0];
+    if (!next) return;
+    if (!project) setProject(next);
+    setRoute('knowledge');
+  }, [project, projects]);
+
   const navItem = (r: Route, icon: React.ReactNode, label: string) => (
     <button
       className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
@@ -80,9 +87,9 @@ export function App(): React.ReactElement {
         <button
           className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
             route === 'knowledge' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground'
-          } ${project ? '' : 'cursor-not-allowed opacity-40'}`}
-          disabled={!project}
-          onClick={() => project && setRoute('knowledge')}
+          } ${projects.length === 0 ? 'cursor-not-allowed opacity-40' : ''}`}
+          disabled={projects.length === 0}
+          onClick={openKnowledge}
         >
           <Library className="h-4 w-4" />
           {t('nav.knowledge')}
@@ -112,7 +119,13 @@ export function App(): React.ReactElement {
             onNavigateSettings={() => setRoute('settings')}
           />
         )}
-        {route === 'knowledge' && project && <KnowledgePage project={project} />}
+        {route === 'knowledge' && project && (
+          <KnowledgePage
+            project={project}
+            projects={projects}
+            onSwitchProject={switchProject}
+          />
+        )}
         {route === 'usage' && <UsageStatsPage />}
         {route === 'settings' && <SettingsPage />}
       </main>

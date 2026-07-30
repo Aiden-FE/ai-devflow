@@ -8,7 +8,13 @@ const TYPE_LABELS: Record<string, string> = {
   context: 'Context', adr: 'ADR', feature: 'Feature', runbook: 'Runbook', product: 'Product', ux: 'UX',
 };
 
-export function KnowledgePage({ project }: { project: Project }): React.ReactElement {
+export interface KnowledgePageProps {
+  project: Project;
+  projects: Project[];
+  onSwitchProject(projectId: string): void;
+}
+
+export function KnowledgePage({ project }: KnowledgePageProps): React.ReactElement {
   const t = useT();
   const [snapshot, setSnapshot] = useState<KnowledgeHealthSnapshot | undefined>(undefined);
   const [pendingRun, setPendingRun] = useState<KnowledgeRunView | undefined>(undefined);
