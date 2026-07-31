@@ -16,7 +16,7 @@ import {
   cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync,
   readlinkSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runPiCatalogGate } from './pi-catalog-gate.mjs';
 
@@ -177,7 +177,12 @@ function main() {
     const missing = ROLES.filter((r) => !existsSync(join(PROFILES_SRC, r)));
     if (missing.length > 0) throw new Error(`staging 失败：角色资源不完整，缺少 ${missing.join(', ')}`);
     const profilesDest = join(STAGE_DIR, 'profiles');
-    cpSync(PROFILES_SRC, profilesDest, { recursive: true });
+    // electron-builder 复制 extraResources 时会丢弃点文件（如 .gitkeep/.DS_Store），
+    // 若它们进入 manifest 会导致打包后文件数校验失败；staging 阶段统一排除。
+    cpSync(PROFILES_SRC, profilesDest, {
+      recursive: true,
+      filter: (src) => !basename(src).startsWith('.'),
+    });
     profilesDigest = computeDirDigest(profilesDest);
     log(`角色资源摘要 ${profilesDigest}`);
   } else {
