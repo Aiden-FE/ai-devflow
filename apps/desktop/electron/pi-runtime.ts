@@ -25,6 +25,7 @@ import type { ProviderConfig, ProviderHealth } from '@ai-devflow/core';
 import type { Repositories } from '@ai-devflow/persistence';
 import { decryptProviderSecret, encryptProviderSecret } from './credentials.js';
 import { ProviderStore } from './provider-store.js';
+import { HostVerificationRunner } from './verification-runner.js';
 
 const execFileP = promisify(execFile);
 export const EXPECTED_PI_VERSION = '0.80.10';
@@ -155,6 +156,7 @@ export function createPiRuntime(repos: Repositories, userData: string): PiRuntim
     projectToolPath: buildControlledPath(),
     instructionLoader: new ProjectInstructionLoader(),
     attempts: repos.executionAttempts,
+    verificationRunner: new HostVerificationRunner(repos, { worktreesBaseDir: join(userData, 'worktrees') }),
     usage: {
       start: (input) => {
         const providerName = providerStore.listConfigs()

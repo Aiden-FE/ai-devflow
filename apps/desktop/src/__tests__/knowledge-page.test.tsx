@@ -45,7 +45,7 @@ function snapshot(projectId: string, overrides: Partial<KnowledgeHealthSnapshot>
   };
 }
 
-function pendingRun(projectId: string): KnowledgeRunView {
+function pendingRun(projectId: string, overrides: Partial<KnowledgeRunView> = {}): KnowledgeRunView {
   return {
     id: 'run-' + projectId,
     projectId,
@@ -56,6 +56,7 @@ function pendingRun(projectId: string): KnowledgeRunView {
     findings: [],
     diagnostics: [],
     startedAt: 1,
+    ...overrides,
   };
 }
 
@@ -70,6 +71,7 @@ const projects = [p1, p2];
 // ---- knowledge API mock (per-test reset via beforeEach) ----
 const knowledgeApi = {
   getProjectSnapshot: vi.fn(),
+  getActiveRun: vi.fn(async (): Promise<KnowledgeRunView | undefined> => undefined),
   startInitialization: vi.fn(),
   startAudit: vi.fn(),
   startRepair: vi.fn(),
@@ -79,10 +81,12 @@ const knowledgeApi = {
   getTaskEvidence: vi.fn(async () => ({ retrievals: [] })),
   getIterationVerification: vi.fn(async () => ({ iterationId: 'i', state: 'pending', coveredTaskIds: [], missingTaskIds: [], changedPaths: [], findings: [] })),
 };
+// events.subscribe: 默认返回空订阅；个别用例可覆写以模拟运行事件。
+const eventsApi = { subscribe: vi.fn((_handler: (e: any) => void) => () => {}) };
 // Extend the happy-dom window (do NOT replace it - react-dom's synthetic event
 // system needs window.addEventListener etc.).
 Object.assign(window, {
-  api: { knowledge: knowledgeApi },
+  api: { knowledge: knowledgeApi, events: eventsApi },
   matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
 });
 // happy-dom omits window.HTMLIFrameElement; react-dom@18 getActiveElementDeep uses
@@ -159,6 +163,9 @@ function text(): string {
 }
 function findButton(substr: string): HTMLButtonElement | undefined {
   return Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes(substr));
+}
+function runningRun(projectId: string): KnowledgeRunView {
+  return { id: 'running-' + projectId, projectId, kind: 'initialization', state: 'running', confirmationState: 'not_required', changedPaths: [], findings: [], diagnostics: [], startedAt: 1 };
 }
 
 // ===========================================================================
@@ -259,6 +266,220 @@ describe('KnowledgePage project reset and stale response rejection', () => {
 });
 
 // ===========================================================================
+// Step 6: in-progress run recovery (切页重进后恢复运行态 + 进度指示 + 事件订阅)
+// ===========================================================================
+describe('KnowledgePage in-progress recovery', () => {
+  it('renders a readable, expandable review instead of a raw diff dump', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1', {
+      draftBranch: 'knowledge/draft-run-p1',
+      changedPaths: ['knowledges/context/project.md', 'knowledges/runbook/setup.md'],
+      diff: `diff --git a/knowledges/context/project.md b/knowledges/context/project.md
+--- a/knowledges/context/project.md
++++ b/knowledges/context/project.md
+@@ -1,2 +1,2 @@
+ # Project
+-Old summary
++Current summary
+diff --git a/knowledges/runbook/setup.md b/knowledges/runbook/setup.md
+new file mode 100644
+--- /dev/null
++++ b/knowledges/runbook/setup.md
+@@ -0,0 +1,2 @@
++# Setup
++Run pnpm install`,
+    }));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    const review = container.querySelector('[data-testid="knowledge-draft-review"]');
+    const files = container.querySelectorAll('[data-testid="knowledge-draft-file"]');
+    expect(review).toBeTruthy();
+    expect(files).toHaveLength(2);
+    expect(text()).toContain('knowledge.draft.summary');
+    expect(text()).toContain('knowledges/context/project.md');
+    expect(text()).toContain('knowledges/runbook/setup.md');
+    expect(text()).toContain('Current summary');
+    expect(text()).not.toContain('Run pnpm install');
+    expect(text()).not.toContain('diff --git');
+
+    click(files[1].querySelector('button'));
+    expect(text()).toContain('Run pnpm install');
+    expect(container.querySelectorAll('[data-testid="knowledge-diff-line"]').length).toBeGreaterThan(0);
+  });
+
+  it('lists changed paths when no diff content is available', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1', {
+      changedPaths: ['knowledges/context/project.md'],
+    }));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    expect(container.querySelector('[data-testid="knowledge-draft-review"]')).toBeTruthy();
+    expect(text()).toContain('knowledges/context/project.md');
+    expect(text()).toContain('knowledge.draft.diffUnavailable');
+  });
+
+  it('confirms the pending run recovered on page entry', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1'));
+    knowledgeApi.confirmRun.mockResolvedValueOnce(snapshot('p1'));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    click(findButton('common.confirm'));
+    await flush();
+
+    expect(knowledgeApi.confirmRun).toHaveBeenCalledWith('run-p1');
+  });
+
+  it('keeps the draft visible and presents deduplicated validation issues when confirmation is blocked', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1', {
+      changedPaths: ['docs/knowledge/context/project.md'],
+      diff: `diff --git a/docs/knowledge/context/project.md b/docs/knowledge/context/project.md
+--- a/docs/knowledge/context/project.md
++++ b/docs/knowledge/context/project.md
+@@ -1 +1 @@
+-old
++new`,
+    }));
+    knowledgeApi.confirmRun.mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'ai-devflow:knowledge:confirmRun': Error: "
+      + '草稿校验阻断：引用目标不存在：adr:001; '
+      + '草稿校验阻断：来源路径非法：entrypoints/popup/; '
+      + '草稿校验阻断：引用目标不存在：adr:001',
+    ));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    click(findButton('common.confirm'));
+    await flush();
+
+    expect(container.querySelector('[data-testid="knowledge-draft-review"]')).toBeTruthy();
+    const validation = container.querySelector('[data-testid="knowledge-draft-validation"]');
+    expect(validation).toBeTruthy();
+    expect(validation?.querySelectorAll('li')).toHaveLength(2);
+    expect(validation?.textContent).toContain('引用目标不存在：adr:001');
+    expect(validation?.textContent).toContain('来源路径非法：entrypoints/popup/');
+    expect(validation?.textContent).not.toContain('Error invoking remote method');
+    expect(findButton('common.cancel')?.disabled).toBe(false);
+  });
+
+  it('restores draft validation issues from a recovered pending run', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1', {
+      changedPaths: ['docs/knowledge/index.md'],
+      findings: [
+        { id: 'f1', severity: 'error', code: 'invalid_reference', message: '引用目标不存在：adr:001', evidence: [] },
+        { id: 'f2', severity: 'error', code: 'invalid_reference', message: '引用目标不存在：adr:001', evidence: [] },
+        { id: 'f3', severity: 'warn', code: 'stale', message: '可能过期', evidence: [] },
+      ],
+    }));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    const validation = container.querySelector('[data-testid="knowledge-draft-validation"]');
+    expect(validation).toBeTruthy();
+    expect(validation?.querySelectorAll('li')).toHaveLength(1);
+    expect(validation?.textContent).toContain('引用目标不存在：adr:001');
+    expect(validation?.textContent).not.toContain('可能过期');
+  });
+
+  it('cancels the pending run recovered on page entry', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1'));
+    knowledgeApi.cancelRun.mockResolvedValueOnce(undefined);
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    click(findButton('common.cancel'));
+    await flush();
+
+    expect(knowledgeApi.cancelRun).toHaveBeenCalledWith('run-p1');
+  });
+
+  it('disables new knowledge operations while a draft awaits confirmation', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', {
+      state: 'not_initialized',
+      findings: [{ id: 'f1', severity: 'warn', code: 'C', message: 'm', evidence: [] }],
+    }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(pendingRun('p1'));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    const checkbox = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    act(() => { checkbox.click(); });
+    await flush();
+
+    expect(findButton('knowledge.initialize')?.disabled).toBe(true);
+    expect(findButton('knowledge.fullAudit')?.disabled).toBe(true);
+    expect(findButton('knowledge.repair')?.disabled).toBe(true);
+    expect(findButton('common.confirm')?.disabled).toBe(false);
+    expect(findButton('common.cancel')?.disabled).toBe(false);
+  });
+
+  it('recovers a running run from getActiveRun and shows a progress panel with buttons disabled', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1', { state: 'not_initialized' }));
+    knowledgeApi.getActiveRun.mockResolvedValueOnce(runningRun('p1'));
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    const progress = container.querySelector('[data-testid="knowledge-run-progress"]');
+    expect(progress?.getAttribute('data-run-id')).toBe('running-p1');
+    expect(progress?.getAttribute('data-run-state')).toBe('running');
+    // 运行中时初始化/巡检/修复按钮均禁用。
+    expect(findButton('knowledge.initialize')?.disabled).toBe(true);
+    expect(findButton('knowledge.fullAudit')?.disabled).toBe(true);
+  });
+
+  it('disables the selector while a run is actively running, re-enabled once it terminates via event', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1'));
+    let emit: ((ev: any) => void) | undefined;
+    eventsApi.subscribe.mockImplementationOnce((cb: any) => { emit = cb; return () => {}; });
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    const auditD = deferred<KnowledgeRunView>();
+    knowledgeApi.startAudit.mockReturnValueOnce(auditD.promise);
+    click(findButton('knowledge.fullAudit'));
+    await flush();
+    // IPC 未 resolve 前 busy 已禁用选择器。
+    expect((container.querySelector('[data-testid="knowledge-project-select"]') as HTMLSelectElement).disabled).toBe(true);
+
+    await act(async () => { auditD.resolve(runningRun('p1')); });
+    await flush();
+    // 运行中：进度面板出现，选择器仍禁用。
+    expect(container.querySelector('[data-testid="knowledge-run-progress"]')).toBeTruthy();
+    expect((container.querySelector('[data-testid="knowledge-project-select"]') as HTMLSelectElement).disabled).toBe(true);
+
+    // 模拟主进程广播终态事件。
+    knowledgeApi.getProjectSnapshot.mockResolvedValueOnce(snapshot('p1'));
+    await act(async () => {
+      emit?.({ kind: 'knowledge-run', taskId: 'p1', data: { ...runningRun('p1'), state: 'succeeded' } });
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="knowledge-run-progress"]')).toBeNull();
+    expect((container.querySelector('[data-testid="knowledge-project-select"]') as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it('ignores knowledge-run events for other projects', async () => {
+    knowledgeApi.getProjectSnapshot.mockResolvedValue(snapshot('p1'));
+    let emit: ((ev: any) => void) | undefined;
+    eventsApi.subscribe.mockImplementationOnce((cb: any) => { emit = cb; return () => {}; });
+    render({ project: p1, projects, onSwitchProject: () => {} });
+    await flush();
+
+    await act(async () => {
+      emit?.({ kind: 'knowledge-run', taskId: 'p2', data: runningRun('p2') });
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="knowledge-run-progress"]')).toBeNull();
+  });
+});
+
+// ===========================================================================
 // Step 5: switching guards
 // ===========================================================================
 describe('KnowledgePage switching guards', () => {
@@ -324,7 +545,9 @@ describe('KnowledgePage switching guards', () => {
     await flush();
 
     knowledgeApi.startAudit.mockResolvedValue(succeededRun('p2', 'full_audit'));
-    knowledgeApi.startInitialization.mockResolvedValue(pendingRun('p2'));
+    // This routing test keeps each operation independent; active-run blocking
+    // is covered separately with a real awaiting-confirmation view.
+    knowledgeApi.startInitialization.mockResolvedValue(succeededRun('p2', 'initialization'));
     knowledgeApi.startRepair.mockResolvedValue(pendingRun('p2'));
 
     // audit

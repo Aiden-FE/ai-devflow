@@ -53,3 +53,32 @@ export interface AgentRunner {
   verifyRuntime(): Promise<{ version: string; entry: string }>;
   run(request: AgentRunRequest): Promise<AgentRun>;
 }
+
+/** 宿主端验证命令白名单（reviewer/test 专家经 ai_devflow_run_verification 调用）。 */
+export type VerificationCommand = 'test' | 'typecheck' | 'lint';
+
+/** 宿主端验证结果（脱敏后回灌子进程）。 */
+export interface VerificationResult {
+  ok: boolean;
+  command: VerificationCommand;
+  exitCode: number | null;
+  summary: string;
+  output: string;
+  durationMs: number;
+}
+
+/**
+ * 宿主端验证器：在原始项目仓库（非 worktree）用真实 PATH 运行受限白名单命令，
+ * 让 reviewer/test 专家能在沙箱无项目工具链时亲自重跑测试/类型检查/lint。
+ * 不写文件、不暴露凭证；输出必须经 redactText 脱敏并限长。
+ */
+export interface VerificationRunner {
+  /** 解析运行作用域对应的原始项目仓库路径（worktree 之外）。 */
+  resolveProjectPath(scope: AgentRunScope): string | undefined;
+  /**
+   * 执行受限验证命令；返回脱敏结果。
+   * `cwd` 是调用方解析出的默认执行目录（通常是原始项目仓库）；实现可根据 `agentScope`
+   * 切换到包含任务分支代码的执行目录（例如任务 worktree），避免在默认分支/用户工作区状态上验证。
+   */
+  run(input: { command: VerificationCommand; scope?: string; cwd: string; timeoutMs?: number; agentScope?: AgentRunScope }): Promise<VerificationResult>;
+}

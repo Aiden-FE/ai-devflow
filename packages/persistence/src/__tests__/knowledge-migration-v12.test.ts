@@ -85,6 +85,22 @@ describe('schema v12 migration', () => {
       },
     ]);
     expect(repos.knowledgeFindings.listByRun('run-1')).toHaveLength(1);
+    repos.knowledgeFindings.replaceByRun('run-1', []);
+    expect(repos.knowledgeFindings.listByRun('run-1')).toHaveLength(0);
+    repos.knowledgeFindings.replaceByRun('run-1', [
+      {
+        id: 'f-2',
+        runId: 'run-1',
+        severity: 'warn',
+        code: 'updated',
+        message: 'latest',
+        evidenceJson: '[]',
+        createdAt: 16,
+      },
+    ]);
+    expect(repos.knowledgeFindings.listByRun('run-1')).toEqual([
+      expect.objectContaining({ id: 'f-2', code: 'updated', message: 'latest' }),
+    ]);
     db.prepare('DELETE FROM knowledge_runs WHERE id=?').run('run-1');
     expect(repos.knowledgeFindings.listByRun('run-1')).toHaveLength(0);
   });

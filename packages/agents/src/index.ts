@@ -83,4 +83,12 @@ export {
   type ProviderUsageSink,
   validateExpertCompletion,
 } from './pi-runner.js';
-export { type AgentRunner, type AgentRun, type AgentRunRequest as RunnerAgentRunRequest } from './runner-types.js';
+export {
+  type AgentRunner,
+  type AgentRun,
+  type AgentRunRequest as RunnerAgentRunRequest,
+  type AgentRunScope,
+  type VerificationCommand,
+  type VerificationResult,
+  type VerificationRunner,
+} from './runner-types.js';

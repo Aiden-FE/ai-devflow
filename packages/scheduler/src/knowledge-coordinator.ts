@@ -5,7 +5,7 @@
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, realpathSync } from 'node:fs';
-import { join as joinPath } from 'node:path';
+import { join as joinPath, resolve as resolvePath } from 'node:path';
 import type {
   KnowledgeAgentPayload,
   KnowledgeFinding,
@@ -17,8 +17,8 @@ import type {
 } from '@ai-devflow/core';
 import { now as defaultNow, randomId as defaultId } from '@ai-devflow/core';
 import type { AgentRunner } from '@ai-devflow/agents';
-import { sanitizePathSegment, type ProjectKnowledgeService } from '@ai-devflow/knowledge';
-import type { Repositories } from '@ai-devflow/persistence';
+import { normalizeKnowledgeDraftMetadata, sanitizePathSegment, type ProjectKnowledgeService } from '@ai-devflow/knowledge';
+import type { KnowledgeRunRecord, Repositories } from '@ai-devflow/persistence';
 import { KeyedLock } from './keyed-lock.js';
 import type {
   AgentKey,
@@ -38,6 +38,7 @@ import {
   ensureSprintBranch,
   requireCanonicalBranchSegment,
   sprintBranchName,
+  syncWorktreeWithBranch,
 } from './worktree.js';
 
 export interface KnowledgeCoordinatorOptions {
@@ -90,6 +91,20 @@ function shGit(cwd: string, args: string[]): void {
 
 function gitOutput(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+/** 静默执行 git：预期可能失败的探测不应把 fatal 噪声输出到测试/终端。 */
+function gitOutputSilent(cwd: string, args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+function gitHasPath(cwd: string, branch: string, relPath: string): boolean {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${branch}:${relPath}`], { cwd, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function gitIsAncestor(cwd: string, ancestor: string, descendant: string): boolean {
@@ -266,6 +281,22 @@ function dbFindingsForRun(repos: import('@ai-devflow/persistence').Repositories,
   }));
 }
 
+function repairPrompt(findings: KnowledgeFinding[]): string {
+  const details = findings.map((finding) => ({
+    id: finding.id,
+    code: finding.code,
+    path: finding.path,
+    knowledgeId: finding.knowledgeId,
+    message: finding.message,
+    evidence: finding.evidence,
+  }));
+  return [
+    '知识草稿未通过宿主确定性校验。请直接修复下列全部阻断问题，只修改 docs/knowledge/**，不要执行 Git。',
+    JSON.stringify(details, null, 2),
+    '修复后重新检查 frontmatter、稳定 ID、索引引用和 sources，并上报 knowledge_repair 结构化结果。',
+  ].join('\n');
+}
+
 export class KnowledgeCoordinator extends EventEmitter {
   private locks = new KeyedLock();
   private iterationLocks = new KeyedLock();
@@ -292,6 +323,37 @@ export class KnowledgeCoordinator extends EventEmitter {
     const project = this.opts.repos.projects.get(projectId);
     if (!project) throw new Error(`项目不存在：${projectId}`);
     return this.opts.knowledge.audit({ projectId, repoPath: project.path, git: this.gitProbe() });
+  }
+
+  private getActiveRunRecord(projectId: string): KnowledgeRunRecord | undefined {
+    return this.opts.repos.knowledgeRuns
+      .listByProject(projectId)
+      .find((record) => record.state === 'running' || record.state === 'awaiting_confirmation');
+  }
+
+  /** 项目当前未结束的知识运行（running/awaiting_confirmation）；待确认运行包含可恢复的完整草稿视图。 */
+  async getActiveRun(projectId: string): Promise<KnowledgeRunView | undefined> {
+    const active = this.getActiveRunRecord(projectId);
+    return active ? this.getRun(active.id) : undefined;
+  }
+
+  /** 存在未结束运行时拒绝新运行：避免重复初始化/巡检排队（KeyedLock 会 FIFO 排队，造成“任务重置”观感）。 */
+  private requireNoActiveRun(projectId: string, excludeRunId?: string): void {
+    const active = this.getActiveRunRecord(projectId);
+    if (active && active.id !== excludeRunId) {
+      throw new Error(`项目已有进行中的知识运行（${active.kind}，状态 ${active.state}），请等待其完成或取消后再操作`);
+    }
+  }
+
+  /** 广播运行视图更新（UI 订阅后实时刷新进度/状态）。失败仅忽略，不阻断主流程。 */
+  private emitRunUpdate(_projectId: string, runId: string): void {
+    const record = this.opts.repos.knowledgeRuns.get(runId);
+    if (!record) return;
+    try {
+      this.emit('run-update', toRunView(record, dbFindingsForRun(this.opts.repos, runId)));
+    } catch {
+      // 事件广播为尽力而为；不得影响运行主流程。
+    }
   }
 
   /** 启动恢复：中断的写运行不可基于过期快照续跑，标记失败并清理草稿；待用户初始化的沉淀原样保留。 */
@@ -448,9 +510,73 @@ export class KnowledgeCoordinator extends EventEmitter {
     }
   }
 
+  private findingRecords(runId: string, findings: KnowledgeFinding[], createdAt: number) {
+    return findings.map((finding, index) => ({
+      id: `${runId}-f${index}`,
+      runId,
+      severity: finding.severity,
+      code: finding.code,
+      path: finding.path,
+      knowledgeId: finding.knowledgeId,
+      message: finding.message,
+      evidenceJson: JSON.stringify(finding.evidence),
+      createdAt,
+    }));
+  }
+
+  /** 每个调用点最多触发一次定向 Agent 修复；最终仍以宿主重新审计为准。 */
+  private async autoRepairDraft(input: {
+    projectId: string;
+    runId: string;
+    phase: 'initialization' | 'confirmation';
+    projectPath: string;
+    worktreePath: string;
+    snapshot: KnowledgeHealthSnapshot;
+  }): Promise<KnowledgeHealthSnapshot> {
+    const blockers = input.snapshot.findings.filter((finding) => finding.severity === 'error');
+    if (blockers.length === 0) return input.snapshot;
+
+    try {
+      const result = await consumeAgentRun(await this.opts.runner.run({
+        scope: { kind: 'project', projectId: input.projectId },
+        executionId: `${input.runId}-auto-repair-${input.phase}`,
+        expert: 'project_lead',
+        resultKind: 'knowledge_repair',
+        prompt: repairPrompt(blockers),
+        cwd: input.worktreePath,
+      }));
+      if (result.payload?.kind !== 'knowledge_repair') {
+        throw new Error('自动修复缺少 knowledge_repair 结构化载荷');
+      }
+    } catch {
+      // 即使 Agent 的运行或结构化上报失败，也保留现有草稿供确认阶段再次恢复。
+    }
+
+    try {
+      await normalizeKnowledgeDraftMetadata(input.worktreePath);
+      commitKnowledgeDraft(
+        input.worktreePath,
+        input.projectPath,
+        `knowledge: auto-repair ${input.phase} ${input.runId}`,
+      );
+      return await this.opts.knowledge.audit({
+        projectId: input.projectId,
+        repoPath: input.worktreePath,
+        git: this.gitProbe(),
+      });
+    } catch {
+      return input.snapshot;
+    }
+  }
+
   /** 启动知识库初始化：创建草稿分支 + worktree，确定性骨架，运行 project_lead，校验后待确认。 */
   async startInitialization(projectId: string): Promise<KnowledgeRunView> {
-    return this.locks.run(`init:${projectId}`, async () => {
+    return this.locks.run(`knowledge:${projectId}`, async () => {
+      const active = this.getActiveRunRecord(projectId);
+      if (active?.kind === 'initialization' && active.state === 'awaiting_confirmation') {
+        return this.getRun(active.id);
+      }
+      this.requireNoActiveRun(projectId);
       const project = this.opts.repos.projects.get(projectId);
       if (!project) throw new Error(`项目不存在：${projectId}`);
       const runId = this.id();
@@ -468,6 +594,7 @@ export class KnowledgeCoordinator extends EventEmitter {
         resultJson: '{}',
         startedAt: t,
       });
+      this.emitRunUpdate(projectId, runId);
 
       let worktreePath: string | undefined;
       try {
@@ -492,35 +619,33 @@ export class KnowledgeCoordinator extends EventEmitter {
           executionId: runId,
           expert: 'project_lead',
           resultKind: 'knowledge_initialization',
-          prompt: '请扫描项目代码、文档与 Git 历史，在 docs/knowledge 下生成长期知识草稿及来源证据。',
+          prompt: '请扫描项目代码、文档与 Git 历史，在 docs/knowledge 下生成长期知识草稿及来源证据。frontmatter status 只能使用 draft/review/active/superseded/archived，sources 必须为无尾随斜杠的仓库相对路径；完成前自检元数据、引用与来源。',
           cwd: worktreePath,
         });
         await consumeAgentRun(agentRun);
 
+        await normalizeKnowledgeDraftMetadata(worktreePath);
+
         // Git 由宿主完成：先检查完整工作区范围，再提交草稿分支。
         commitKnowledgeDraft(worktreePath, project.path, `knowledge: initialize ${runId}`);
-        const changedPaths = await listChangedPaths(project.path, project.defaultBranch, draftBranch);
-        const snapshot = await this.opts.knowledge.audit({ projectId, repoPath: worktreePath, git: this.gitProbe() });
-
-        // 持久化 findings
-        const findingRecords = snapshot.findings.map((f, i) => ({
-          id: `${runId}-f${i}`,
+        let snapshot = await this.opts.knowledge.audit({ projectId, repoPath: worktreePath, git: this.gitProbe() });
+        snapshot = await this.autoRepairDraft({
+          projectId,
           runId,
-          severity: f.severity,
-          code: f.code,
-          path: f.path,
-          knowledgeId: f.knowledgeId,
-          message: f.message,
-          evidenceJson: JSON.stringify(f.evidence),
-          createdAt: t,
-        }));
-        this.opts.repos.knowledgeFindings.insertMany(findingRecords);
+          phase: 'initialization',
+          projectPath: project.path,
+          worktreePath,
+          snapshot,
+        });
+        const changedPaths = await listChangedPaths(project.path, project.defaultBranch, draftBranch);
+        this.opts.repos.knowledgeFindings.replaceByRun(runId, this.findingRecords(runId, snapshot.findings, t));
 
         this.opts.repos.knowledgeRuns.markAwaitingConfirmation(
           runId,
           draftBranch,
           JSON.stringify(changedPaths),
         );
+        this.emitRunUpdate(projectId, runId);
 
         const record = this.opts.repos.knowledgeRuns.get(runId)!;
         return toRunView(record, dbFindingsForRun(this.opts.repos, runId));
@@ -535,6 +660,7 @@ export class KnowledgeCoordinator extends EventEmitter {
             diagnosticsJson: JSON.stringify([(err as Error).message]),
           });
         }
+        this.emitRunUpdate(projectId, runId);
         throw err;
       }
     });
@@ -567,7 +693,9 @@ export class KnowledgeCoordinator extends EventEmitter {
 
   /** 确认运行：合并草稿分支到默认分支，完成运行。 */
   async confirmRun(runId: string): Promise<KnowledgeHealthSnapshot> {
-    return this.locks.run(`run:${runId}`, async () => {
+    const initial = this.opts.repos.knowledgeRuns.get(runId);
+    if (!initial) throw new Error(`知识运行不存在：${runId}`);
+    return this.locks.run(`knowledge:${initial.projectId}`, async () => {
       const record = this.opts.repos.knowledgeRuns.get(runId);
       if (!record) throw new Error(`知识运行不存在：${runId}`);
       if (record.state !== 'awaiting_confirmation') {
@@ -575,21 +703,52 @@ export class KnowledgeCoordinator extends EventEmitter {
       }
       const project = this.opts.repos.projects.get(record.projectId);
       if (!project) throw new Error(`项目不存在：${record.projectId}`);
-      const draftBranch = record.draftBranch!;
+      const draftBranch = record.draftBranch;
       const worktreePath = this.pendingWorktreePath(record);
+      let worktreeExists = false;
+      try {
+        worktreeExists = lstatSync(worktreePath).isDirectory();
+      } catch {
+        // Missing draft resources keep the run pending so the user can cancel it.
+      }
+      if (
+        !draftBranch ||
+        !worktreeExists ||
+        !(await branchExists(project.path, draftBranch)) ||
+        !this.isExpectedDraftWorktree(worktreePath, project.path, draftBranch)
+      ) {
+        throw new Error('知识草稿资源缺失，请取消本次草稿后重新初始化');
+      }
 
-      const preflight = await this.opts.knowledge.audit({
+      const normalization = await normalizeKnowledgeDraftMetadata(worktreePath);
+      if (normalization.changed.length > 0) {
+        commitKnowledgeDraft(worktreePath, project.path, `knowledge: normalize ${runId}`);
+        const changedPaths = await listChangedPaths(project.path, project.defaultBranch, draftBranch);
+        this.opts.repos.knowledgeRuns.setProgress(runId, record.resultJson, JSON.stringify(changedPaths));
+      }
+
+      let preflight = await this.opts.knowledge.audit({
         projectId: record.projectId,
         repoPath: worktreePath,
         git: this.gitProbe(),
       });
+      preflight = await this.autoRepairDraft({
+        projectId: record.projectId,
+        runId,
+        phase: 'confirmation',
+        projectPath: project.path,
+        worktreePath,
+        snapshot: preflight,
+      });
+      const changedPaths = await listChangedPaths(project.path, project.defaultBranch, draftBranch);
+      this.opts.repos.knowledgeRuns.setProgress(runId, record.resultJson, JSON.stringify(changedPaths));
+      this.opts.repos.knowledgeFindings.replaceByRun(
+        runId,
+        this.findingRecords(runId, preflight.findings, this.now()),
+      );
       const blockers = preflight.findings.filter((finding) => finding.severity === 'error');
       if (blockers.length > 0) {
         const diagnostics = blockers.map((finding) => `草稿校验阻断：${finding.message}`);
-        this.opts.repos.knowledgeRuns.finish(runId, 'failed', this.now(), {
-          diagnosticsJson: JSON.stringify(diagnostics),
-        });
-        await this.cleanupWorktree({ repoPath: project.path, worktreePath, branchName: draftBranch }).catch(() => undefined);
         throw new Error(diagnostics.join('; '));
       }
 
@@ -603,6 +762,7 @@ export class KnowledgeCoordinator extends EventEmitter {
           diagnosticsJson: JSON.stringify([`合并失败：${mergeRes.reason}`]),
         });
         await this.cleanupWorktree({ repoPath: project.path, worktreePath, branchName: draftBranch }).catch(() => undefined);
+        this.emitRunUpdate(record.projectId, runId);
         throw new Error(`合并失败：${mergeRes.reason}`);
       }
 
@@ -618,6 +778,7 @@ export class KnowledgeCoordinator extends EventEmitter {
           diagnosticsJson: JSON.stringify(diagnostics),
         });
       }
+      this.emitRunUpdate(record.projectId, runId);
 
       return this.lightCheck(record.projectId);
     });
@@ -625,107 +786,119 @@ export class KnowledgeCoordinator extends EventEmitter {
 
   /** 取消运行：清理草稿分支与 worktree，标记取消。 */
   async cancelRun(runId: string): Promise<void> {
-    const record = this.opts.repos.knowledgeRuns.get(runId);
-    if (!record) throw new Error(`知识运行不存在：${runId}`);
-    if (record.state === 'canceled') return;
-    if (record.state !== 'awaiting_confirmation') {
-      throw new Error(`知识运行状态为 ${record.state}，不能取消`);
-    }
-    const project = this.opts.repos.projects.get(record.projectId);
-    if (project && record.draftBranch) {
-      await this.cleanupWorktree({
-        repoPath: project.path,
-        worktreePath: this.pendingWorktreePath(record),
-        branchName: record.draftBranch,
-      }).catch(() => undefined);
-    }
-    this.opts.repos.knowledgeRuns.setConfirmation(runId, 'canceled');
-    this.opts.repos.knowledgeRuns.finish(runId, 'canceled', this.now());
+    const initial = this.opts.repos.knowledgeRuns.get(runId);
+    if (!initial) throw new Error(`知识运行不存在：${runId}`);
+    return this.locks.run(`knowledge:${initial.projectId}`, async () => {
+      const record = this.opts.repos.knowledgeRuns.get(runId);
+      if (!record) throw new Error(`知识运行不存在：${runId}`);
+      if (record.state === 'canceled') return;
+      if (record.state !== 'awaiting_confirmation') {
+        throw new Error(`知识运行状态为 ${record.state}，不能取消`);
+      }
+      const project = this.opts.repos.projects.get(record.projectId);
+      if (project && record.draftBranch) {
+        await this.cleanupWorktree({
+          repoPath: project.path,
+          worktreePath: this.pendingWorktreePath(record),
+          branchName: record.draftBranch,
+        }).catch(() => undefined);
+      }
+      this.opts.repos.knowledgeRuns.setConfirmation(runId, 'canceled');
+      this.opts.repos.knowledgeRuns.finish(runId, 'canceled', this.now());
+      this.emitRunUpdate(record.projectId, runId);
+    });
   }
 
   /** 启动巡检：light=纯宿主结构巡检；full=worktree + project_lead 语义巡检。 */
   async startAudit(projectId: string, mode: 'light' | 'full'): Promise<KnowledgeRunView> {
-    const project = this.opts.repos.projects.get(projectId);
-    if (!project) throw new Error(`项目不存在：${projectId}`);
-    const runId = this.id();
-    const t = this.now();
-    const kind: KnowledgeRunKind = mode === 'light' ? 'light_audit' : 'full_audit';
+    return this.locks.run(`knowledge:${projectId}`, async () => {
+      this.requireNoActiveRun(projectId);
+      const project = this.opts.repos.projects.get(projectId);
+      if (!project) throw new Error(`项目不存在：${projectId}`);
+      const runId = this.id();
+      const t = this.now();
+      const kind: KnowledgeRunKind = mode === 'light' ? 'light_audit' : 'full_audit';
 
-    this.opts.repos.knowledgeRuns.create({
-      id: runId,
-      projectId,
-      kind,
-      state: 'running',
-      confirmationState: 'not_required',
-      changedPathsJson: '[]',
-      diagnosticsJson: '[]',
-      resultJson: '{}',
-      startedAt: t,
-    });
+      this.opts.repos.knowledgeRuns.create({
+        id: runId,
+        projectId,
+        kind,
+        state: 'running',
+        confirmationState: 'not_required',
+        changedPathsJson: '[]',
+        diagnosticsJson: '[]',
+        resultJson: '{}',
+        startedAt: t,
+      });
+      this.emitRunUpdate(projectId, runId);
 
-    let worktreePath: string | undefined;
-    const auditBranch = `ai-devflow/knowledge/audit-${runId}`;
-    try {
-      const snapshot = await this.opts.knowledge.audit({ projectId, repoPath: project.path, git: this.gitProbe() });
-      const findings = [...snapshot.findings];
-      if (mode === 'full') {
-        const handle = await createWorktree({
-          repoPath: project.path,
-          baseDir: this.opts.worktreesBaseDir,
-          id: `knowledge-audit-${runId}`,
-          branchName: auditBranch,
-          baseBranch: project.defaultBranch,
-        });
-        worktreePath = handle.path;
-        const result = await consumeAgentRun(await this.opts.runner.run({
-          scope: { kind: 'project', projectId },
-          executionId: runId,
-          expert: 'project_lead',
-          resultKind: 'knowledge_audit',
-          prompt: '请只读巡检项目知识，报告可能过期、冲突、重复或缺失的语义问题，不修改文件。',
-          cwd: worktreePath,
+      let worktreePath: string | undefined;
+      const auditBranch = `ai-devflow/knowledge/audit-${runId}`;
+      try {
+        const snapshot = await this.opts.knowledge.audit({ projectId, repoPath: project.path, git: this.gitProbe() });
+        const findings = [...snapshot.findings];
+        if (mode === 'full') {
+          const handle = await createWorktree({
+            repoPath: project.path,
+            baseDir: this.opts.worktreesBaseDir,
+            id: `knowledge-audit-${runId}`,
+            branchName: auditBranch,
+            baseBranch: project.defaultBranch,
+          });
+          worktreePath = handle.path;
+          const result = await consumeAgentRun(await this.opts.runner.run({
+            scope: { kind: 'project', projectId },
+            executionId: runId,
+            expert: 'project_lead',
+            resultKind: 'knowledge_audit',
+            prompt: '请只读巡检项目知识，报告可能过期、冲突、重复或缺失的语义问题，不修改文件。',
+            cwd: worktreePath,
+          }));
+          if (result.payload?.kind !== 'knowledge_audit') {
+            throw new Error('完整巡检缺少 knowledge_audit 结构化载荷');
+          }
+          const mutations = workingTreeChangedPaths(worktreePath, project.path);
+          if (mutations.length > 0) {
+            throw new Error(`完整巡检必须只读，检测到改动：${mutations.join(', ')}`);
+          }
+          findings.push(...result.payload.findings);
+        }
+        const findingRecords = findings.map((f, i) => ({
+          id: `${runId}-f${i}`,
+          runId,
+          severity: f.severity,
+          code: f.code,
+          path: f.path,
+          knowledgeId: f.knowledgeId,
+          message: f.message,
+          evidenceJson: JSON.stringify(f.evidence),
+          createdAt: t,
         }));
-        if (result.payload?.kind !== 'knowledge_audit') {
-          throw new Error('完整巡检缺少 knowledge_audit 结构化载荷');
+        this.opts.repos.knowledgeFindings.insertMany(findingRecords);
+        this.opts.repos.knowledgeRuns.finish(runId, 'succeeded', this.now(), {
+          resultJson: JSON.stringify({ state: snapshot.state }),
+        });
+        this.emitRunUpdate(projectId, runId);
+        const record = this.opts.repos.knowledgeRuns.get(runId)!;
+        return toRunView(record, dbFindingsForRun(this.opts.repos, runId));
+      } catch (err) {
+        this.opts.repos.knowledgeRuns.finish(runId, 'failed', this.now(), {
+          diagnosticsJson: JSON.stringify([(err as Error).message]),
+        });
+        this.emitRunUpdate(projectId, runId);
+        throw err;
+      } finally {
+        if (worktreePath) {
+          await this.cleanupWorktree({ repoPath: project.path, worktreePath, branchName: auditBranch }).catch(() => undefined);
         }
-        const mutations = workingTreeChangedPaths(worktreePath, project.path);
-        if (mutations.length > 0) {
-          throw new Error(`完整巡检必须只读，检测到改动：${mutations.join(', ')}`);
-        }
-        findings.push(...result.payload.findings);
       }
-      const findingRecords = findings.map((f, i) => ({
-        id: `${runId}-f${i}`,
-        runId,
-        severity: f.severity,
-        code: f.code,
-        path: f.path,
-        knowledgeId: f.knowledgeId,
-        message: f.message,
-        evidenceJson: JSON.stringify(f.evidence),
-        createdAt: t,
-      }));
-      this.opts.repos.knowledgeFindings.insertMany(findingRecords);
-      this.opts.repos.knowledgeRuns.finish(runId, 'succeeded', this.now(), {
-        resultJson: JSON.stringify({ state: snapshot.state }),
-      });
-      const record = this.opts.repos.knowledgeRuns.get(runId)!;
-      return toRunView(record, dbFindingsForRun(this.opts.repos, runId));
-    } catch (err) {
-      this.opts.repos.knowledgeRuns.finish(runId, 'failed', this.now(), {
-        diagnosticsJson: JSON.stringify([(err as Error).message]),
-      });
-      throw err;
-    } finally {
-      if (worktreePath) {
-        await this.cleanupWorktree({ repoPath: project.path, worktreePath, branchName: auditBranch }).catch(() => undefined);
-      }
-    }
+    });
   }
 
   /** 启动修复：验证 finding IDs 属于最近完整巡检，创建新草稿分支，运行 project_lead 修复。 */
   async startRepair(projectId: string, findingIds: string[]): Promise<KnowledgeRunView> {
-    return this.locks.run(`repair:${projectId}`, async () => {
+    return this.locks.run(`knowledge:${projectId}`, async () => {
+      this.requireNoActiveRun(projectId);
       const project = this.opts.repos.projects.get(projectId);
       if (!project) throw new Error(`项目不存在：${projectId}`);
       const runId = this.id();
@@ -754,6 +927,7 @@ export class KnowledgeCoordinator extends EventEmitter {
         resultJson: '{}',
         startedAt: t,
       });
+      this.emitRunUpdate(projectId, runId);
 
       let worktreePath: string | undefined;
       try {
@@ -798,6 +972,7 @@ export class KnowledgeCoordinator extends EventEmitter {
           draftBranch,
           JSON.stringify(changedPaths),
         );
+        this.emitRunUpdate(projectId, runId);
         const record = this.opts.repos.knowledgeRuns.get(runId)!;
         return toRunView(record, dbFindingsForRun(this.opts.repos, runId));
       } catch (err) {
@@ -810,6 +985,7 @@ export class KnowledgeCoordinator extends EventEmitter {
             diagnosticsJson: JSON.stringify([(err as Error).message]),
           });
         }
+        this.emitRunUpdate(projectId, runId);
         throw err;
       }
     });
@@ -954,6 +1130,13 @@ export class KnowledgeCoordinator extends EventEmitter {
         });
         commitCreatedTaskDocs(input.cwd, layout.created, `task docs: ${input.task.id}`);
       }
+    }
+    // 检索前也要解决“任务分支早于默认分支知识库初始化/更新”的问题：
+    // 否则开发/审查会拿到 not_initialized 或过期目录，而项目知识库在默认分支上其实已 healthy。
+    // 同步失败不阻断任务执行：继续用当前 worktree 状态检索，manifest 会如实反映可用知识。
+    const preCatalog = await this.opts.knowledge.loadCatalog(input.cwd);
+    if (!preCatalog.initialized) {
+      await this.ensureWorktreeKnowledgeBase(input.project, input.cwd).catch(() => ({ initialized: false }));
     }
     const manifest = await this.opts.knowledge.planRetrieval({
       id: this.id(),
@@ -1126,6 +1309,36 @@ export class KnowledgeCoordinator extends EventEmitter {
     };
   }
 
+  /**
+   * 任务/迭代分支可能早于项目默认分支上的知识库初始化。沉淀门禁不能仅凭任务 worktree
+   * 当前检出判断“未初始化”，否则项目知识库已 healthy 时仍会提示用户去初始化草稿。
+   * 默认分支已初始化时，先把默认分支合并进任务 worktree，再重新检查。
+   */
+  private async ensureWorktreeKnowledgeBase(
+    project: { path: string; defaultBranch: string },
+    worktreePath: string,
+  ): Promise<{ initialized: boolean; awaitingInitialization?: boolean; diagnostics?: string[] }> {
+    // 与 packages/knowledge 的初始化判据保持一致：docs/knowledge/index.md 存在即已初始化。
+    if (!gitHasPath(project.path, project.defaultBranch, 'docs/knowledge/index.md')) {
+      return { initialized: false, awaitingInitialization: true };
+    }
+    const sync = await syncWorktreeWithBranch({ worktreePath, sourceBranch: project.defaultBranch });
+    if (!sync.merged) {
+      return {
+        initialized: false,
+        diagnostics: [`项目默认分支已初始化知识库，但同步到任务分支失败：${sync.reason ?? '未知原因'}`],
+      };
+    }
+    const catalog = await this.opts.knowledge.loadCatalog(worktreePath);
+    if (!catalog.initialized) {
+      return {
+        initialized: false,
+        diagnostics: ['项目默认分支已初始化知识库，但任务分支同步后仍缺少 docs/knowledge/index.md'],
+      };
+    }
+    return { initialized: true };
+  }
+
   private async depositionTargetBranch(
     task: Task,
     project: { path: string; defaultBranch: string },
@@ -1253,16 +1466,31 @@ export class KnowledgeCoordinator extends EventEmitter {
       return { gatePassed: true, taskIntegrated: false, depositionId, diagnostics: [] };
     }
 
-    const catalog = await this.opts.knowledge.loadCatalog(input.worktreePath);
+    let catalog = await this.opts.knowledge.loadCatalog(input.worktreePath);
     if (!catalog.initialized) {
-      const diagnostics = ['知识库未初始化，需要用户确认初始化草稿后恢复沉淀'];
-      this.opts.repos.knowledgeDepositions.create({
-        ...baseRecord,
-        verdict: 'valuable',
-        state: 'awaiting_initialization',
-        diagnosticsJson: JSON.stringify(diagnostics),
-      });
-      return { gatePassed: false, depositionId, diagnostics, awaitingInitialization: true };
+      const ensured = await this.ensureWorktreeKnowledgeBase(input.project, input.worktreePath);
+      if (!ensured.initialized) {
+        if (ensured.awaitingInitialization) {
+          const diagnostics = ['知识库未初始化，需要用户确认初始化草稿后恢复沉淀'];
+          this.opts.repos.knowledgeDepositions.create({
+            ...baseRecord,
+            verdict: 'valuable',
+            state: 'awaiting_initialization',
+            diagnosticsJson: JSON.stringify(diagnostics),
+          });
+          return { gatePassed: false, depositionId, diagnostics, awaitingInitialization: true };
+        }
+        const diagnostics = ensured.diagnostics ?? ['知识库初始化状态与默认分支不一致，无法继续沉淀'];
+        this.opts.repos.knowledgeDepositions.create({
+          ...baseRecord,
+          verdict: 'valuable',
+          state: 'failed',
+          diagnosticsJson: JSON.stringify(diagnostics),
+          endedAt: this.now(),
+        });
+        return { gatePassed: false, depositionId, diagnostics };
+      }
+      catalog = await this.opts.knowledge.loadCatalog(input.worktreePath);
     }
 
     this.opts.repos.knowledgeDepositions.create({
@@ -1305,6 +1533,9 @@ export class KnowledgeCoordinator extends EventEmitter {
           candidates: JSON.parse(row.candidateRefsJson),
           reads: JSON.parse(row.readEvidenceJson),
         }));
+        const requiredTaskChangelog = iteration
+          ? `docs/iterations/${sanitizePathSegment(iteration.version, 'version')}/tasks/${sanitizePathSegment(input.task.id, 'taskId')}/CHANGELOG.md`
+          : undefined;
         let taskDiff = '';
         try {
           taskDiff = gitOutput(input.project.path, ['diff', '--stat', `${targetBranch}...ai-devflow/${input.task.id}`]).trim();
@@ -1321,20 +1552,25 @@ export class KnowledgeCoordinator extends EventEmitter {
             `知识评估：${JSON.stringify(assessment)}`,
             `检索证据：${JSON.stringify(retrievals)}`,
             `任务 diff 摘要：\n${taskDiff || '(无提交差异)'}`,
+            requiredTaskChangelog
+              ? `必须更新任务 CHANGELOG：${requiredTaskChangelog}。在其中追加“知识沉淀”小节，记录本次沉淀的知识 ID、候选映射与复用场景；该路径必须出现在结构化结果的 changedPaths 中，否则宿主门禁会判定失败。`
+              : '本任务无迭代上下文，无需更新任务 CHANGELOG。',
           ].join('\n\n'),
           cwd: worktreePath,
         });
         const agentResult = await consumeAgentRun(agentRun);
+        const diagnostics: string[] = [];
         if (agentResult.payload?.kind !== 'knowledge_deposition') {
           throw new Error('知识沉淀缺少 knowledge_deposition 结构化载荷');
         }
-        if (JSON.stringify(agentResult.payload.assessment) !== JSON.stringify(assessment)) {
-          throw new Error('知识沉淀返回的 assessment 与审查候选不一致');
+        // assessment 的权威来源是审查器上报、宿主落库的候选；project_lead 回传的 assessment 只用于留痕。
+        // 模型可能重排/改写 JSON，精确相等不是沉淀正确性的必要条件；不一致时降级为诊断，不阻断沉淀。
+        if (agentResult.payload.assessment && JSON.stringify(agentResult.payload.assessment) !== JSON.stringify(assessment)) {
+          diagnostics.push('知识沉淀返回的 assessment 与审查候选不一致；宿主以审查候选为准');
         }
         commitKnowledgeDraft(worktreePath, input.project.path, `knowledge: deposit ${input.task.id}`);
         // 草稿基于任务分支，二者之间只包含 project_lead 的文档改动；目标分支到草稿则是代码+知识组合树。
         const changedPaths = await listChangedPaths(input.project.path, taskBranch, draftBranch);
-        const diagnostics: string[] = [];
         const reportedPaths = new Set(agentResult.payload.changedPaths);
         const missingReportedPaths = agentResult.payload.changedPaths.filter((path) => !changedPaths.includes(path));
         if (missingReportedPaths.length > 0) {
@@ -1390,17 +1626,19 @@ export class KnowledgeCoordinator extends EventEmitter {
             throw new Error(`候选 ${candidateIndex} 类型 ${candidate.type} 与知识 ${knowledgeId} 类型 ${document.type} 不一致`);
           }
           if (candidate.suggestedTarget && candidate.suggestedTarget !== knowledgeId) {
-            throw new Error(`候选 ${candidateIndex} 未映射到建议知识 ID：${candidate.suggestedTarget}`);
+            // suggestedTarget 来自审查 Agent，可能是路径或自由文本。只有当它确实是目录中的稳定知识 ID 时才强制映射；
+            // 无效建议降级为诊断警告，避免审查器写错建议目标时沉淀永久卡死。
+            if (depositedCatalog.documents.has(candidate.suggestedTarget)) {
+              throw new Error(`候选 ${candidateIndex} 未映射到建议知识 ID：${candidate.suggestedTarget}`);
+            }
+            diagnostics.push(`候选 ${candidateIndex} 的建议目标不是有效知识 ID，已忽略：${candidate.suggestedTarget}`);
           }
           if (!changedPaths.includes(document.path)) {
             throw new Error(`候选 ${candidateIndex} 映射到本次未更新的知识文档：${document.path}`);
           }
         }
-        const requiredTaskChangelog = iteration
-          ? `docs/iterations/${sanitizePathSegment(iteration.version, 'version')}/tasks/${sanitizePathSegment(input.task.id, 'taskId')}/CHANGELOG.md`
-          : undefined;
         if (requiredTaskChangelog && !reportedPaths.has(requiredTaskChangelog)) {
-          throw new Error('valuable 沉淀未更新任务 CHANGELOG');
+          throw new Error(`valuable 沉淀未更新任务 CHANGELOG：${requiredTaskChangelog}`);
         }
         const taskCommit = gitOutput(input.project.path, ['rev-parse', taskBranch]).trim();
         const draftCommit = gitOutput(input.project.path, ['rev-parse', draftBranch]).trim();
@@ -1448,7 +1686,7 @@ export class KnowledgeCoordinator extends EventEmitter {
           relatedKnowledgeIdsJson: JSON.stringify(relatedKnowledgeIds),
           changedPathsJson: JSON.stringify(changedPaths),
           gatePassed: true,
-          diagnosticsJson: '[]',
+          diagnosticsJson: JSON.stringify(diagnostics),
           endedAt,
         });
         try {
@@ -1853,6 +2091,25 @@ export class KnowledgeCoordinator extends EventEmitter {
   private pendingWorktreePath(record: import('@ai-devflow/persistence').KnowledgeRunRecord): string {
     const prefix = record.kind === 'repair' ? 'knowledge-repair-' : 'knowledge-';
     return joinPath(this.opts.worktreesBaseDir, `${prefix}${record.id}`);
+  }
+
+  private isExpectedDraftWorktree(worktreePath: string, repoPath: string, draftBranch: string): boolean {
+    try {
+      const actualRoot = realpathSync(gitOutputSilent(worktreePath, ['rev-parse', '--show-toplevel']).trim());
+      const expectedRoot = realpathSync(worktreePath);
+      const worktreeCommonDir = realpathSync(resolvePath(
+        worktreePath,
+        gitOutputSilent(worktreePath, ['rev-parse', '--git-common-dir']).trim(),
+      ));
+      const repoCommonDir = realpathSync(resolvePath(
+        repoPath,
+        gitOutputSilent(repoPath, ['rev-parse', '--git-common-dir']).trim(),
+      ));
+      const currentBranch = gitOutputSilent(worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
+      return actualRoot === expectedRoot && worktreeCommonDir === repoCommonDir && currentBranch === draftBranch;
+    } catch {
+      return false;
+    }
   }
 
   private gitProbe(): import('@ai-devflow/knowledge').KnowledgeGitProbe {

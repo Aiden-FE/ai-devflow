@@ -152,6 +152,6 @@ describe('expert tool table', () => {
     expect(EXPERT_PROFILES.ux.tools).toEqual(['read', 'grep', 'find', 'ls']);
     expect(EXPERT_PROFILES.dev_lead.tools).toEqual(['read', 'grep', 'find', 'ls']);
     expect(EXPERT_PROFILES.dev.tools).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']);
-    expect(EXPERT_PROFILES.test.tools).toEqual(['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit']);
+    expect(EXPERT_PROFILES.test.tools).toEqual(['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit', 'ai_devflow_run_verification']);
   });
 });

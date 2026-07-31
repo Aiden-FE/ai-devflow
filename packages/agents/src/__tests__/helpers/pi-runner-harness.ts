@@ -12,7 +12,7 @@ import type { ExpertMaterializeInput } from '../../profiles.js';
 import type { SpawnFn } from '../../process-supervisor.js';
 import { PiProcessSupervisor } from '../../process-supervisor.js';
 import { ProviderRouter, type ProviderHealthStore } from '../../provider-router.js';
-import type { AgentRunner } from '../../runner-types.js';
+import type { AgentRunner, VerificationRunner } from '../../runner-types.js';
 import type { ExecutionAttemptStore } from '../../attempt-journal.js';
 
 const FAKE_PI_ENTRY = resolve(dirname(fileURLToPath(import.meta.url)), '../fixtures/fake-pi.mjs');
@@ -37,7 +37,8 @@ export type FakeScenario =
   | 'provider-error-then-report'
   | 'always-provider-error'
   | 'interaction-then-report'
-  | 'reviewer-latch-blocked-interaction';
+  | 'reviewer-latch-blocked-interaction'
+  | 'verification-request';
 
 export interface SpawnExit {
   code: number | null;
@@ -70,6 +71,7 @@ export function createPiRunnerHarness(input: {
     start(value: ProviderCallStart): string | undefined;
     finish(id: string, value: ProviderCallFinish): void;
   };
+  verificationRunner?: VerificationRunner;
 }): PiRunnerHarness {
   const cwd = mkdtempSync(join(tmpdir(), 'pi-runner-cwd-'));
   const sessionsBaseDir = join(mkdtempSync(join(tmpdir(), 'pi-runner-sessions-')), 'sessions');
@@ -165,6 +167,7 @@ export function createPiRunnerHarness(input: {
     instructionLoader: new ProjectInstructionLoader(),
     attempts,
     usage: input.usage,
+    verificationRunner: input.verificationRunner,
   });
 
   return { runner, cwd, fakePiEntry: FAKE_PI_ENTRY, spawnedCommands, spawnExits, sleeps, attemptIds, attemptCollisions, materializedProfiles };

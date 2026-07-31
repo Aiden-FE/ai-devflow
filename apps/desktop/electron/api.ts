@@ -157,6 +157,7 @@ export interface StreamEvent {
     | 'task-awaiting'
     | 'task-message'
     | 'task-interaction'
+    | 'knowledge-run'
     | 'theme-changed'
     | 'update-status';
   taskId: string;
@@ -194,6 +195,8 @@ export interface DesktopApi {
     startAudit(projectId: string, mode: 'light' | 'full'): Promise<KnowledgeRunView>;
     startRepair(projectId: string, findingIds: string[]): Promise<KnowledgeRunView>;
     getRun(runId: string): Promise<KnowledgeRunView>;
+    /** 当前未结束的知识运行（running/awaiting_confirmation）；无则 undefined。UI 切页重进后恢复运行态。 */
+    getActiveRun(projectId: string): Promise<KnowledgeRunView | undefined>;
     confirmRun(runId: string): Promise<KnowledgeHealthSnapshot>;
     cancelRun(runId: string): Promise<void>;
     getTaskEvidence(taskId: string): Promise<TaskKnowledgeEvidence>;

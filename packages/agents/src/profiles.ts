@@ -54,6 +54,7 @@ export const BUILTIN_EXTENSIONS = [
   'task-bridge',
   'ask-bridge',
   'ux-bridge',
+  'verification-bridge',
 ] as const;
 
 /** 技能物理来源：<角色名> 表示 assets/profiles/<source>/skills/<name>/，'shared' 表示 assets/profiles/shared/skills/<name>/。 */
@@ -117,9 +118,9 @@ export const ROLE_PROFILES: Record<TaskRole, RoleProfile> = {
   },
   tester: {
     role: 'tester', version: 1, systemPromptFile: 'SYSTEM.md',
-    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'], excludedTools: [],
+    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit', 'ai_devflow_run_verification'], excludedTools: [],
     skills: ['test-design', 'failure-analysis', 'acceptance-verification'],
-    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'verification-bridge'],
     timeoutMs: 30 * 60_000,
   },
 };
@@ -662,10 +663,10 @@ export const EXPERT_PROFILES: Record<ExecutionExpertKey, ExpertProfile> = {
   },
   test: {
     expert: 'test', version: 2, systemPromptFile: 'SYSTEM.md',
-    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit'],
+    tools: ['read', 'bash', 'grep', 'find', 'ls', 'write', 'edit', 'ai_devflow_run_verification'],
     excludedTools: [],
     skills: ['code-review', 'security-review', 'regression-review', 'test-design', 'failure-analysis', 'acceptance-verification', 'knowledge-retrieve'],
-    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge'],
+    extensions: ['event-bridge', 'execution-policy', 'structured-result', 'checkpoint-context', 'task-bridge', 'verification-bridge'],
     timeoutMs: 30 * 60_000,
   },
   project_lead: {

@@ -46,6 +46,7 @@ const api: DesktopApi = {
     startAudit: (projectId, mode) => invoke('knowledge', 'startAudit')(projectId, mode),
     startRepair: (projectId, findingIds) => invoke('knowledge', 'startRepair')(projectId, findingIds),
     getRun: (runId) => invoke('knowledge', 'getRun')(runId),
+    getActiveRun: (projectId) => invoke('knowledge', 'getActiveRun')(projectId),
     confirmRun: (runId) => invoke('knowledge', 'confirmRun')(runId),
     cancelRun: (runId) => invoke('knowledge', 'cancelRun')(runId),
     getTaskEvidence: (taskId) => invoke('knowledge', 'getTaskEvidence')(taskId),

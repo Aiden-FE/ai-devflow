@@ -137,6 +137,12 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   orchestrator.on('task-failed', (e) => send({ kind: 'task-failed', taskId: e.taskId, data: e.error }));
   orchestrator.on('task-error', (e) => send({ kind: 'task-failed', taskId: e.taskId, data: e.error }));
   orchestrator.on('task-retry', (e) => send({ kind: 'task-status', taskId: e.taskId, data: `retry:${e.reason}` }));
+  // 知识运行状态广播：coordinator 在运行创建/待确认/完成时 emit('run-update', view)，转发给渲染进程实时刷新进度。
+  if (services.knowledge) {
+    services.knowledge.on('run-update', (view: import('@ai-devflow/core').KnowledgeRunView) => {
+      send({ kind: 'knowledge-run', taskId: view.projectId, data: view });
+    });
+  }
   orchestrator.on('task-recovered-failed', (e) => send({ kind: 'task-status', taskId: e.taskId, data: 'recovered-failed' }));
   orchestrator.on('task-awaiting', (e) => send({ kind: 'task-awaiting', taskId: e.taskId, data: null }));
   orchestrator.on('task-message', (e) => send({ kind: 'task-message', taskId: e.taskId, data: e.message }));
@@ -346,6 +352,9 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     knowledge!.startRepair(projectId, findingIds),
   );
   ipcMain.handle(channel('knowledge', 'getRun'), (_e, runId) => knowledge!.getRun(runId));
+  ipcMain.handle(channel('knowledge', 'getActiveRun'), (_e, projectId) =>
+    knowledge ? knowledge.getActiveRun(projectId) : undefined,
+  );
   ipcMain.handle(channel('knowledge', 'confirmRun'), (_e, runId) => knowledge!.confirmRun(runId));
   ipcMain.handle(channel('knowledge', 'cancelRun'), (_e, runId) => knowledge!.cancelRun(runId));
   ipcMain.handle(channel('knowledge', 'getTaskEvidence'), (_e, taskId) =>

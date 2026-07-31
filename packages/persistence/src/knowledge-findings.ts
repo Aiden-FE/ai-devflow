@@ -31,32 +31,44 @@ function mapFinding(r: Record<string, unknown>): KnowledgeFindingRecord {
 
 export interface KnowledgeFindingsRepo {
   insertMany(values: KnowledgeFindingRecord[]): void;
+  replaceByRun(runId: string, values: KnowledgeFindingRecord[]): void;
   listByRun(runId: string): KnowledgeFindingRecord[];
+}
+
+function insertMany(db: DatabaseSync, values: KnowledgeFindingRecord[]): void {
+  if (values.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT INTO knowledge_findings(
+       id, run_id, severity, code, path, knowledge_id, message, evidence_json, created_at
+     ) VALUES(?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const v of values) {
+    stmt.run(
+      v.id,
+      v.runId,
+      v.severity,
+      v.code,
+      v.path ?? null,
+      v.knowledgeId ?? null,
+      v.message,
+      v.evidenceJson,
+      v.createdAt,
+    );
+  }
 }
 
 export function createKnowledgeFindingsRepo(db: DatabaseSync): KnowledgeFindingsRepo {
   return {
     insertMany(values) {
-      if (values.length === 0) return;
+      tx(db, () => insertMany(db, values));
+    },
+    replaceByRun(runId, values) {
+      if (values.some((value) => value.runId !== runId)) {
+        throw new Error(`finding runId 与替换目标不一致：${runId}`);
+      }
       tx(db, () => {
-        const stmt = db.prepare(
-          `INSERT INTO knowledge_findings(
-             id, run_id, severity, code, path, knowledge_id, message, evidence_json, created_at
-           ) VALUES(?,?,?,?,?,?,?,?,?)`,
-        );
-        for (const v of values) {
-          stmt.run(
-            v.id,
-            v.runId,
-            v.severity,
-            v.code,
-            v.path ?? null,
-            v.knowledgeId ?? null,
-            v.message,
-            v.evidenceJson,
-            v.createdAt,
-          );
-        }
+        db.prepare('DELETE FROM knowledge_findings WHERE run_id=?').run(runId);
+        insertMany(db, values);
       });
     },
     listByRun(runId) {

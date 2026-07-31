@@ -28,7 +28,15 @@ function makeRepo(): string {
 /** Fake runner：project_lead 只写文件；Git 暂存、提交与合并必须由宿主负责。 */
 class KnowledgeFakeRunner implements AgentRunner {
   requests: AgentRunRequest[] = [];
-  constructor(private opts: { outOfScope?: boolean; runtimeArtifacts?: string[]; stageRuntimeArtifacts?: boolean } = {}) {}
+  constructor(private opts: {
+    outOfScope?: boolean;
+    runtimeArtifacts?: string[];
+    stageRuntimeArtifacts?: boolean;
+    normalizableAdr?: boolean;
+    invalidFeatureStatus?: boolean;
+    autoRepairFailures?: number;
+  } = {}) {}
+  private repairAttempts = 0;
   async verifyRuntime(): Promise<{ version: string; entry: string }> {
     return { version: 'fake', entry: 'fake' };
   }
@@ -50,7 +58,7 @@ class KnowledgeFakeRunner implements AgentRunner {
       writeFileSync(join(req.cwd, path), this.opts.outOfScope ? '# Task Review\n' : `---
 id: feature:task-review
 type: feature
-status: active
+status: ${this.opts.invalidFeatureStatus ? 'unknown' : 'active'}
 owner: project
 updated: 2026-07-28
 confidence: 0.9
@@ -67,10 +75,57 @@ Reusable task review guidance.
         const indexPath = join(req.cwd, 'docs/knowledge/feature/index.md');
         writeFileSync(indexPath, readFileSync(indexPath, 'utf8').replace('related: []', 'related:\n  - feature:task-review'));
       }
+      if (this.opts.normalizableAdr) {
+        const adrPath = join(req.cwd, 'docs/knowledge/adr/accepted.md');
+        writeFileSync(adrPath, `---
+id: adr:accepted
+type: adr
+status: accepted
+owner: project
+updated: 2026-07-30
+confidence: 0.8
+sources:
+  - docs/
+related: []
+---
+
+# Accepted decision
+
+Accepted decision summary.
+`);
+        writeFileSync(
+          join(req.cwd, path),
+          readFileSync(join(req.cwd, path), 'utf8').replace('related: []', 'related:\n  - adr:accepted'),
+        );
+      }
     }
     if (req.expert === 'project_lead' && req.resultKind === 'knowledge_repair') {
+      this.repairAttempts += 1;
+      if (
+        this.opts.invalidFeatureStatus &&
+        this.repairAttempts > (this.opts.autoRepairFailures ?? 0)
+      ) {
+        const featurePath = join(req.cwd, 'docs/knowledge/feature/task-review.md');
+        writeFileSync(
+          featurePath,
+          readFileSync(featurePath, 'utf8').replace('status: unknown', 'status: active'),
+        );
+      }
       mkdirSync(join(req.cwd, 'docs/knowledge/context'), { recursive: true });
-      writeFileSync(join(req.cwd, 'docs/knowledge/context/runtime.md'), '# Runtime\n', 'utf8');
+      writeFileSync(join(req.cwd, 'docs/knowledge/context/runtime.md'), `---
+id: context:runtime
+type: context
+status: active
+owner: project
+updated: 2026-07-30
+confidence: 0.8
+sources:
+  - README.md
+related: []
+---
+
+# Runtime
+`, 'utf8');
     }
     const payload =
       req.resultKind === 'knowledge_initialization'
@@ -523,6 +578,74 @@ describe('KnowledgeCoordinator', () => {
     expect(existsSync(join(repo, 'docs/knowledge/index.md'))).toBe(false);
   });
 
+  it('normalizes known metadata defects before exposing an initialization draft', async () => {
+    const normalizingCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: new KnowledgeFakeRunner({ normalizableAdr: true }),
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    const run = await normalizingCoordinator.startInitialization('p1');
+    const retained = await normalizingCoordinator.getRun(run.id);
+
+    expect(retained.state).toBe('awaiting_confirmation');
+    expect(retained.findings.filter((finding) => finding.severity === 'error')).toEqual([]);
+    expect(retained.diff).toContain('status: active');
+    expect(retained.diff).toContain('  - docs');
+    expect(retained.diff).not.toContain('status: accepted');
+    expect(retained.diff).not.toContain('  - docs/');
+  });
+
+  it('automatically asks the agent to repair deterministic initialization findings', async () => {
+    const repairingRunner = new KnowledgeFakeRunner({ invalidFeatureStatus: true });
+    const repairingCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: repairingRunner,
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    const run = await repairingCoordinator.startInitialization('p1');
+
+    expect(run.state).toBe('awaiting_confirmation');
+    expect(run.findings.filter((finding) => finding.severity === 'error')).toEqual([]);
+    expect(repairingRunner.requests.map((request) => request.resultKind)).toEqual([
+      'knowledge_initialization',
+      'knowledge_repair',
+    ]);
+    expect(repairingRunner.requests[1]?.prompt).toMatch(/invalid knowledge metadata/);
+    expect(repairingRunner.requests[1]?.prompt).toMatch(/docs\/knowledge\/feature\/task-review\.md/);
+  });
+
+  it('retains the draft and retries agent repair during confirmation instead of discarding initialization work', async () => {
+    const repairingRunner = new KnowledgeFakeRunner({
+      invalidFeatureStatus: true,
+      autoRepairFailures: 1,
+    });
+    const repairingCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner: repairingRunner,
+      knowledge: new ProjectKnowledgeService(),
+      worktreesBaseDir: wtBase,
+    });
+
+    const run = await repairingCoordinator.startInitialization('p1');
+    expect(run.state).toBe('awaiting_confirmation');
+    expect(run.findings.some((finding) => finding.severity === 'error')).toBe(true);
+    expect(existsSync(join(wtBase, `knowledge-${run.id}`))).toBe(true);
+
+    await expect(repairingCoordinator.confirmRun(run.id)).resolves.toBeDefined();
+
+    expect((await repairingCoordinator.getRun(run.id)).state).toBe('succeeded');
+    expect(readFileSync(join(repo, 'docs/knowledge/feature/task-review.md'), 'utf8')).toContain('status: active');
+    expect(repairingRunner.requests.map((request) => request.resultKind)).toEqual([
+      'knowledge_initialization',
+      'knowledge_repair',
+      'knowledge_repair',
+    ]);
+  });
+
   it('confirmRun merges the draft into the default branch', async () => {
     const run = await coordinator.startInitialization('p1');
     const snapshot = await coordinator.confirmRun(run.id);
@@ -531,6 +654,37 @@ describe('KnowledgeCoordinator', () => {
     expect(snapshot.state).not.toBe('not_initialized');
     const record = await coordinator.getRun(run.id);
     expect(record.state).toBe('succeeded');
+  });
+
+  it('normalizes and commits known metadata defects in an existing pending draft before merge', async () => {
+    const run = await coordinator.startInitialization('p1');
+    const worktreePath = join(wtBase, `knowledge-${run.id}`);
+    writeFileSync(join(worktreePath, 'docs/knowledge/adr/accepted.md'), `---
+id: adr:accepted
+type: adr
+status: accepted
+owner: project
+updated: 2026-07-30
+confidence: 0.8
+sources:
+  - docs/
+related: []
+---
+
+# Accepted decision
+
+Accepted decision summary.
+`);
+    shGit(worktreePath, ['add', 'docs/knowledge/adr/accepted.md']);
+    shGit(worktreePath, ['commit', '-q', '-m', 'inject invalid metadata']);
+
+    await expect(coordinator.confirmRun(run.id)).resolves.toBeDefined();
+
+    const merged = readFileSync(join(repo, 'docs/knowledge/adr/accepted.md'), 'utf8');
+    expect(merged).toContain('status: active');
+    expect(merged).toContain('  - docs');
+    expect(merged).not.toContain('status: accepted');
+    expect(merged).not.toContain('  - docs/');
   });
 
   it('keeps a confirmed run succeeded when post-merge cleanup fails', async () => {
@@ -552,16 +706,27 @@ describe('KnowledgeCoordinator', () => {
     expect(record.diagnostics.join(' ')).toMatch(/cleanup|清理/);
   });
 
-  it('confirmRun rejects an ignored Markdown draft before merging', async () => {
-    writeFileSync(join(repo, '.gitignore'), 'docs/knowledge/feature/task-review.md\n');
-    shGit(repo, ['add', '.gitignore']);
-    shGit(repo, ['commit', '-q', '-m', 'ignore generated feature']);
+  it('keeps a draft active and cancelable when confirmation validation is blocked', async () => {
+    const updates: Array<{ id: string; state: string }> = [];
+    coordinator.on('run-update', (view) => updates.push(view));
     const run = await coordinator.startInitialization('p1');
+    const worktreePath = join(wtBase, `knowledge-${run.id}`);
+    const featurePath = join(worktreePath, 'docs/knowledge/feature/task-review.md');
+    writeFileSync(featurePath, readFileSync(featurePath, 'utf8').replace('status: active', 'status: unknown'));
+    shGit(worktreePath, ['add', 'docs/knowledge/feature/task-review.md']);
+    shGit(worktreePath, ['commit', '-q', '-m', 'inject invalid metadata']);
 
-    await expect(coordinator.confirmRun(run.id)).rejects.toThrow(/Git|ignore|阻断/);
+    await expect(coordinator.confirmRun(run.id)).rejects.toThrow(/invalid knowledge metadata|阻断/);
 
     expect(existsSync(join(repo, 'docs/knowledge/index.md'))).toBe(false);
-    expect((await coordinator.getRun(run.id)).state).toBe('failed');
+    const retained = await coordinator.getRun(run.id);
+    expect(retained.state).toBe('awaiting_confirmation');
+    expect(retained.diff).toContain('docs/knowledge/index.md');
+    expect((await coordinator.getActiveRun('p1'))?.id).toBe(run.id);
+    expect(updates.at(-1)).toEqual(expect.objectContaining({ id: run.id, state: 'awaiting_confirmation' }));
+
+    await expect(coordinator.cancelRun(run.id)).resolves.toBeUndefined();
+    expect((await coordinator.getRun(run.id)).state).toBe('canceled');
   });
 
   it('cancelRun cleans up the draft branch and marks canceled', async () => {
@@ -570,6 +735,91 @@ describe('KnowledgeCoordinator', () => {
     const record = await coordinator.getRun(run.id);
     expect(record.state).toBe('canceled');
     expect(existsSync(join(repo, 'docs/knowledge/index.md'))).toBe(false);
+  });
+
+  it('getActiveRun recovers the complete pending draft view', async () => {
+    await expect(coordinator.getActiveRun('p1')).resolves.toBeUndefined();
+    const run = await coordinator.startInitialization('p1');
+    const active = await coordinator.getActiveRun('p1');
+    expect(active?.id).toBe(run.id);
+    expect(active?.state).toBe('awaiting_confirmation');
+    expect(active?.confirmationState).toBe('pending');
+    expect(active?.diff).toContain('docs/knowledge');
+    await coordinator.cancelRun(run.id);
+    await expect(coordinator.getActiveRun('p1')).resolves.toBeUndefined();
+  });
+
+  it('returns the existing pending initialization instead of starting another run', async () => {
+    const first = await coordinator.startInitialization('p1');
+    const second = await coordinator.startInitialization('p1');
+
+    expect(second.id).toBe(first.id);
+    expect(second.diff).toContain('docs/knowledge');
+    expect(repos.knowledgeRuns.listByProject('p1')).toHaveLength(1);
+    expect(runner.requests).toHaveLength(1);
+    // 其他知识操作仍受到保护。
+    await expect(coordinator.startAudit('p1', 'light')).rejects.toThrow(/已有进行中的知识运行/);
+    await coordinator.cancelRun(first.id);
+    // 取消后可重新启动。
+    const restarted = await coordinator.startInitialization('p1');
+    expect(restarted.id).not.toBe(first.id);
+  });
+
+  it('keeps a missing pending draft cancelable after confirm reports recovery guidance', async () => {
+    const run = await coordinator.startInitialization('p1');
+    rmSync(join(wtBase, `knowledge-${run.id}`), { recursive: true, force: true });
+
+    await expect(coordinator.confirmRun(run.id)).rejects.toThrow(/草稿.*缺失|取消.*重新初始化/);
+    expect((await coordinator.getRun(run.id)).state).toBe('awaiting_confirmation');
+
+    await expect(coordinator.cancelRun(run.id)).resolves.toBeUndefined();
+    expect((await coordinator.getRun(run.id)).state).toBe('canceled');
+  });
+
+  it('keeps a corrupt pending worktree cancelable after confirm reports recovery guidance', async () => {
+    const run = await coordinator.startInitialization('p1');
+    const worktreePath = join(wtBase, `knowledge-${run.id}`);
+    writeFileSync(join(worktreePath, '.git'), 'gitdir: /missing/knowledge-worktree\n');
+
+    await expect(coordinator.confirmRun(run.id)).rejects.toThrow(/草稿.*缺失|取消.*重新初始化/);
+    expect((await coordinator.getRun(run.id)).state).toBe('awaiting_confirmation');
+
+    await expect(coordinator.cancelRun(run.id)).resolves.toBeUndefined();
+    expect((await coordinator.getRun(run.id)).state).toBe('canceled');
+  });
+
+  it('serializes confirm and cancel so a terminal state cannot be overwritten', async () => {
+    const blockingKnowledge = new ProjectKnowledgeService();
+    const audit = blockingKnowledge.audit.bind(blockingKnowledge);
+    let auditCalls = 0;
+    let signalEntered!: () => void;
+    let releaseAudit!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const release = new Promise<void>((resolve) => { releaseAudit = resolve; });
+    blockingKnowledge.audit = async (input) => {
+      auditCalls += 1;
+      if (auditCalls === 2) {
+        signalEntered();
+        await release;
+      }
+      return audit(input);
+    };
+    const racingCoordinator = new KnowledgeCoordinator({
+      repos,
+      runner,
+      knowledge: blockingKnowledge,
+      worktreesBaseDir: wtBase,
+    });
+    const run = await racingCoordinator.startInitialization('p1');
+
+    const confirmPromise = racingCoordinator.confirmRun(run.id);
+    await entered;
+    const cancelPromise = racingCoordinator.cancelRun(run.id);
+    releaseAudit();
+
+    await expect(confirmPromise).resolves.toEqual(expect.objectContaining({ projectId: 'p1' }));
+    await expect(cancelPromise).rejects.toThrow(/不能取消/);
+    expect((await racingCoordinator.getRun(run.id)).state).toBe('succeeded');
   });
 
   it('startAudit(light) performs host-only structural audit', async () => {

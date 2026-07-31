@@ -93,6 +93,50 @@ it('uses the absolute fake Pi entry and emits done only after report_result', as
   expect(result.ok).toBe(true);
 });
 
+it('routes a host verification request through IPC and returns the result to the child', async () => {
+  const calls: Array<{ command: string; scope?: string; cwd: string }> = [];
+  const harness = createPiRunnerHarness({
+    scenario: 'verification-request',
+    verificationRunner: {
+      resolveProjectPath: () => '/original/repo',
+      run: async ({ command, scope, cwd }) => {
+        calls.push({ command, scope, cwd });
+        return {
+          ok: true,
+          command,
+          exitCode: 0,
+          summary: 'host-verification-marker',
+          output: 'tests pass',
+          durationMs: 12,
+        };
+      },
+    },
+  });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'test', resultKind: 'task_review', prompt: 'review', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+  const done = events.find((e) => (e as { type?: string }).type === 'done') as { summary?: string } | undefined;
+  expect(done?.summary).toContain('verified ok=true');
+  expect(done?.summary).toContain('host-verification-marker');
+  expect(calls).toEqual([{ command: 'test', scope: '@ai-devflow/agents', cwd: '/original/repo' }]);
+  const result = await run.done();
+  expect(result.ok).toBe(true);
+});
+
+it('replies unavailable to verification requests when no verification runner is configured', async () => {
+  const harness = createPiRunnerHarness({ scenario: 'verification-request' });
+  const run = await harness.runner.run({
+    scope: { kind: 'task', taskId: 't1' }, executionId: 'e1', expert: 'test', resultKind: 'task_review', prompt: 'review', cwd: harness.cwd,
+  });
+  const events = await collect(run.events);
+  const done = events.find((e) => (e as { type?: string }).type === 'done') as { summary?: string } | undefined;
+  expect(done?.summary).toContain('verified ok=false');
+  expect(done?.summary).toContain('verification bridge not configured');
+  const result = await run.done();
+  expect(result.ok).toBe(true);
+});
+
 it('passes a mutation checkpoint to the next attempt', async () => {
   const harness = createPiRunnerHarness({ scenario: 'mutate-then-provider-error' });
   const run = await harness.runner.run({

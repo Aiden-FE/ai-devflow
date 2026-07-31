@@ -482,6 +482,16 @@ export class Orchestrator extends EventEmitter {
       }
     }
     // 知识门禁：valuable 必须完成沉淀校验；none 必须有非空理由与证据。
+    // valuable 沉淀会运行项目负责人 Agent，可能持续数分钟；必须先给用户可见进度，避免看起来卡死。
+    const latestBeforeGate = this.repos.executions.getLatest(task.id);
+    if (assessment?.verdict === 'valuable') {
+      this.recordMessage(task, latestBeforeGate, {
+        role: 'system', kind: 'status',
+        text: `审查通过，检测到 ${assessment.candidates.length} 条可复用知识，正在由项目负责人沉淀知识并执行知识门禁（可能需要数分钟）...`,
+      });
+    } else {
+      this.recordMessage(task, latestBeforeGate, { role: 'system', kind: 'status', text: '审查通过，正在执行知识门禁...' });
+    }
     const gate = await this.finalizeTaskKnowledge(task, project, assessment);
     if (!gate.gatePassed) {
       if (gate.awaitingInitialization) {
@@ -499,11 +509,20 @@ export class Orchestrator extends EventEmitter {
         this.repos.tasks.update(task);
         return;
       }
-      this.emit('task-error', { taskId: task.id, error: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}` });
+      // 沉淀门禁失败不得静默留在测试中：写入可见错误并暂停待沟通，用户回复后按 testing 泳道重跑审查与沉淀。
+      this.pauseForFinalizationFailure(task, {
+        title: '审查已通过，但知识沉淀失败，请处理后回复以重试',
+        detail: gate.diagnostics.join('; '),
+        message: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}（工作保留在分支 ${branchName}）`,
+        error: `知识沉淀门禁未通过：${gate.diagnostics.join('; ')}`,
+      });
       return;
     }
     // 迭代激活时合并任务分支到迭代分支，否则合并到项目默认分支。
     const latest = this.repos.executions.getLatest(task.id);
+    if (assessment?.verdict === 'valuable') {
+      this.recordMessage(task, latest, { role: 'system', kind: 'status', text: '知识沉淀门禁通过，正在合并任务分支...' });
+    }
     let merged = gate.taskIntegrated === true;
     let mergeReason: string | undefined;
     if (merged) {

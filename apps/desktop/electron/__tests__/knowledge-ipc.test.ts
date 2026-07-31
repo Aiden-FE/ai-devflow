@@ -154,6 +154,17 @@ describe('knowledge IPC', () => {
     expect(view.state).toBe('canceled');
   });
 
+  it('recovers the complete active draft and clears it after cancellation', async () => {
+    const run = await call('knowledge', 'startInitialization', 'p1') as { id: string };
+
+    const active = await call('knowledge', 'getActiveRun', 'p1') as { id: string; diff?: string };
+    expect(active.id).toBe(run.id);
+    expect(active.diff).toContain('docs/knowledge');
+
+    await call('knowledge', 'cancelRun', run.id);
+    await expect(call('knowledge', 'getActiveRun', 'p1')).resolves.toBeUndefined();
+  });
+
   it('startAudit(light) returns a succeeded run view', async () => {
     const run = await call('knowledge', 'startAudit', 'p1', 'light') as { state: string; kind: string };
     expect(run.state).toBe('succeeded');

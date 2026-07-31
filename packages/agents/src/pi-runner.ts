@@ -26,7 +26,7 @@ import { EXPERT_PROFILES } from './profiles.js';
 import type { PiProcessSupervisor, SpawnedPi } from './process-supervisor.js';
 import { ProviderExecutionError, classifyProviderFailure, type ProviderRoute, type ProviderRouter } from './provider-router.js';
 import { buildPiRunPlan } from './run-plan.js';
-import type { AgentRun, AgentRunRequest, AgentResultKind, AgentRunner } from './runner-types.js';
+import type { AgentRun, AgentRunRequest, AgentResultKind, AgentRunner, VerificationCommand, VerificationResult, VerificationRunner } from './runner-types.js';
 import type { LoadedInstructions } from './project-instructions.js';
 
 const AGENT_END_EXIT_GRACE_MS = 100;
@@ -66,6 +66,8 @@ export interface PiRunnerDeps {
   instructionLoader: ProjectInstructionLoaderLike;
   attempts?: ExecutionAttemptStore;
   usage?: ProviderUsageSink;
+  /** 宿主端验证器：test 专家经 ai_devflow_run_verification 请求重跑测试/类型检查/lint。 */
+  verificationRunner?: VerificationRunner;
 }
 
 export interface ProviderUsageSink {
@@ -302,6 +304,14 @@ export class PiRunner implements AgentRunner {
     let agentEndObserved = false;
     let agentEndCancelTimer: NodeJS.Timeout | undefined;
     let cancelAfterAgentEnd: Promise<void> | undefined;
+    // 宿主端验证桥：test 专家经 ai_devflow_run_verification 发 {kind:'verification_request'} 请求，
+    // 在原始仓库（非 worktree）用真实 PATH 重跑测试/类型检查/lint，结果脱敏后回灌子进程。
+    // 无 verificationRunner 时返回不可用错误，避免子进程永久阻塞。
+    spawned.onMessage((msg) => {
+      const m = msg as { kind?: string; toolUseId?: string; payload?: { command: VerificationCommand; scope?: string } };
+      if (m?.kind !== 'verification_request' || !m.toolUseId) return;
+      void this.handleVerificationRequest(spawned, m.toolUseId, m.payload, request);
+    });
     for await (const line of spawned.lines) {
       if (line.stream !== 'stdout') continue; // stderr 已在 supervisor 脱敏入诊断缓冲
       const events = translator.push(line.text);
@@ -414,6 +424,57 @@ export class PiRunner implements AgentRunner {
     }
     finishUsage('failed', error.kind);
     return { ok: false, journal, error };
+  }
+
+  /**
+   * 处理子进程发来的验证请求：在原始项目仓库执行受限白名单命令，结果脱敏后回灌。
+   * - 无 verificationRunner：回灌不可用错误（子进程工具返回 isError，模型可改用静态审查）。
+   * - 解析不到原始仓库路径：同上。
+   * - 执行异常：捕获并回灌失败结果，不泡裂到运行主流程。
+   */
+  private async handleVerificationRequest(
+    spawned: SpawnedPi,
+    toolUseId: string,
+    payload: { command: VerificationCommand; scope?: string } | undefined,
+    request: AgentRunRequest,
+  ): Promise<void> {
+    const command = payload?.command;
+    const scope = payload?.scope;
+    const unavailable = (reason: string): VerificationResult => ({
+      ok: false,
+      command: command ?? 'test',
+      exitCode: null,
+      summary: reason,
+      output: '',
+      durationMs: 0,
+    });
+    if (!command || !['test', 'typecheck', 'lint'].includes(command)) {
+      spawned.send({ kind: 'verification_result', toolUseId, result: unavailable('invalid command') });
+      return;
+    }
+    const runner = this.deps.verificationRunner;
+    if (!runner) {
+      spawned.send({ kind: 'verification_result', toolUseId, result: unavailable('verification bridge not configured') });
+      return;
+    }
+    const cwd = runner.resolveProjectPath(request.scope) ?? request.cwd;
+    try {
+      const result = await runner.run({ command, scope, cwd, timeoutMs: EXPERT_PROFILES.test.timeoutMs, agentScope: request.scope });
+      spawned.send({ kind: 'verification_result', toolUseId, result });
+    } catch (err) {
+      spawned.send({
+        kind: 'verification_result',
+        toolUseId,
+        result: {
+          ok: false,
+          command,
+          exitCode: null,
+          summary: `verification runner error: ${(err as Error).message}`,
+          output: '',
+          durationMs: 0,
+        },
+      });
+    }
   }
 }
 

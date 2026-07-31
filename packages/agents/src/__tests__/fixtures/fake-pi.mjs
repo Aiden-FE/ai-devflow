@@ -24,7 +24,7 @@ function payloadFor(resultKind, summary) {
       kind: 'task_review',
       review: {
         pass,
-        summary: pass ? '审查通过' : '审查不通过',
+        summary: pass ? 'REVIEW_VERDICT: PASS 审查通过' : 'REVIEW_VERDICT: FAIL 审查不通过',
         checks: ['需求覆盖', '测试/构建/lint', '明显回归', '安全问题', '无关改动'],
       },
       knowledgeAssessment: {
@@ -228,6 +228,28 @@ switch (scenario) {
   case 'review-missing-result':
     emit({ type: 'agent_end', messages: [] });
     process.exit(0);
+    break;
+
+  case 'verification-request':
+    // 宿主端验证桥：子进程经 Node IPC 发 verification_request，等待宿主回灌 verification_result 后才上报。
+    // 回灌内容（ok/summary）编码进最终 summary，宿主侧据此断言 IPC 往返成功。
+    // 无 IPC 通道时立即以 97 退出；有通道但宿主不回灌时由 5s 看门狗以 97 退出（暴露桥断路）。
+    emit({ type: 'tool_execution_start', toolCallId: 'v1', toolName: 'ai_devflow_run_verification', args: { command: 'test', scope: '@ai-devflow/agents' } });
+    if (typeof process.send !== 'function') {
+      emit({ type: 'tool_execution_end', toolCallId: 'v1', toolName: 'ai_devflow_run_verification', isError: true, result: { content: [{ type: 'text', text: 'no ipc channel' }] } });
+      process.exit(97);
+    }
+    setTimeout(() => process.exit(97), 5_000).unref();
+    process.on('message', (msg) => {
+      if (!msg || msg.kind !== 'verification_result' || msg.toolUseId !== 'v1') return;
+      const result = msg.result ?? {};
+      emit({
+        type: 'tool_execution_end', toolCallId: 'v1', toolName: 'ai_devflow_run_verification',
+        isError: !result.ok, result: { content: [{ type: 'text', text: JSON.stringify(result) }] },
+      });
+      succeed(`verified ok=${result.ok} summary=[${result.summary ?? ''}]\nREVIEW_VERDICT: PASS`);
+    });
+    process.send({ kind: 'verification_request', toolUseId: 'v1', payload: { command: 'test', scope: '@ai-devflow/agents' } });
     break;
 
   default:

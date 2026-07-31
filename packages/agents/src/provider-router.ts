@@ -97,6 +97,17 @@ const DEFAULT_THINKING_BY_EXPERT: Record<AgentKey, ModelChoice['thinking']> = {
   chat: 'medium',
 };
 
+/** 专家 -> 用户可见中文标签（错误信息用，便于用户在设置中定位需配置的专家）。 */
+const EXPERT_LABEL: Record<AgentKey, string> = {
+  product: '产品(product)',
+  ux: 'UX(ux)',
+  dev_lead: '研发负责人(dev_lead)',
+  dev: '研发(dev)',
+  test: '测试(test)',
+  project_lead: '知识治理(project_lead)',
+  chat: '对话(chat)',
+};
+
 function providerNameFor(provider: ProviderConfig): string {
   const base = COMPATIBLE_BASE[provider.kind];
   if (base) {
@@ -214,6 +225,64 @@ export class ProviderRouter {
     return defaultRoutes;
   }
 
+  /**
+   * 路由为空时的可行动错误：区分「未配置可用服务商」「未为该专家配置模型」「全部冷却中」三种情况，
+   * 避免对可用但未为当前专家配置模型的服务商误报「所有服务商不可用」。
+   * onlyProviderId 仅用于诊断文案限定；命中时若该 provider 本身不可用会进一步说明。
+   */
+  private emptyRoutesError(expert: AgentKey, onlyProviderId?: string): ProviderExecutionError {
+    const label = EXPERT_LABEL[expert] ?? expert;
+    const providers = this.deps.listProviders();
+    const enabled = providers.filter((p) => p.enabled);
+    const scoped = onlyProviderId
+      ? enabled.filter((p) => p.id === onlyProviderId)
+      : enabled;
+    if (scoped.length === 0) {
+      const reason = onlyProviderId
+        ? `服务商 ${onlyProviderId} 未启用`
+        : '尚未配置或启用任何 AI 服务商';
+      return new ProviderExecutionError(
+        `${reason}，请在设置中配置服务商与模型`,
+        'transient_provider',
+      );
+    }
+    const now = this.deps.now();
+    const candidates = this.collectCandidates(scoped, expert, now, undefined);
+    // 无凭证的 provider 不进入候选；先报凭证缺失。
+    const missingSecret = scoped.filter((p) => !this.deps.resolveSecret(p.id));
+    if (missingSecret.length === scoped.length) {
+      return new ProviderExecutionError(
+        `所有启用的服务商都缺少 API Key，请在设置中补全凭证`,
+        'authentication',
+      );
+    }
+    // 有凭证但无一为该专家解析出模型：这是误报“所有服务商不可用”的最常见原因，给出可行动提示。
+    const noModel = scoped.filter((p) => resolveModelFor(p, expert) === undefined);
+    if (noModel.length === scoped.length) {
+      return new ProviderExecutionError(
+        `未为${label}专家配置模型：请在设置中为任一可用服务商配置该专家的模型或默认模型`,
+        'transient_provider',
+        0,
+        undefined,
+        'no model resolved for expert',
+      );
+    }
+    // 剩余情况：候选被熔断/冷却清空，保留原“暂时不可用”语义。
+    const coolingProviders = [...new Set(
+      candidates.filter((c) => c.cooling).map((c) => c.route.providerId),
+    )];
+    const detail = coolingProviders.length > 0
+      ? `冷却中的服务商：${coolingProviders.join(', ')}`
+      : undefined;
+    return new ProviderExecutionError(
+      '所有已配置 AI 服务暂时不可用，请稍后重试',
+      'transient_provider',
+      0,
+      undefined,
+      detail,
+    );
+  }
+
   /** 收集候选：遍历 providers，按 override/seam/默认解析模型与 thinking，叠加健康/冷却状态。 */
   private collectCandidates(
     providers: ProviderConfig[],
@@ -285,7 +354,7 @@ export class ProviderRouter {
       routes = routes.filter((r) => r.providerId === options.onlyProviderId);
     }
     if (routes.length === 0) {
-      throw new ProviderExecutionError('所有已配置 AI 服务均不可用，请检查提供商设置', 'transient_provider');
+      throw this.emptyRoutesError(expert, options?.onlyProviderId);
     }
     let calls = 0;
     let lastDetail: string | undefined;

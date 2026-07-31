@@ -290,6 +290,79 @@ describe('ProviderRouter', () => {
   });
 });
 
+describe('ProviderRouter empty-routes diagnosis', () => {
+  function harnessWith(providers: Partial<ProviderConfig>[]) {
+    const full: ProviderConfig[] = providers.map((p, i) => ({
+      id: p.id ?? `p${i + 1}`,
+      kind: 'openai' as const,
+      displayName: p.id ?? `p${i + 1}`,
+      enabled: p.enabled ?? true,
+      priority: i,
+      authType: 'api_key' as const,
+      credentialRef: `provider:${p.id ?? `p${i + 1}`}`,
+      revision: 1,
+      defaultModel: p.defaultModel,
+      workloadModels: p.workloadModels,
+    }));
+    const values = new Map<string, ProviderHealth>();
+    const key = (providerId: string, routeId: string) => `${providerId}\0${routeId}`;
+    const health = {
+      get: (providerId: string, routeId: string) => values.get(key(providerId, routeId)),
+      listByProvider: (providerId: string) => [...values.values()].filter((v) => v.providerId === providerId),
+      upsert: (value: ProviderHealth) => values.set(key(value.providerId, value.routeId), value),
+      clearProvider: (providerId: string) => {
+        for (const [k, v] of values) if (v.providerId === providerId) values.delete(k);
+      },
+    };
+    const secrets = new Map<string, string | undefined>();
+    const router = new ProviderRouter({
+      listProviders: () => full,
+      resolveSecret: (id) => secrets.get(id),
+      health,
+      now: () => 1_000,
+      sleep: async () => undefined,
+    });
+    return { router, health, providers: full, secrets };
+  }
+
+  it('reports actionable error when no provider has a model for the expert', async () => {
+    const h = harnessWith([
+      { defaultModel: undefined, workloadModels: { dev: 'dev-model' } },
+    ]);
+    h.secrets.set('p1', 'secret');
+    await expect(h.router.execute('project_lead', async () => 'x')).rejects.toThrow(
+      /未为知识治理\(project_lead\)专家配置模型/,
+    );
+  });
+
+  it('reports missing credential when all enabled providers lack secrets', async () => {
+    const h = harnessWith([{ defaultModel: 'm' }, { defaultModel: 'm' }]);
+    // 不为任何 provider 设置 secret -> resolveSecret 返回 undefined。
+    await expect(h.router.execute('dev', async () => 'x')).rejects.toThrow(/缺少 API Key/);
+  });
+
+  it('reports no enabled provider when all are disabled', async () => {
+    const h = harnessWith([{ enabled: false, defaultModel: 'm' }]);
+    h.secrets.set('p1', 'secret');
+    await expect(h.router.execute('dev', async () => 'x')).rejects.toThrow(/尚未配置或启用任何 AI 服务商/);
+  });
+
+  it('keeps generic unavailable message when authentication-open excludes the provider', async () => {
+    const h = harnessWith([{ defaultModel: 'm' }]);
+    h.secrets.set('p1', 'secret');
+    h.health.upsert({
+      providerId: 'p1',
+      routeId: 'provider:authentication',
+      state: 'open',
+      consecutiveFailures: 1,
+      cooldownUntil: undefined,
+      lastFailureKind: 'authentication',
+      updatedAt: 0,
+    });
+    await expect(h.router.execute('dev', async () => 'x')).rejects.toThrow(/所有已配置 AI 服务暂时不可用/);
+  });
+});
+
 describe('classifyProviderFailure', () => {
   it('classifies by status and message', () => {
     expect(classifyProviderFailure({ status: 401, message: '' })).toBe('authentication');

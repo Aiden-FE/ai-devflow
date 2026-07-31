@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase, createRepositories, type DatabaseSync } from '@ai-devflow/persistence';
@@ -62,6 +62,9 @@ describe('knowledge deposition gate', () => {
       candidateKnowledge?: Array<{ candidateIndex: number; knowledgeId: string }>;
       assessment?: import('@ai-devflow/core').KnowledgeAssessment;
       sourcePath?: string;
+      extraDocuments?: Array<{ path: string; content: string }>;
+      skipTaskChangelog?: boolean;
+      assessmentOverride?: import('@ai-devflow/core').KnowledgeAssessment;
     } = {},
   ) {
     const repos = createRepositories(db2);
@@ -94,9 +97,15 @@ related:
 `);
           const indexPath = join(req.cwd, 'docs/knowledge/feature/index.md');
           writeFileSync(indexPath, readFileSync(indexPath, 'utf8').replace('related: []', 'related:\n  - feature:deposited'));
-          const taskDocs = join(req.cwd, 'docs/iterations/1.0/tasks/t1');
-          mkdirSync(taskDocs, { recursive: true });
-          writeFileSync(join(taskDocs, 'CHANGELOG.md'), '# Task t1 Changelog\n\n- Deposited feature:deposited\n');
+          if (!deposition.skipTaskChangelog) {
+            const taskDocs = join(req.cwd, 'docs/iterations/1.0/tasks/t1');
+            mkdirSync(taskDocs, { recursive: true });
+            writeFileSync(join(taskDocs, 'CHANGELOG.md'), '# Task t1 Changelog\n\n- Deposited feature:deposited\n');
+          }
+          for (const doc of deposition.extraDocuments ?? []) {
+            mkdirSync(join(req.cwd, join(doc.path).split('/').slice(0, -1).join('/')), { recursive: true });
+            writeFileSync(join(req.cwd, doc.path), doc.content);
+          }
         }
         const payload = req.resultKind === 'knowledge_deposition'
           ? {
@@ -104,11 +113,12 @@ related:
               changedPaths: [
                 'docs/knowledge/feature/deposited.md',
                 'docs/knowledge/feature/index.md',
-                'docs/iterations/1.0/tasks/t1/CHANGELOG.md',
+                ...(deposition.skipTaskChangelog ? [] : ['docs/iterations/1.0/tasks/t1/CHANGELOG.md']),
+                ...(deposition.extraDocuments ?? []).map((doc) => doc.path),
               ],
               knowledgeIds: deposition.knowledgeIds ?? ['feature:deposited'],
               candidateKnowledge: deposition.candidateKnowledge ?? [{ candidateIndex: 0, knowledgeId: 'feature:deposited' }],
-              assessment: deposition.assessment ?? { verdict: 'valuable' as const, candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }] },
+              assessment: deposition.assessmentOverride ?? deposition.assessment ?? { verdict: 'valuable' as const, candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }] },
             }
           : undefined;
         const events: AgentEvent[] = [{ type: 'done', summary: 'ok', result: payload, t: 0 }];
@@ -439,7 +449,8 @@ related:
 
     await orch.start('t1');
 
-    expect(repos.tasks.get('t1')?.status).toBe('testing');
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.tasks.get('t1')?.pausedFrom).toBe('testing');
     expect(repos.knowledgeDepositions.getLatestByTask('t1')).toMatchObject({ state: 'failed', gatePassed: false });
   });
 
@@ -491,6 +502,328 @@ related:
     expect(execFileSync('git', [
       'show', 'ai-devflow-sprint/1.0:docs/knowledge/feature/deposited.md',
     ], { cwd: repo2, encoding: 'utf8' })).toContain('feature:deposited');
+  });
+
+  it('deposits valuable knowledge when the task branch predates default-branch initialization', async () => {
+    const assessment = {
+      verdict: 'valuable' as const,
+      candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }],
+    };
+    const { orch, repos, depositionRequests } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: assessment,
+          },
+          t: 0,
+        }],
+      },
+      { assessment },
+    );
+    // 任务/迭代分支先于知识库初始化存在：先创建分支与任务 worktree，再在默认分支初始化知识库。
+    shGit(repo2, ['branch', 'ai-devflow-sprint/1.0', 'main']);
+    const taskWorktree = join(wtDir2, 'stale-task');
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'ai-devflow/t1', taskWorktree, 'ai-devflow-sprint/1.0'], { cwd: repo2 });
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    repos.tasks.insert(makeTask({ worktreePath: taskWorktree }));
+
+    await orch.start('t1');
+
+    expect(repos.tasks.get('t1')?.status).toBe('in_review');
+    expect(repos.knowledgeDepositions.getLatestByTask('t1')).toMatchObject({
+      verdict: 'valuable',
+      state: 'succeeded',
+      gatePassed: true,
+    });
+    expect(depositionRequests.filter((request) => request.resultKind === 'knowledge_deposition')).toHaveLength(1);
+    const texts = repos.taskMessages.listByTask('t1').map((m) => m.text ?? '');
+    expect(texts).toEqual(expect.arrayContaining([
+      expect.stringContaining('正在由项目负责人沉淀知识并执行知识门禁'),
+      expect.stringContaining('知识沉淀门禁通过，正在合并任务分支'),
+    ]));
+    expect(execFileSync('git', [
+      'show', 'ai-devflow-sprint/1.0:docs/knowledge/index.md',
+    ], { cwd: repo2, encoding: 'utf8' })).toBeTruthy();
+    expect(execFileSync('git', [
+      'show', 'ai-devflow-sprint/1.0:docs/knowledge/feature/deposited.md',
+    ], { cwd: repo2, encoding: 'utf8' })).toContain('feature:deposited');
+  });
+
+  it('still awaits initialization when the default branch itself lacks a knowledge base', async () => {
+    const assessment = {
+      verdict: 'valuable' as const,
+      candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }],
+    };
+    const { orch, repos } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: assessment,
+          },
+          t: 0,
+        }],
+      },
+      { assessment },
+    );
+    repos.tasks.insert(makeTask());
+
+    await orch.start('t1');
+
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.knowledgeDepositions.getLatestByTask('t1')).toMatchObject({
+      verdict: 'valuable',
+      state: 'awaiting_initialization',
+    });
+  });
+
+  it('tells project_lead exactly which task CHANGELOG to update and fails visibly when it is missing', async () => {
+    const { orch, repos, depositionRequests } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: {
+              verdict: 'valuable' as const,
+              candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }],
+            },
+          },
+          t: 0,
+        }],
+      },
+      { skipTaskChangelog: true },
+    );
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    repos.tasks.insert(makeTask());
+
+    await orch.start('t1');
+
+    const depRequest = depositionRequests.find((req) => req.resultKind === 'knowledge_deposition');
+    expect(depRequest?.prompt).toContain('必须更新任务 CHANGELOG：docs/iterations/1.0/tasks/t1/CHANGELOG.md');
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.tasks.get('t1')?.pausedFrom).toBe('testing');
+    const dep = repos.knowledgeDepositions.getLatestByTask('t1');
+    expect(dep).toMatchObject({ verdict: 'valuable', state: 'failed', gatePassed: false });
+    expect(JSON.parse(dep!.diagnosticsJson)).toEqual(
+      expect.arrayContaining([expect.stringContaining('docs/iterations/1.0/tasks/t1/CHANGELOG.md')]),
+    );
+  });
+
+  it('syncs the default-branch knowledge base into a stale task worktree before retrieval', async () => {
+    const repos = createRepositories(db2);
+    repos.projects.insert({ id: 'p', name: 'P', path: repo2, defaultBranch: 'main', createdAt: 1, updatedAt: 1, settings: {} });
+    repos.iterations.insert({ id: 'it', projectId: 'p', name: 'I', version: '1.0', status: 'active', createdAt: 1 });
+    repos.requirements.insert({ id: 'req', iterationId: 'it', title: 'R', description: '', priority: 'medium', acceptance: 'acc', createdAt: 1, archived: false });
+    // 任务分支先于知识库初始化存在。
+    shGit(repo2, ['branch', 'ai-devflow/t1']);
+    const wt = join(wtDir2, 't1');
+    shGit(repo2, ['worktree', 'add', wt, 'ai-devflow/t1']);
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    const coordinator = new KnowledgeCoordinator({
+      repos,
+      runner: { async verifyRuntime() { return { version: '', entry: '' }; }, async run() { throw new Error('unused'); } },
+      knowledge,
+      worktreesBaseDir: wtDir2,
+    });
+    const task = makeTask();
+    repos.tasks.insert(task);
+    repos.executions.insert({ id: 'e1', taskId: task.id, attempt: 1, startedAt: 1, status: 'running' });
+
+    const manifest = await coordinator.prepareTaskExecution({
+      task,
+      project: { id: 'p', path: repo2, defaultBranch: 'main' },
+      executionId: 'e1',
+      expert: 'dev',
+      stage: 'review',
+      cwd: wt,
+    });
+
+    expect(existsSync(join(wt, 'docs/knowledge/index.md'))).toBe(true);
+    expect(manifest.state).not.toBe('not_initialized');
+  });
+
+  it('treats a mismatched project_lead assessment echo as a diagnostic, not a gate failure', async () => {
+    const assessment = {
+      verdict: 'valuable' as const,
+      candidates: [{ type: 'feature' as const, summary: 's', evidence: ['x.ts'], reuseScenario: 'r' }],
+    };
+    const { orch, repos } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: assessment,
+          },
+          t: 0,
+        }],
+      },
+      {
+        assessment,
+        assessmentOverride: {
+          verdict: 'valuable' as const,
+          candidates: [{ type: 'feature' as const, summary: 'reworded by project_lead', evidence: ['x.ts'], reuseScenario: 'r' }],
+        },
+      },
+    );
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    repos.tasks.insert(makeTask());
+
+    await orch.start('t1');
+
+    expect(repos.tasks.get('t1')?.status).toBe('in_review');
+    const dep = repos.knowledgeDepositions.getLatestByTask('t1');
+    expect(dep).toMatchObject({ verdict: 'valuable', state: 'succeeded', gatePassed: true });
+    expect(JSON.parse(dep!.diagnosticsJson)).toEqual(
+      expect.arrayContaining([expect.stringContaining('assessment 与审查候选不一致')]),
+    );
+  });
+
+  it('ignores an invalid reviewer suggestedTarget instead of stalling deposition', async () => {
+    const assessment = {
+      verdict: 'valuable' as const,
+      candidates: [{
+        type: 'feature' as const,
+        summary: 's',
+        evidence: ['x.ts'],
+        reuseScenario: 'r',
+        suggestedTarget: 'knowledges/context/development/',
+      }],
+    };
+    const { orch, repos } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: assessment,
+          },
+          t: 0,
+        }],
+      },
+      { assessment },
+    );
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    repos.tasks.insert(makeTask());
+
+    await orch.start('t1');
+
+    expect(repos.tasks.get('t1')?.status).toBe('in_review');
+    const dep = repos.knowledgeDepositions.getLatestByTask('t1');
+    expect(dep).toMatchObject({ verdict: 'valuable', state: 'succeeded', gatePassed: true });
+    expect(JSON.parse(dep!.diagnosticsJson)).toEqual(
+      expect.arrayContaining([expect.stringContaining('建议目标不是有效知识 ID')]),
+    );
+  });
+
+  it('pauses visibly when deposition ignores a valid suggestedTarget', async () => {
+    const assessment = {
+      verdict: 'valuable' as const,
+      candidates: [{
+        type: 'feature' as const,
+        summary: 's',
+        evidence: ['x.ts'],
+        reuseScenario: 'r',
+        suggestedTarget: 'feature:other',
+      }],
+    };
+    const { orch, repos } = build(
+      () => [{ type: 'done', summary: 'dev ok', t: 0 }],
+      (r, depRunner) => new KnowledgeCoordinator({
+        repos: r, runner: depRunner, knowledge: new ProjectKnowledgeService(), worktreesBaseDir: wtDir2,
+      }),
+      {
+        testExpertEvents: () => [{
+          type: 'done', summary: 'ok\nREVIEW_VERDICT: PASS',
+          result: {
+            kind: 'task_review',
+            review: { pass: true, summary: 'REVIEW_VERDICT: PASS' },
+            knowledgeAssessment: assessment,
+          },
+          t: 0,
+        }],
+      },
+      {
+        assessment,
+        extraDocuments: [{
+          path: 'docs/knowledge/feature/other.md',
+          content: `---
+id: feature:other
+type: feature
+status: active
+owner: project
+updated: 2026-07-28
+confidence: 0.9
+sources:
+  - README.md
+related:
+  - feature:index
+---
+
+# Other
+`,
+        }],
+      },
+    );
+    const knowledge = new ProjectKnowledgeService();
+    await knowledge.initializeKnowledge({ repoPath: repo2, date: '2026-07-28' });
+    shGit(repo2, ['add', '.']);
+    shGit(repo2, ['commit', '-q', '-m', 'knowledge']);
+    repos.tasks.insert(makeTask());
+
+    await orch.start('t1');
+
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.tasks.get('t1')?.pausedFrom).toBe('testing');
+    const dep = repos.knowledgeDepositions.getLatestByTask('t1');
+    expect(dep).toMatchObject({ verdict: 'valuable', state: 'failed', gatePassed: false });
+    expect(JSON.parse(dep!.diagnosticsJson)).toEqual(
+      expect.arrayContaining([expect.stringContaining('未映射到建议知识 ID')]),
+    );
   });
 
   it('keeps valuable work in testing until project_lead deposition validates', async () => {
@@ -578,7 +911,8 @@ related:
 
     await orch.start('t1');
 
-    expect(repos.tasks.get('t1')?.status).toBe('testing');
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.tasks.get('t1')?.pausedFrom).toBe('testing');
     const row = repos.knowledgeDepositions.getLatestByTask('t1');
     expect(row?.state).toBe('failed');
     expect(JSON.parse(row!.diagnosticsJson).join(' ')).toMatch(/候选|知识 ID/);
@@ -618,7 +952,8 @@ related:
 
     await orch.start('t1');
 
-    expect(repos.tasks.get('t1')?.status).toBe('testing');
+    expect(repos.tasks.get('t1')?.status).toBe('awaiting_input');
+    expect(repos.tasks.get('t1')?.pausedFrom).toBe('testing');
     const row = repos.knowledgeDepositions.getLatestByTask('t1');
     expect(row?.state).toBe('failed');
     expect(JSON.parse(row!.diagnosticsJson).join(' ')).toMatch(/adr|ADR|候选/);
