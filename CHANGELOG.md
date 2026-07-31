@@ -69,6 +69,7 @@ GitHub Release 正文与本文件对应小节保持一致。
 - **agents**：共享技能注册池与跨角色引用支持（11b11c8）
 
 ### 问题修复
+- **desktop**：exclude dotfiles from staged Pi profiles to match packaged runtime（1fddc1d）
 - **desktop**：drain pending ai:chat handlers in tests to avoid closed-DB races（327aa1a）
 - **scheduler**：pause on review finalization failures and classify review contract failures（ceb5a2f）
 - **scheduler**：exempt runtime scaffolding from knowledge and worktree commits（a96c647）
