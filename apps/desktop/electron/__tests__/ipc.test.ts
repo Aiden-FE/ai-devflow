@@ -34,7 +34,7 @@ import { KnowledgeCoordinator, Orchestrator } from '@ai-devflow/scheduler';
 import { ProjectKnowledgeService } from '@ai-devflow/knowledge';
 import { TimeoutEngine, WebhookSender, NullNotifier } from '@ai-devflow/notifications';
 import { encryptSecret, decryptSecret } from '../credentials.js';
-import { registerIpc, deriveProjectName } from '../ipc.js';
+import { registerIpc, deriveProjectName, waitForPendingAiChats } from '../ipc.js';
 import type { Services } from '../services.js';
 import type { Updater } from '../updater.js';
 import type { StreamEvent, AiStreamEvent } from '../api.js';
@@ -154,8 +154,10 @@ beforeEach(() => {
   registerIpc(services, (e) => sent.push(e), (e) => sentAi.push(e));
 });
 
-afterEach(() => {
+afterEach(async () => {
   services.timeoutEngine.stop();
+  // 等待所有 fire-and-forget 的 ai:chat 处理器结束，避免关闭 DB 后仍有异步写入。
+  await waitForPendingAiChats();
   try { db.close(); } catch { /* */ }
   rmSync(workdir, { recursive: true, force: true });
 });
@@ -543,8 +545,8 @@ describe('typed IPC wiring', () => {
       defaultModel: 'gpt-x', workloadModels: {}, models: [], baseURL: '',
     } as never);
     sendEvent('ai', 'chat', { sessionId: 's1', messages: [{ role: 'user', content: '做一个官网' }], mode: 'requirement', projectId: 'chat-project', projectPath: workdir });
-    // fakeExecutor 返回 'hello'；等微任务让 async 处理器完成
-    await new Promise((r) => setTimeout(r, 10));
+    // fakeExecutor 返回 'hello'；等待异步处理器完成（条件等待，避免固定 sleep 在慢机器上不够）
+    await waitForPendingAiChats();
     const types = sentAi.map((e) => e.type);
     expect(types).toContain('done');
     const done = sentAi.find((e) => e.type === 'done') as { fullText: string } | undefined;
@@ -576,13 +578,17 @@ describe('typed IPC wiring', () => {
       projectId: 'cancel-project',
       projectPath: workdir,
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    // 等 executor 真正启动（捕获 signal/ask）后再取消，避免固定 sleep 竞态。
+    await vi.waitFor(() => {
+      expect(capturedSignal).toBeDefined();
+      expect(capturedAsk).toBeDefined();
+    });
     sendEvent('ai', 'cancel', { sessionId: 'cancel-session' });
     const lateAnswerSend = vi.fn(() => true);
     capturedAsk?.('late-tool', [], lateAnswerSend);
     sendEvent('ai', 'answer', { sessionId: 'cancel-session', toolUseId: 'late-tool', answers: [] });
     resolveChat('late result');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForPendingAiChats();
 
     expect(capturedSignal?.aborted).toBe(true);
     expect(lateAnswerSend).not.toHaveBeenCalled();
@@ -603,7 +609,7 @@ describe('typed IPC wiring', () => {
       projectId: 'not-registered',
       projectPath: join(workdir, 'not-registered'),
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForPendingAiChats();
 
     expect(aiRequests).toEqual([]);
     expect(sentAi).toContainEqual(expect.objectContaining({
@@ -645,7 +651,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       projectId: 'p',
       projectPath: workdir,
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForPendingAiChats();
     sendEvent('ai', 'chat', {
       sessionId: 'knowledge-task-chat',
       messages: [{ role: 'user', content: '拆解登录任务' }],
@@ -653,7 +659,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       projectId: 'p',
       projectPath: workdir,
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await waitForPendingAiChats();
 
     const retrievals = db.prepare(
       'SELECT expert_key, stage, state, read_evidence_json FROM knowledge_retrievals WHERE project_id=? ORDER BY created_at',
@@ -704,7 +710,7 @@ PROJECT KNOWLEDGE BODY: existing login uses session cookies.
       projectId: 'ux-project',
       projectPath: workdir,
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForPendingAiChats();
 
     const uxRetrieval = db.prepare(
       "SELECT state FROM knowledge_retrievals WHERE project_id=? AND stage='ux_consult'",

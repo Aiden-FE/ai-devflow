@@ -27,6 +27,12 @@ const channel = (ns: string, method: string) => `ai-devflow:${ns}:${method}`;
 
 // 问答待答：sessionId -> { toolUseId, send }。ai:answer 回灌答案到对应子进程。
 const pendingAsks = new Map<string, { toolUseId: string; send: (msg: unknown) => boolean }>();
+// 进行中的 ai:chat fire-and-forget 异步处理器（ipcMain.on 不会 await 它们）。
+// 测试/关停可用 waitForPendingAiChats() 等待完成，避免关闭 DB 后仍有异步写入等竞态。
+const pendingAiChatRuns = new Set<Promise<void>>();
+export function waitForPendingAiChats(): Promise<void> {
+  return Promise.allSettled([...pendingAiChatRuns]).then(() => undefined);
+}
 
 const USAGE_STATUSES = new Set<ProviderCallStatus>(['running', 'succeeded', 'failed', 'canceled', 'interrupted']);
 const USAGE_SOURCES = new Set<ProviderCallSource>([
@@ -685,7 +691,8 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
   ipcMain.handle(channel('updates', 'status'), () => updater.status());
 
   // ---- AI 沟通：流式对话 + 结构化草稿（任务 / 需求） ----
-  ipcMain.on('ai-devflow:ai:chat', async (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; projectId?: string }) => {
+  ipcMain.on('ai-devflow:ai:chat', (_e, payload: { sessionId: string; messages: AiChatMessage[]; mode?: 'task' | 'requirement' | 'task_proposal'; context?: string; projectPath?: string; projectId?: string }) => {
+    const run = (async () => {
     if (!services.piAi) {
       sendAi({ type: 'error', sessionId: payload.sessionId, error: '应用运行组件未就绪' });
       return;
@@ -823,6 +830,10 @@ export function registerIpc(services: Services, send: (e: StreamEvent) => void, 
     } finally {
       if (activeAiChats.get(payload.sessionId) === controller) activeAiChats.delete(payload.sessionId);
     }
+    })();
+    // 跟踪 fire-and-forget 异步处理器：吞掉已内部处理的 rejection，并在完成后移出集合。
+    pendingAiChatRuns.add(run);
+    run.catch(() => {}).finally(() => pendingAiChatRuns.delete(run));
   });
   ipcMain.on('ai-devflow:ai:cancel', (_e, payload: { sessionId: string }) => {
     activeAiChats.get(payload.sessionId)?.abort();
